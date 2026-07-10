@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(./run.sh:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(uv venv:*)",
+      "Bash(uv pip:*)",
+      "Bash(adb devices:*)",
+      "Bash(adb -s :* shell getprop:*)",
+      "Bash(adb -s :* shell pm list:*)",
+      "Bash(adb -s :* shell pm path:*)",
+      "Bash(adb -s :* shell ps:*)",
+      "Bash(adb -s :* shell dumpsys:*)",
+      "Bash(adb -s :* shell screenrecord --help:*)",
+      "Bash(adb -s :* shell appops get:*)",
+      "Bash(adb -s :* logcat -c)",
+      "Bash(pgrep:*)",
+      "Bash(pkill -f logcat_viewer)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(ls:*)",
+      "Bash(file:*)",
+      "Bash(du:*)"
+    ],
+    "ask": [
+      "Bash(adb -s :* shell appops set:*)",
+      "Bash(adb -s :* shell settings put:*)",
+      "Bash(adb -s :* shell am force-stop:*)",
+      "Bash(adb -s :* shell kill:*)",
+      "Bash(adb -s :* shell rm:*)",
+      "Bash(adb -s :* uninstall:*)",
+      "Bash(adb -s :* install:*)"
+    ],
+    "deny": []
+  }
+}

@@ -1,0 +1,4 @@
+PyQt6>=6.6
+# Optional: enables the low-latency H.264 screen mirror (PyAV / ffmpeg).
+# Without it the mirror still works via the screencap poller.
+av>=11
