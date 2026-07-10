@@ -14,8 +14,8 @@ import subprocess
 import time
 
 from PyQt6.QtCore import QProcess, QRect, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QPainter, QPen
-from PyQt6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
+from PyQt6.QtWidgets import QDockWidget, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 # Android keyevent codes.
 KEY_BACK, KEY_HOME, KEY_RECENTS = 4, 3, 187
@@ -470,6 +470,7 @@ class MirrorView(QWidget):
     failed = pyqtSignal(str)
     apksDropped = pyqtSignal(list)
     captured = pyqtSignal(bool, str, str)  # screenshot/recording: ok, message, directory
+    fullscreen_changed = pyqtSignal(bool)
 
     def __init__(self, adb: str, parent=None):
         super().__init__(parent)
@@ -482,6 +483,10 @@ class MirrorView(QWidget):
         self._last_ts = 0.0
         self._shot_worker: ScreenshotWorker | None = None
         self._rec_worker: RecordWorker | None = None
+        self._dock: QDockWidget | None = None
+        self._fs_placeholder: QWidget | None = None
+        self._in_fullscreen = False
+        self._fs_esc: QShortcut | None = None
         self.setMinimumWidth(240)
 
         self._overlay_timer = QTimer(self)
@@ -510,16 +515,19 @@ class MirrorView(QWidget):
         self.shot_btn.setToolTip("Save a screenshot to ~/Downloads")
         self.rec_btn = QPushButton("⏺ Rec")
         self.rec_btn.setToolTip("Record the screen to an MP4 in ~/Downloads")
+        self.fullscreen_btn = QPushButton("⛶")
+        self.fullscreen_btn.setToolTip("Full screen mirror (Esc to exit)")
         self.scrcpy_btn = QPushButton("⤢ scrcpy")
         self.scrcpy_btn.setToolTip("Open full-quality interactive mirror (scrcpy)")
         for b in (self.back_btn, self.home_btn, self.recents_btn,
-                  self.shot_btn, self.rec_btn, self.scrcpy_btn):
+                  self.shot_btn, self.rec_btn, self.fullscreen_btn, self.scrcpy_btn):
             b.setObjectName("toggle")
         self.back_btn.clicked.connect(lambda: self._key(KEY_BACK))
         self.home_btn.clicked.connect(lambda: self._key(KEY_HOME))
         self.recents_btn.clicked.connect(lambda: self._key(KEY_RECENTS))
         self.shot_btn.clicked.connect(self.screenshot)
         self.rec_btn.clicked.connect(self.toggle_record)
+        self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
         self.scrcpy_btn.clicked.connect(self._launch_scrcpy)
         self.scrcpy_btn.setEnabled(shutil.which("scrcpy") is not None)
         bar.addWidget(self.back_btn)
@@ -528,8 +536,72 @@ class MirrorView(QWidget):
         bar.addWidget(self.shot_btn)
         bar.addWidget(self.rec_btn)
         bar.addStretch(1)
+        bar.addWidget(self.fullscreen_btn)
         bar.addWidget(self.scrcpy_btn)
         root.addLayout(bar)
+
+    def bind_dock(self, dock: QDockWidget):
+        """Remember the dock panel so the mirror can pop out to full screen."""
+        self._dock = dock
+
+    def is_fullscreen(self) -> bool:
+        return self._in_fullscreen
+
+    def mirror_running(self) -> bool:
+        """True while a device session is active (capture workers may be running)."""
+        return self._serial is not None and bool(self._workers or self._h264)
+
+    def toggle_fullscreen(self):
+        if self.is_fullscreen():
+            self.exit_fullscreen()
+        else:
+            self.enter_fullscreen()
+
+    def enter_fullscreen(self):
+        if not self._dock or self.is_fullscreen():
+            return
+        self._fs_placeholder = QWidget()
+        self._dock.setWidget(self._fs_placeholder)
+        self.setWindowTitle("Screen Mirror")
+        self.setWindowFlags(Qt.WindowType.Window)
+        self._fs_esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self,
+                                 activated=self.exit_fullscreen)
+        self.fullscreen_btn.setText("⛶ Exit")
+        self.fullscreen_btn.setToolTip("Exit full screen (Esc)")
+        self._in_fullscreen = True
+        self.showFullScreen()
+        self.raise_()
+        self.activateWindow()
+        self.fullscreen_changed.emit(True)
+
+    def exit_fullscreen(self):
+        if not self.is_fullscreen() or not self._dock:
+            return
+        self._in_fullscreen = False
+        self.hide()
+        self.setWindowFlags(Qt.WindowType.Widget)
+        if self._fs_esc is not None:
+            self._fs_esc.deleteLater()
+            self._fs_esc = None
+        self._dock.setWidget(self)
+        self._fs_placeholder = None
+        self.fullscreen_btn.setText("⛶")
+        self.fullscreen_btn.setToolTip("Full screen mirror (Esc to exit)")
+        self.show()
+        self.fullscreen_changed.emit(False)
+
+    def keyPressEvent(self, event):
+        if self.is_fullscreen() and event.key() == Qt.Key.Key_Escape:
+            self.exit_fullscreen()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if self.is_fullscreen():
+            self.exit_fullscreen()
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     # --- lifecycle ---------------------------------------------------------
     def start(self, serial: str):
@@ -541,6 +613,8 @@ class MirrorView(QWidget):
         self._start_capture()
 
     def stop(self):
+        if self.is_fullscreen():
+            self.exit_fullscreen()
         # Finalize an in-flight recording so the MP4 isn't left truncated.
         if self._rec_worker is not None:
             self._rec_worker.stop()

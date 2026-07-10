@@ -314,6 +314,7 @@ class MainWindow(QMainWindow):
         self.mirror_dock = QDockWidget("Screen", self)
         self.mirror_dock.setObjectName("MirrorDock")
         self.mirror_dock.setWidget(self.mirror_view)
+        self.mirror_view.bind_dock(self.mirror_dock)
         self.mirror_dock.setAllowedAreas(
             Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.mirror_dock)
@@ -480,6 +481,7 @@ class MainWindow(QMainWindow):
 
         self.mirror_btn.toggled.connect(self.mirror_dock.setVisible)
         self.mirror_dock.visibilityChanged.connect(self._on_mirror_visibility)
+        self.mirror_view.fullscreen_changed.connect(self._on_mirror_fullscreen)
         self.mirror_view.failed.connect(lambda m: self.statusBar().showMessage(f"Mirror: {m}", 6000))
         self.mirror_view.apksDropped.connect(self.install_apks)  # drop APK on the screen to install
         self.mirror_view.captured.connect(self._on_mirror_captured)  # screenshot / recording saved
@@ -702,17 +704,32 @@ class MainWindow(QMainWindow):
 
     # --- screen mirror -----------------------------------------------------
     def _on_mirror_visibility(self, visible):
+        if not visible and self.mirror_view.is_fullscreen():
+            return  # dock hidden while mirror is popped out — not a stop request
         self.mirror_btn.blockSignals(True)
         self.mirror_btn.setChecked(visible)
         self.mirror_btn.blockSignals(False)
         if visible:
             serial = self.device_combo.currentData()
             if self.adb and serial:
-                self.mirror_view.start(serial)
+                if not self.mirror_view.mirror_running():
+                    self.mirror_view.start(serial)
             else:
                 self.mirror_dock.setVisible(False)
         else:
             self.mirror_view.stop()
+
+    def _on_mirror_fullscreen(self, on: bool):
+        # Hide the empty dock slot while the mirror is a top-level full-screen window.
+        self.mirror_dock.blockSignals(True)
+        if on:
+            self.mirror_dock.hide()
+        else:
+            self.mirror_dock.show()
+        self.mirror_dock.blockSignals(False)
+        self.mirror_btn.blockSignals(True)
+        self.mirror_btn.setChecked(True)
+        self.mirror_btn.blockSignals(False)
 
     def _mirror_device_changed(self):
         if self.mirror_dock.isVisible():
