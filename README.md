@@ -3,7 +3,9 @@
 A native-feeling macOS desktop app (Python + PyQt6) that streams **live `adb logcat`**
 and filters it like logcat — by **level, tag, PID, free text, and regex** — with live,
 as-you-type filtering over a large in-memory buffer, plus a set of device tools (install/pull APK,
-screen mirror, screenshot, screen recording).
+screen mirror, screenshot, screen recording, **mock GPS location**, HTTP intercept, SQLite database
+inspector, a **file explorer** with two-way transfer & drag-and-drop, and an **App-Manager-style app
+manager**).
 
 Standalone project — it works with **any** `adb`-visible device and app; its only external
 requirement is the `adb` binary.
@@ -47,6 +49,69 @@ Pick a device, press **Start**. Existing buffer dumps immediately, then it follo
     stays on the screen until you press **Stop**; the file is finalized cleanly by SIGINT-ing the
     on-device `screenrecord` (so the MP4 is never truncated), pulled off the device, and the device
     copy deleted. (screenrecord self-stops at the device's ~180s limit; the recording is still saved.)
+- **Mock GPS location** — the **Location** tab shows a **MapLibre** map; click the map, drag the pin,
+  search a place by name, type coordinates, or pick a preset, then hit **Enable Mock**. Works on **all
+  Android versions**: modern Android only accepts a mock fix from an app that is the selected mock
+  location app, so a tiny bundled helper APK (`android-helper/`, no UI, ~20 KB) is **auto-installed on
+  first use** and granted the mock-location app-op (`appops set … android:mock_location allow`) — no
+  manual on-device setup. The helper runs a foreground service that pushes the coordinate to the OS via
+  `LocationManager` **gps + network + fused** test providers; the coordinate only ever travels
+  Mac → device over adb (nothing from the network). **Toggle off and it removes the override *and*
+  actively reacquires the device's real GPS fix, snapping back to the real location** (given any
+  signal); it's also stopped automatically when the app closes. *(The map needs internet for tiles;
+  controls work offline.)*
+- **Database Inspector** — the **Databases** tab reads the **selected app's** SQLite databases,
+  Android-Studio style. Pick an app in the **App** box; the tab lists its databases and their tables
+  (with row counts), lets you page through rows, and run **read-only SQL**. It pulls a **snapshot** of
+  each database (plus its `-wal`/`-shm` sidecars, so WAL data is current) with `run-as … cat` and reads
+  it locally with Python's stdlib `sqlite3` — **no extra dependency**. Like Android Studio's inspector,
+  the app must be **debuggable** (or the device rooted → `su`).
+  - **Schema explorer** — databases (🛢 cylinder icon) and their tables/views (grid icon) in a tree.
+    A **connected** database shows green with its tables listed; **disconnected** shows dim. Right-click
+    a database → **Connect / Disconnect / Reconnect (fresh snapshot)**. A **filter box** searches the
+    tree by database *and* table name.
+  - **Right-click a cell → Copy value / Copy row / View value** — the View dialog shows the full cell
+    (JSON pretty-printed), handy for long text/blobs. `⌘C` copies the selected cells as TSV.
+  - **Edit a value** — double-click a cell (or right-click → *Edit value*) to change it and **Save to
+    device**. Writes go through the on-device `sqlite3` binary (which handles WAL/locking correctly —
+    never a risky file-replacement), targeted by rowid. Available on devices that ship `sqlite3`
+    (emulators, rooted, or userdebug builds); elsewhere the cell opens read-only with a clear note.
+  - **Export** — right-click a database → *Export database as .db file* saves a **self-contained**
+    copy (WAL folded in via SQLite's backup API, no sidecars). *Export CSV* saves the current result.
+  - Browsing/queries run on the local snapshot (opened `query_only`), so reads never modify the device;
+    edits are the only writes and go straight to the live DB. Hit **Refresh** for a fresh snapshot.
+- **File Explorer** — the **Files** tab is a **Windows-Explorer-style** device file browser (dark-
+  themed): a command bar (New folder / Upload / Download / Rename / Delete / Sort / View), a
+  **back / forward / up / refresh** row with a clickable **breadcrumb address bar** (click it to type
+  a raw path) and a **Search** box, plus a **Quick access / This device** navigation pane. Switch
+  between **Details** (Name / Date modified / Type / Size) and **Large icons** views. The sidebar
+  jumps to internal storage (`/sdcard`), Downloads, Pictures, `/data/local/tmp`, `/system`, device
+  root `/`, and the **selected app's private data** (`/data/data/<pkg>` via `run-as`, with a rooted
+  **Root (su)** fallback toggle). Symlinks like `/sdcard` are followed automatically.
+  - **Transfer** — **Download** pulls the selected item(s) to this Mac; **Upload** pushes file(s)
+    into the current folder; double-click a file to open it locally. Public paths use `adb
+    pull`/`push`; app-private paths stream via `run-as … cat` (pull) and `run-as … dd` (push), so no
+    root is needed for a debuggable app.
+  - **Drag & drop both ways** — drop files from Finder onto the view to upload them to the current
+    folder, or drag items out to Finder to download them.
+  - **Manage** — **New folder**, **Rename**, and **Delete** (with a confirmation prompt), plus
+    right-click **Copy device path**. Everything runs off the UI thread.
+- **App Management** — the **Apps** tab is an **[App-Manager](https://github.com/muntashirakon/AppManager)-style**
+  view of every installed package (letter-tile icons, search + **All / User / System / Disabled**
+  filter). Pick an app to see a rich detail pane:
+  - **Info** — version name/code, min/target SDK, UID, installer, first-install / last-update times,
+    data dir, code path, ABI, flags, and **APK / data / cache sizes**.
+  - **Permissions** — every requested permission with its **granted / denied** state; right-click to
+    **Grant** or **Revoke** (`pm grant`/`revoke`).
+  - **Components** — activities, services, receivers, and providers (from the manifest resolver
+    tables); right-click to **Enable / Disable / Reset** a component (`pm enable`/`disable`).
+  - **App Ops** — per-op modes (`appops get`); right-click to set **allow / deny / ignore / default /
+    foreground** (`appops set`), or add any op by name.
+  - **Signature** — the signing summary from `dumpsys package`.
+  - **Actions** — **Launch**, **Force-stop**, **Clear data**, **Enable/Disable** (freeze), **Uninstall**
+    (both with a confirmation prompt), **Extract APK** (pulls base + splits to this Mac, with an
+    *Open Folder* button), and **App Info** (opens the OS App-details screen). All device work runs
+    off the UI thread; destructive commands prompt for permission.
 - **App filter** — searchable **App** picker lists installed apps (plus sandboxed app clones running
   inside a virtualization host, which aren't OS-installed). Selecting one filters the stream to that
   app's PIDs — matching `pkg` **and** `pkg:*`, so all extra/`:child` processes are included. PIDs are
@@ -93,13 +158,17 @@ Pick a device, press **Start**. Existing buffer dumps immediately, then it follo
 ## Requirements / setup
 
 - `adb` on `PATH`, or set `$ADB`, or standard SDK path (`~/Android/sdk/platform-tools/adb`).
-- Python venv with PyQt6 (already created in `.venv`). To recreate:
+- Python venv with PyQt6 + PyQt6-WebEngine (already created in `.venv`). To recreate:
   ```bash
-  uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python PyQt6 av
-  # or, with a working system python:  python3 -m venv .venv && .venv/bin/pip install PyQt6 av
+  uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python PyQt6 PyQt6-WebEngine av
+  # or, with a working system python:  python3 -m venv .venv && .venv/bin/pip install PyQt6 PyQt6-WebEngine av
   ```
-  `av` (PyAV / ffmpeg) is optional — it enables the low-latency H.264 screen mirror; without it the
-  mirror still works via the screencap poller.
+  `PyQt6-WebEngine` renders the MapLibre map in the Location tab. `av` (PyAV / ffmpeg) is optional —
+  it enables the low-latency H.264 screen mirror; without it the mirror still works via the screencap
+  poller.
+- The mock-location helper APK ships prebuilt at `logcat_viewer/assets/mocklocation.apk`. To rebuild it
+  from source (`android-helper/`) you need the Android SDK build-tools + a JDK: `cd android-helper &&
+  ./build.sh` (uses `aapt2`/`d8`/`apksigner` directly — no Gradle).
   > Note: this Mac's Homebrew Python 3.14 has a broken `pyexpat` that breaks `pip` in venvs,
   > so the venv uses a managed Python 3.12 via `uv`.
 
@@ -117,11 +186,22 @@ logcat_viewer/
   theme.py     Fusion + dark palette + QSS stylesheet
   mirror.py    screen mirror (H.264 + screencap), screenshot, screen recording, MirrorView
   pull.py      PullWorker: pull an app's APK(s) off the device
-  ui.py        MainWindow: controls, live filter bar, table, detail pane, docks, wiring
+  mocklocation.py  mock GPS: setup worker (auto-install helper + appops), set/stop, MockLocationView
+  intercept.py     Network Intercept: built-in HTTP(S) proxy (+ optional mitmproxy), InterceptView
+  dbinspect.py     Database Inspector: list/pull an app's SQLite DBs (run-as), stdlib-sqlite reader, DatabaseView
+  files.py         File Explorer: browse/transfer/manage device files (run-as/su), drag&drop, FilesView
+  appmgr.py        App Management: list apps + inspect/manage (perms, components, app-ops, actions), AppManagerView
+  ui.py        MainWindow: controls, live filter bar, Logs/Location/Network/Databases/Files/Apps tabs, docks, wiring
   __main__.py  entry point
+  assets/      map.html (MapLibre picker) + mocklocation.apk (prebuilt helper)
+android-helper/  source + build.sh for the mock-location helper APK (LocationManager test providers)
 tests/
-  smoke.py       offscreen: parser/filters/model/UI pipeline
+  smoke.py       offscreen: parser/filters/model/UI pipeline + mock command builders
   live_check.py  drives the real adb pipeline against a device for ~3.5s
+  live_mock.py   drives the mock-location flow (auto-install → set → stop) against a device
+  live_dbinspect.py  drives the DB inspector (list → pull → read tables/rows) against a device
+  live_files.py      drives the file explorer (list → push → pull → mkdir/rename/delete) against a device
+  live_appmgr.py     drives app management (list → detail → extract APK → force-stop) against a device
 ```
 
 ## Tests
@@ -129,6 +209,10 @@ tests/
 ```bash
 QT_QPA_PLATFORM=offscreen .venv/bin/python tests/smoke.py
 QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_check.py <serial>
+QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_mock.py <serial>   # mock location, end-to-end
+QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_dbinspect.py <serial> [pkg]  # DB inspector, end-to-end
+QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_files.py <serial> [pkg]      # file explorer, end-to-end
+QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_appmgr.py <serial> [pkg]     # app management, end-to-end
 ```
 
 ## Development
@@ -141,4 +225,5 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_check.py <serial>
 
 ## Not built (easy follow-ons)
 
-Mock location, export to file, saved/named filter presets, custom highlight rules. Say the word.
+Export to file, saved/named filter presets, custom highlight rules, GPX route playback for the mock
+location. Say the word.

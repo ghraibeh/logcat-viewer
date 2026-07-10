@@ -1,4 +1,11 @@
 PyQt6>=6.6
+# Required: renders the MapLibre map in the Location (mock GPS) tab.
+PyQt6-WebEngine>=6.6
 # Optional: enables the low-latency H.264 screen mirror (PyAV / ffmpeg).
 # Without it the mirror still works via the screencap poller.
 av>=11
+# Optional: the Network Intercept tab detects a `mitmdump` binary on PATH to
+# decrypt HTTPS. Not a Python import — install separately (brew install mitmproxy
+# / pipx install mitmproxy). Without it, intercept still captures HTTP + HTTPS
+# metadata via its built-in proxy.
+# mitmproxy

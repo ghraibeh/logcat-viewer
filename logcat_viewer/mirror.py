@@ -161,6 +161,20 @@ class H264MirrorWorker(QThread):
         if not img.isNull():
             self.frame.emit(img)
 
+    def _prime_frame(self):
+        """Show the current screen instantly via a single screencap. On a static
+        screen, `screenrecord` H.264 emits no frame until the display next
+        changes (e.g. a touch) — without this the view sits on "Connecting…"."""
+        try:
+            out = subprocess.run(
+                [self._adb, "-s", self._serial, "exec-out", "screencap", "-p"],
+                capture_output=True, timeout=6).stdout
+        except (subprocess.SubprocessError, OSError):
+            return
+        img = QImage()
+        if out and img.loadFromData(out, "PNG") and not img.isNull():
+            self.frame.emit(img)
+
     def run(self):
         try:
             import av
@@ -173,6 +187,7 @@ class H264MirrorWorker(QThread):
                "--bit-rate", self._bitrate, "-"]
         self._kill_remote()   # clear any straggler holding the encoder
         self.msleep(120)      # let the encoder free before we grab it
+        self._prime_frame()   # paint the current screen at once (H.264 may stall until a redraw)
         total = 0
         try:
             while self._run:

@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QTableView,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +38,11 @@ from . import adb as adblib
 from . import apps as applib
 from .delegates import LevelBadgeDelegate, MessageDelegate, WRAP_FLAGS
 from .mirror import MirrorView
+from .mocklocation import MockLocationView
+from .intercept import InterceptView
+from .dbinspect import DatabaseView
+from .files import FilesView
+from .appmgr import AppManagerView
 from .pull import PullWorker
 from .filters import FilterSpec
 from .model import COL_MSG, COL_PID, COL_TID, COL_TIME, COL_LEVEL, COL_TAG, LogTableModel
@@ -254,9 +260,25 @@ class MainWindow(QMainWindow):
         row2.addWidget(QLabel("Exclude"))
         row2.addWidget(self.exclude_edit, 2)
         row2.addWidget(self.exclude_regex_cb)
-        tb.addLayout(row2)
 
         root.addWidget(toolbar)
+
+        # --- Tabs: Logs | Location (device row above stays shared) ----------
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+
+        logs_tab = QWidget()
+        logs_v = QVBoxLayout(logs_tab)
+        logs_v.setContentsMargins(0, 0, 0, 0)
+        logs_v.setSpacing(0)
+        # Filter bar lives inside the Logs tab (it only affects the log view).
+        filter_bar = QWidget()
+        filter_bar.setObjectName("FilterBar")
+        fb = QVBoxLayout(filter_bar)
+        fb.setContentsMargins(12, 8, 12, 8)
+        fb.setSpacing(0)
+        fb.addLayout(row2)
+        logs_v.addWidget(filter_bar)
 
         # --- Log table ------------------------------------------------------
         self.table = LogTable()
@@ -294,7 +316,7 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(COL_TID, 60)
         self.table.setColumnWidth(COL_LEVEL, 46)
         self.table.setColumnWidth(COL_TAG, 220)
-        root.addWidget(self.table, 1)
+        logs_v.addWidget(self.table, 1)
 
         # --- Detail pane (full selected line) -------------------------------
         self.detail = QPlainTextEdit()
@@ -304,8 +326,30 @@ class MainWindow(QMainWindow):
         self.detail.setFrameShape(QPlainTextEdit.Shape.NoFrame)
         self.detail.setMaximumHeight(72)
         self.detail.setPlaceholderText("Select a row to see the full line…")
-        root.addWidget(self.detail)
+        logs_v.addWidget(self.detail)
+        self.tabs.addTab(logs_tab, "Logs")
 
+        # Location tab: MapLibre map + mock-GPS controls.
+        self.mock_view = MockLocationView(self.adb or "")
+        self.tabs.addTab(self.mock_view, "Location")
+
+        # Network HTTP tab: capture the device's HTTP(S) traffic.
+        self.intercept_view = InterceptView(self.adb or "")
+        self.tabs.addTab(self.intercept_view, "Network HTTP")
+
+        # Databases tab: inspect the selected app's SQLite databases.
+        self.db_view = DatabaseView(self.adb or "")
+        self.tabs.addTab(self.db_view, "Databases")
+
+        # Files tab: browse the device filesystem + two-way transfer + drag/drop.
+        self.files_view = FilesView(self.adb or "")
+        self.tabs.addTab(self.files_view, "Files")
+
+        # Apps tab: browse installed packages + inspect/manage each one.
+        self.appmgr_view = AppManagerView(self.adb or "")
+        self.tabs.addTab(self.appmgr_view, "Apps")
+
+        root.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         self._apply_font()  # sets fonts + row height for the current size
 
@@ -486,6 +530,43 @@ class MainWindow(QMainWindow):
         self.mirror_view.apksDropped.connect(self.install_apks)  # drop APK on the screen to install
         self.mirror_view.captured.connect(self._on_mirror_captured)  # screenshot / recording saved
 
+        # Mock-location tab: keep it pointed at the selected device.
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.device_combo.activated.connect(
+            lambda *_: self.mock_view.set_serial(self.device_combo.currentData()))
+        self.mock_view.status.connect(lambda m: self.statusBar().showMessage(m, 5000))
+        self.mock_view.failed.connect(self._on_mock_failed)
+
+        # Intercept tab: keep it pointed at the selected device.
+        self.device_combo.activated.connect(
+            lambda *_: self.intercept_view.set_serial(self.device_combo.currentData()))
+        self.intercept_view.status.connect(lambda m: self.statusBar().showMessage(m, 5000))
+        self.intercept_view.failed.connect(self._on_intercept_failed)
+        self.intercept_view.saved.connect(self._on_intercept_saved)
+
+        # Databases tab: keep it pointed at the selected device (app comes from
+        # the shared App picker via select_app / _on_tab_changed).
+        self.device_combo.activated.connect(
+            lambda *_: self.db_view.set_serial(self.device_combo.currentData()))
+        self.db_view.status.connect(lambda m: self.statusBar().showMessage(m, 5000))
+        self.db_view.failed.connect(self._on_db_failed)
+        self.db_view.saved.connect(self._on_db_saved)
+
+        # Files tab: keep it pointed at the selected device (app comes from the
+        # shared App picker via select_app / _on_tab_changed).
+        self.device_combo.activated.connect(
+            lambda *_: self.files_view.set_serial(self.device_combo.currentData()))
+        self.files_view.status.connect(lambda m: self.statusBar().showMessage(m, 5000))
+        self.files_view.failed.connect(self._on_files_failed)
+        self.files_view.saved.connect(self._on_files_saved)
+
+        # Apps tab: pointed at the selected device (app follows the App picker).
+        self.device_combo.activated.connect(
+            lambda *_: self.appmgr_view.set_serial(self.device_combo.currentData()))
+        self.appmgr_view.status.connect(lambda m: self.statusBar().showMessage(m, 5000))
+        self.appmgr_view.failed.connect(self._on_appmgr_failed)
+        self.appmgr_view.saved.connect(self._on_appmgr_saved)
+
         self._app_pid_timer = QTimer(self)
         self._app_pid_timer.timeout.connect(self._refresh_app_pids)
 
@@ -550,6 +631,11 @@ class MainWindow(QMainWindow):
             self.start_btn.setEnabled(False)
             self.install_btn.setEnabled(False)
             self.pull_btn.setEnabled(False)
+            self.mock_view.set_serial(None)
+            self.intercept_view.set_serial(None)
+            self.db_view.set_serial(None)
+            self.files_view.set_serial(None)
+            self.appmgr_view.set_serial(None)
             return
         for d in devices:
             self.device_combo.addItem(d.label, d.serial)
@@ -561,6 +647,11 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(True)
         self.install_btn.setEnabled(True)
         self.pull_btn.setEnabled(True)
+        self.mock_view.set_serial(self.device_combo.currentData())
+        self.intercept_view.set_serial(self.device_combo.currentData())
+        self.db_view.set_serial(self.device_combo.currentData())
+        self.files_view.set_serial(self.device_combo.currentData())
+        self.appmgr_view.set_serial(self.device_combo.currentData())
 
     def reload_apps(self):
         """Repopulate the picker: gLite clones first (marked), then device apps.
@@ -622,6 +713,9 @@ class MainWindow(QMainWindow):
             self._app_pids = frozenset(self._resolve_pids(pkg))
             if not self._app_pid_timer.isActive():
                 self._app_pid_timer.start(APP_PID_REFRESH_MS)
+        self.db_view.set_package(pkg or None)   # the DB inspector follows the App picker
+        self.files_view.set_package(pkg or None)  # the file explorer follows it too
+        self.appmgr_view.set_package(pkg or None)  # selects that app in the Apps tab
         self.apply_filter()
 
     def pull_selected_app(self):
@@ -736,6 +830,148 @@ class MainWindow(QMainWindow):
             serial = self.device_combo.currentData()
             if self.adb and serial:
                 self.mirror_view.start(serial)
+
+    # --- mock location / intercept -----------------------------------------
+    def _on_tab_changed(self, index):
+        w = self.tabs.widget(index)
+        if w is self.mock_view:
+            self.mock_view.set_serial(self.device_combo.currentData())
+        elif w is self.intercept_view:
+            self.intercept_view.set_serial(self.device_combo.currentData())
+        elif w is self.db_view:
+            self.db_view.set_serial(self.device_combo.currentData())
+            self.db_view.set_package(self._current_app_pkg() or None)
+        elif w is self.files_view:
+            self.files_view.set_serial(self.device_combo.currentData())
+            self.files_view.set_package(self._current_app_pkg() or None)
+        elif w is self.appmgr_view:
+            self.appmgr_view.set_serial(self.device_combo.currentData())
+            self.appmgr_view.set_package(self._current_app_pkg() or None)
+
+    def _on_mock_failed(self, message):
+        self.statusBar().showMessage(f"✗ {message}", 10000)
+        box = QMessageBox(self)
+        box.setModal(False)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("Mock location")
+        box.setText(message)
+        box.show()
+
+    def _on_intercept_failed(self, message):
+        self.statusBar().showMessage(f"✗ {message}", 10000)
+        box = QMessageBox(self)
+        box.setModal(False)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("Network Intercept")
+        box.setText(message)
+        box.show()
+
+    def _on_intercept_saved(self, ok, message, directory):
+        """A captured response body finished saving."""
+        if not ok:
+            self.statusBar().showMessage(f"✗ {message}", 10000)
+            return
+        self.statusBar().showMessage(f"✓ {message}", 8000)
+        box = QMessageBox(self)
+        box.setModal(False)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Body saved")
+        box.setText(f"✓  {message}")
+        if directory:
+            open_btn = box.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.buttonClicked.connect(
+                lambda b, d=directory: QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+                if b is open_btn else None)
+        box.show()
+
+    # --- database inspector ------------------------------------------------
+    def _on_db_failed(self, message):
+        self.statusBar().showMessage(f"✗ {message}", 10000)
+        box = QMessageBox(self)
+        box.setModal(False)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Database Inspector")
+        box.setText(message)
+        box.show()
+
+    def _on_db_saved(self, ok, message, directory):
+        """A results CSV or an exported .db file finished saving."""
+        if not ok:
+            self.statusBar().showMessage(f"✗ {message}", 10000)
+            return
+        self.statusBar().showMessage(f"✓ {message}", 8000)
+        box = QMessageBox(self)
+        box.setModal(False)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Export complete")
+        box.setText(f"✓  {message}")
+        if directory:
+            open_btn = box.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.buttonClicked.connect(
+                lambda b, d=directory: QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+                if b is open_btn else None)
+        box.show()
+
+    def _on_files_failed(self, message):
+        self.statusBar().showMessage(f"✗ {message}", 10000)
+        box = QMessageBox(self)
+        box.setModal(False)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("File Explorer")
+        box.setText(message)
+        box.show()
+
+    def _on_files_saved(self, ok, message, directory):
+        """A file transfer finished. ``directory`` is a local folder for pulls
+        (Open Folder), empty for pushes (the target is on the device)."""
+        if not ok:
+            self.statusBar().showMessage(f"✗ {message}", 10000)
+            return
+        self.statusBar().showMessage(f"✓ {message}", 8000)
+        box = QMessageBox(self)
+        box.setModal(False)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Transfer complete")
+        box.setText(f"✓  {message}")
+        if directory:
+            open_btn = box.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.buttonClicked.connect(
+                lambda b, d=directory: QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+                if b is open_btn else None)
+        box.show()
+
+    def _on_appmgr_failed(self, message):
+        self.statusBar().showMessage(f"✗ {message}", 10000)
+        box = QMessageBox(self)
+        box.setModal(False)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("App Manager")
+        box.setText(message)
+        box.show()
+
+    def _on_appmgr_saved(self, ok, message, directory):
+        """An APK extraction finished. ``directory`` is the local folder holding
+        the pulled base + split APK(s)."""
+        if not ok:
+            self.statusBar().showMessage(f"✗ {message}", 10000)
+            self._on_appmgr_failed(message)
+            return
+        self.statusBar().showMessage(f"✓ {message}", 8000)
+        box = QMessageBox(self)
+        box.setModal(False)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("APK extracted")
+        box.setText(f"✓  {message}")
+        if directory:
+            open_btn = box.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.buttonClicked.connect(
+                lambda b, d=directory: QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+                if b is open_btn else None)
+        box.show()
 
     def _on_mirror_captured(self, ok, message, directory):
         """A screenshot / screen recording finished saving."""
@@ -1001,4 +1237,9 @@ class MainWindow(QMainWindow):
         if self.reader:
             self.reader.stop()
         self.mirror_view.stop()
+        self.mock_view.shutdown()
+        self.intercept_view.shutdown()   # clear the device proxy on close (critical)
+        self.db_view.shutdown()          # remove pulled DB snapshots
+        self.files_view.shutdown()       # stop transfers + remove staged temp files
+        self.appmgr_view.shutdown()      # stop app-mgr workers + remove staged APKs
         super().closeEvent(event)

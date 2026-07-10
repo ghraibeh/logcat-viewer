@@ -1,0 +1,2 @@
+# Build-time only — produces the standalone macOS .app bundle.
+pyinstaller>=6.0

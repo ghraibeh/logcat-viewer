@@ -1,0 +1,162 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>map</title>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <style>
+    html, body, #map { margin: 0; height: 100%; width: 100%; background: #1e1f22; }
+    /* Coordinate readout, bottom-left. */
+    #readout {
+      position: absolute; left: 10px; bottom: 10px; z-index: 5;
+      font: 12px/1.4 -apple-system, "SF Pro Text", system-ui, sans-serif;
+      color: #e6e6e6; background: rgba(30,31,34,0.82);
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 6px;
+      padding: 6px 9px; pointer-events: none; letter-spacing: 0.2px;
+    }
+    #readout b { color: #6cb6ff; font-weight: 600; }
+    /* Hint, top-center, fades out. */
+    #hint {
+      position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 5;
+      font: 12px -apple-system, system-ui, sans-serif; color: #cfcfcf;
+      background: rgba(30,31,34,0.82); border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 20px; padding: 5px 12px; transition: opacity 0.6s; pointer-events: none;
+    }
+    /* Place-name search, top-left. */
+    #search {
+      position: absolute; top: 10px; left: 10px; z-index: 6; width: 240px;
+      font: 13px -apple-system, system-ui, sans-serif; color: #e6e6e6;
+      background: rgba(30,31,34,0.92); border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 7px; padding: 7px 10px; outline: none;
+    }
+    #search::placeholder { color: #9aa0aa; }
+    #search:focus { border-color: #4f8cff; }
+    .maplibregl-ctrl-attrib { font-size: 10px; }
+    #err {
+      position: absolute; inset: 0; display: none; place-items: center; z-index: 10;
+      font: 13px -apple-system, system-ui, sans-serif; color: #e2554e; text-align: center;
+      padding: 24px; background: #1e1f22;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <input id="search" type="text" placeholder="Search a place, then press Enter…" autocomplete="off" />
+  <div id="hint">Click the map or drag the pin to choose a location</div>
+  <div id="readout"><b>—</b></div>
+  <div id="err">Map failed to load.<br>Check your internet connection (map tiles need it).</div>
+
+  <script>
+    // --- Qt <-> JS bridge ---------------------------------------------------
+    // JS -> Qt: we encode the picked coordinate into document.title, which Qt
+    // watches via QWebEnginePage.titleChanged. A trailing seq guarantees the
+    // title always changes so no pick is ever swallowed.
+    let _seq = 0;
+    function notify(lat, lng) {
+      document.title = "MOCKLOC:" + lat.toFixed(7) + "," + lng.toFixed(7) + "|" + (_seq++);
+    }
+    function updateReadout(lat, lng) {
+      document.getElementById("readout").innerHTML =
+        "<b>" + lat.toFixed(6) + ", " + lng.toFixed(6) + "</b>";
+    }
+
+    let map, marker;
+    const OSM_STYLE = {
+      version: 8,
+      sources: {
+        osm: {
+          type: "raster",
+          tiles: [
+            "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          ],
+          tileSize: 256,
+          attribution: "© OpenStreetMap contributors"
+        }
+      },
+      layers: [{ id: "osm", type: "raster", source: "osm" }]
+    };
+
+    try {
+      map = new maplibregl.Map({
+        container: "map",
+        style: OSM_STYLE,
+        center: [0, 20],
+        zoom: 1.4,
+        attributionControl: { compact: true }
+      });
+      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+
+      marker = new maplibregl.Marker({ color: "#e2554e", draggable: true })
+        .setLngLat([0, 20]).addTo(map);
+
+      marker.on("dragend", () => {
+        const p = marker.getLngLat();
+        updateReadout(p.lat, p.lng);
+        notify(p.lat, p.lng);
+      });
+      marker.on("drag", () => {
+        const p = marker.getLngLat();
+        updateReadout(p.lat, p.lng);
+      });
+
+      map.on("click", (e) => {
+        marker.setLngLat(e.lngLat);
+        updateReadout(e.lngLat.lat, e.lngLat.lng);
+        notify(e.lngLat.lat, e.lngLat.lng);
+      });
+
+      map.on("load", () => {
+        const h = document.getElementById("hint");
+        setTimeout(() => { h.style.opacity = "0"; }, 3500);
+      });
+      map.on("error", (e) => { console.error("map error", e && e.error); });
+    } catch (e) {
+      document.getElementById("err").style.display = "grid";
+      console.error(e);
+    }
+
+    // --- place-name search (Nominatim / OpenStreetMap) ----------------------
+    const searchBox = document.getElementById("search");
+    searchBox.addEventListener("keydown", async (ev) => {
+      if (ev.key !== "Enter") return;
+      const q = searchBox.value.trim();
+      if (!q) return;
+      searchBox.blur();
+      try {
+        const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q="
+          + encodeURIComponent(q);
+        const res = await fetch(url, { headers: { "Accept-Language": "en" } });
+        const hits = await res.json();
+        if (!hits || !hits.length) {
+          searchBox.value = ""; searchBox.placeholder = "No match — try another place";
+          return;
+        }
+        const lat = parseFloat(hits[0].lat), lng = parseFloat(hits[0].lon);
+        marker.setLngLat([lng, lat]);
+        updateReadout(lat, lng);
+        map.flyTo({ center: [lng, lat], zoom: 13, speed: 1.8 });
+        notify(lat, lng);   // adopt the found place as the selected coordinate
+      } catch (e) {
+        searchBox.placeholder = "Search failed (offline?)";
+        console.error(e);
+      }
+    });
+
+    // --- Qt -> JS -----------------------------------------------------------
+    // Called by the app to move the pin (and optionally recenter) without
+    // firing a notify() back — avoids feedback loops when the user types coords.
+    window.setLocation = function (lat, lng, recenter) {
+      if (!map || !marker) return;
+      marker.setLngLat([lng, lat]);
+      updateReadout(lat, lng);
+      if (recenter) {
+        map.flyTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 13), speed: 1.6 });
+      }
+    };
+  </script>
+</body>
+</html>

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from . import theme
@@ -10,6 +11,12 @@ from .ui import MainWindow
 
 
 def main() -> int:
+    if getattr(sys, "frozen", False):
+        import multiprocessing
+        multiprocessing.freeze_support()
+    # QtWebEngine (Location tab map) shares GL contexts with the app; this must
+    # be set before the QApplication is created.
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QApplication(sys.argv)
     app.setApplicationName("Logcat Viewer")
     theme.apply(app)

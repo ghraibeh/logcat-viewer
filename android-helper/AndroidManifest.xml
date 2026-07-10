@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Mock Location Helper for Logcat Viewer.
+
+  A tiny, UI-less helper. It exposes a single foreground Service that the Mac
+  app drives entirely over adb (am start-foreground-service, passing lat/lng as
+  string extras). The service publishes the coordinate to the OS via
+  LocationManager test providers. Nothing is received from the network; the
+  coordinate only ever comes from the tethered Mac app, which is why this is safe.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.logcatviewer.mocklocation">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="35" />
+
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Legacy: used on pre-6.0 devices; harmless (never granted) on modern ones. -->
+    <uses-permission android:name="android.permission.ACCESS_MOCK_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="Mock Location Helper"
+        android:allowBackup="false"
+        android:hasCode="true">
+        <service
+            android:name=".MockService"
+            android:exported="true"
+            android:foregroundServiceType="location" />
+    </application>
+</manifest>

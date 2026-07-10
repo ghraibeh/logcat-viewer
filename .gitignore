@@ -2,3 +2,13 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# PyInstaller output
+build/
+dist/
+packaging/staging/
+
+# Android helper build artifacts (the signed APK is committed under
+# logcat_viewer/assets/, but the intermediate build/ and keystore are not).
+android-helper/build/
+android-helper/debug.keystore

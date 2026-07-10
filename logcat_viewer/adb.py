@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 from PyQt6.QtCore import QProcess, pyqtSignal, QObject
 
+from .resources import bundled_adb
+
 # Common macOS locations for adb if it isn't on PATH.
 _FALLBACK_ADB = [
     os.path.expanduser("~/Android/sdk/platform-tools/adb"),
@@ -18,10 +20,13 @@ _FALLBACK_ADB = [
 
 
 def find_adb() -> str | None:
-    """Resolve the adb binary: $ADB, then PATH, then common SDK locations."""
+    """Resolve the adb binary: $ADB, bundled copy, PATH, then common SDK paths."""
     env = os.environ.get("ADB")
     if env and os.path.exists(env):
         return env
+    bundled = bundled_adb()
+    if bundled:
+        return bundled
     which = shutil.which("adb")
     if which:
         return which
