@@ -17,11 +17,13 @@ from PyQt6.QtCore import QProcess, QRect, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import QDockWidget, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
+from . import theme
+
 # Android keyevent codes.
 KEY_BACK, KEY_HOME, KEY_RECENTS = 4, 3, 187
 
-_OVERLAY_ACCENT = {"installing": "#4f8cff", "success": "#3fb950", "error": "#e5534b",
-                   "recording": "#e5534b", "capturing": "#4f8cff"}
+_OVERLAY_ACCENT = {"installing": theme.ACCENT, "success": theme.GREEN, "error": theme.RED,
+                   "recording": theme.RED, "capturing": theme.ACCENT}
 _OVERLAY_ICON = {"installing": "●", "success": "✓", "error": "✗",
                  "recording": "⏺", "capturing": "◉"}
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -405,7 +407,7 @@ class _ScreenCanvas(QWidget):
 
     def _paint_overlay(self, p):
         kind, text = self._overlay
-        accent = QColor(_OVERLAY_ACCENT.get(kind, "#4f8cff"))
+        accent = QColor(_OVERLAY_ACCENT.get(kind, theme.ACCENT))
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         fm = p.fontMetrics()
         m = 10
@@ -427,7 +429,7 @@ class _ScreenCanvas(QWidget):
     def _paint_drop_hint(self, p):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.fillRect(self.rect(), QColor(16, 18, 24, 150))
-        pen = QPen(QColor("#4f8cff"))
+        pen = QPen(QColor(theme.ACCENT))
         pen.setWidth(2)
         pen.setStyle(Qt.PenStyle.DashLine)
         p.setPen(pen)

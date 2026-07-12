@@ -340,7 +340,7 @@ class MainWindow(QMainWindow):
         self.exclude_regex_cb = self._regex_toggle("Treat exclude as a regular expression")
 
         self.advanced_btn = QPushButton("Advanced")
-        self.advanced_btn.setObjectName("toggle")
+        self.advanced_btn.setObjectName("advToggle")
         self.advanced_btn.setCheckable(True)
         self.advanced_btn.setToolTip("Show tag / PID / exclude filters")
         self.clear_filters_btn = QPushButton("Clear filters")

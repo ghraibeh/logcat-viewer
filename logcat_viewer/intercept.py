@@ -949,14 +949,14 @@ _C_ACCENT = QColor(ACCENT)
 ACCENT_ROLE = int(Qt.ItemDataRole.UserRole) + 1   # per-row status/scheme accent color
 
 _METHOD_COLORS = {
-    "GET": QColor("#4f8cff"),
+    "GET": QColor(ACCENT),
     "POST": QColor(GREEN),
     "PUT": QColor(AMBER),
     "PATCH": QColor(AMBER),
     "DELETE": QColor(RED),
-    "HEAD": QColor("#8b93a1"),
-    "OPTIONS": QColor("#8b93a1"),
-    "CONNECT": QColor("#8b93a1"),
+    "HEAD": QColor(TEXT_DIM),
+    "OPTIONS": QColor(TEXT_DIM),
+    "CONNECT": QColor(TEXT_DIM),
 }
 
 
