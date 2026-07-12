@@ -12,22 +12,25 @@ an ``AppManagerView`` that follows the shared device combo / App picker.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap, QFont
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint
+from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap, QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QListWidget, QListWidgetItem,
     QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QLineEdit,
     QPushButton, QComboBox, QLabel, QTabWidget, QAbstractItemView, QHeaderView,
-    QMenu, QMessageBox, QTextBrowser, QInputDialog,
+    QMenu, QMessageBox, QTextBrowser, QInputDialog, QLayout, QSizePolicy,
+    QProgressDialog,
 )
 
 from .pull import PullWorker
+from .decompile import DecompileWorker, SourceViewerWindow, decompile_root
 from .theme import TEXT, TEXT_DIM, GREEN, RED, AMBER, ACCENT
 
 # App-ops modes an app op can be set to (the values `appops set` accepts).
@@ -59,6 +62,7 @@ class AppInfo:
 class Permission:
     name: str
     granted: bool | None = None            # True/False, or None if only requested
+    runtime: bool = False                  # a changeable (dangerous) runtime permission
 
 
 @dataclass
@@ -140,6 +144,25 @@ def clear_args(serial: str, package: str) -> list[str]:
     return _sh(serial) + ["pm", "clear", package]
 
 
+def clear_cache_args(serial: str, package: str) -> list[str]:
+    """`pm clear --cache-only` — clears the cache without touching app data
+    (Android 12+/API 31; older devices reject the flag and we fall back)."""
+    return _sh(serial) + ["pm", "clear", "--cache-only", package]
+
+
+def runas_clear_cache_args(serial: str, package: str) -> list[str]:
+    """Debuggable-app fallback: `run-as <pkg> rm -rf cache code_cache`
+    (run-as runs in the app's data dir; the app recreates the dirs on demand)."""
+    return _sh(serial) + ["run-as", package, "rm", "-rf", "cache", "code_cache"]
+
+
+def su_clear_cache_args(serial: str, package: str) -> list[str]:
+    """Rooted fallback: remove the cache dirs directly via `su`."""
+    return _sh(serial) + ["su", "-c", "rm", "-rf",
+                          f"/data/data/{package}/cache",
+                          f"/data/data/{package}/code_cache"]
+
+
 def enable_args(serial: str, package: str) -> list[str]:
     return _sh(serial) + ["pm", "enable", package]
 
@@ -171,6 +194,72 @@ def app_info_args(serial: str, package: str) -> list[str]:
     return _sh(serial) + ["am", "start", "-a",
                           "android.settings.APPLICATION_DETAILS_SETTINGS",
                           "-d", f"package:{package}"]
+
+
+def unzip_list_args(serial: str, apk_path: str) -> list[str]:
+    """List an APK's entries (text) via the device's toybox ``unzip -l``."""
+    return _sh(serial) + ["unzip", "-l", apk_path]
+
+
+def unzip_extract_args(serial: str, apk_path: str, entry: str) -> list[str]:
+    """Stream a single APK entry to stdout (binary) via ``unzip -p``."""
+    return ["-s", serial, "exec-out", "unzip", "-p", apk_path, entry]
+
+
+# density buckets, best → worst; higher score wins when picking a raster icon
+_ICON_DENSITY = {"xxxhdpi": 6, "xxhdpi": 5, "xhdpi": 4, "hdpi": 3,
+                 "tvdpi": 2, "mdpi": 1, "ldpi": 0, "nodpi": 0}
+
+
+def parse_zip_entries(stdout: str) -> list[str]:
+    """The entry-name column from `unzip -l` output (last whitespace token)."""
+    entries = []
+    for line in stdout.splitlines():
+        parts = line.split()
+        if parts:
+            entries.append(parts[-1])
+    return entries
+
+
+def pick_launcher_icon(entries: list[str]) -> str | None:
+    """Choose the best *raster* launcher icon from an APK's entry list.
+
+    Prefers a real ``ic_launcher`` in the densest ``mipmap`` folder. Adaptive
+    icons (``mipmap-anydpi-v26/*.xml``) are naturally excluded by the png/webp
+    filter — those need rendering we can't do over adb, so callers fall back to
+    the drawn letter tile. Only launcher/icon-named entries are considered, so
+    we never grab an arbitrary drawable."""
+    best, best_score = None, -1
+    for e in entries:
+        el = e.lower()
+        if not (el.startswith("res/") and el.endswith((".png", ".webp"))):
+            continue
+        parts = e.split("/")
+        if len(parts) < 3:
+            continue
+        qual = parts[1].lower()                       # e.g. "mipmap-xxxhdpi"
+        stem = parts[-1].rsplit(".", 1)[0].lower()
+        if "launcher" not in stem and "icon" not in stem:
+            continue
+        if "foreground" in stem or "background" in stem:  # adaptive layers
+            continue
+        if stem == "ic_launcher":
+            score = 400
+        elif "round" in stem:
+            score = 100
+        elif "launcher" in stem:
+            score = 200
+        else:                                         # generic "*icon*"
+            score = 50
+        if qual.startswith("mipmap"):
+            score += 30
+        for dens, val in _ICON_DENSITY.items():
+            if qual.endswith(dens):
+                score += val
+                break
+        if score > best_score:
+            best, best_score = e, score
+    return best
 
 
 # --- pure parsers (Qt-free) ---------------------------------------------------
@@ -251,14 +340,17 @@ def parse_permissions(text: str) -> list[Permission]:
     `dumpsys package <pkg>` output."""
     granted: dict[str, bool] = {}
     requested: set[str] = set()
+    runtime: set[str] = set()          # perms in the "runtime permissions:" block
     mode = None
     for raw in text.splitlines():
         s = raw.strip()
         low = s.lower()
         if low.startswith("requested permissions:"):
             mode = "req"; continue
-        if low.startswith(("install permissions:", "runtime permissions:")):
-            mode = "grant"; continue
+        if low.startswith("install permissions:"):
+            mode = "install"; continue
+        if low.startswith("runtime permissions:"):
+            mode = "runtime"; continue
         if low.startswith("declared permissions:"):
             mode = None; continue
         if not s:
@@ -271,14 +363,15 @@ def parse_permissions(text: str) -> list[Permission]:
             name = s.split(":", 1)[0].strip()
             if _is_perm(name):
                 requested.add(name)
-        elif mode == "grant" and "granted=" in s:
+        elif mode in ("install", "runtime") and "granted=" in s:
             name = s.split(":", 1)[0].strip()
             if _is_perm(name):
                 g = "granted=true" in s
                 granted[name] = granted.get(name, False) or g
                 requested.add(name)
-    perms = [Permission(n, granted.get(n)) for n in sorted(requested)]
-    return perms
+                if mode == "runtime":
+                    runtime.add(name)
+    return [Permission(n, granted.get(n), n in runtime) for n in sorted(requested)]
 
 
 # Resolver-table section headers in `dumpsys package` and the AppDetail field
@@ -526,6 +619,115 @@ class AppActionWorker(QThread):
             self.done.emit(False, detail[-1] if detail else f"{self._ok_msg} failed")
 
 
+class ClearCacheWorker(QThread):
+    """Clear only an app's cache, trying the least-privileged method that works:
+    `pm clear --cache-only` (any app, modern Android) → `run-as … rm` (debuggable)
+    → rooted `su … rm`. Reports which method succeeded."""
+    done = pyqtSignal(bool, str)                 # ok, message
+
+    def __init__(self, adb, serial, package, parent=None):
+        super().__init__(parent)
+        self._adb, self._serial, self._pkg = adb, serial, package
+
+    def run(self):
+        attempts = [
+            ("pm --cache-only", clear_cache_args(self._serial, self._pkg)),
+            ("run-as", runas_clear_cache_args(self._serial, self._pkg)),
+            ("su", su_clear_cache_args(self._serial, self._pkg)),
+        ]
+        errors = []
+        for label, argv in attempts:
+            try:
+                r = subprocess.run([self._adb, *argv], capture_output=True,
+                                   text=True, timeout=60)
+            except (subprocess.SubprocessError, OSError) as exc:
+                errors.append(f"{label}: {exc}")
+                continue
+            if _op_ok(r.returncode, r.stdout):
+                self.done.emit(True, f"Cleared cache for {self._pkg} (via {label})")
+                return
+            detail = (r.stderr or r.stdout or "").strip().replace("\n", " ")
+            errors.append(f"{label}: {detail[:80] or 'failed'}")
+        self.done.emit(False, "Could not clear cache — " + "; ".join(errors))
+
+
+class BulkPermWorker(QThread):
+    """Grant or revoke a whole list of runtime permissions, one `pm` call each,
+    and report how many changed."""
+    done = pyqtSignal(bool, str)                 # ok, message
+
+    def __init__(self, adb, serial, package, perms, grant, parent=None):
+        super().__init__(parent)
+        self._adb, self._serial, self._pkg = adb, serial, package
+        self._perms, self._grant = perms, grant
+
+    def run(self):
+        verb = "grant" if self._grant else "revoke"
+        builder = grant_args if self._grant else revoke_args
+        ok_n, fails = 0, []
+        for perm in self._perms:
+            try:
+                r = subprocess.run(
+                    [self._adb, *builder(self._serial, self._pkg, perm)],
+                    capture_output=True, text=True, timeout=30)
+            except (subprocess.SubprocessError, OSError) as exc:
+                fails.append(f"{perm.rsplit('.', 1)[-1]}: {exc}")
+                continue
+            if _op_ok(r.returncode, r.stdout):
+                ok_n += 1
+            else:
+                detail = (r.stderr or r.stdout or "").strip().replace("\n", " ")
+                fails.append(f"{perm.rsplit('.', 1)[-1]}: {detail[:50] or 'failed'}")
+        if ok_n and not fails:
+            self.done.emit(True, f"{verb.title()}ed {ok_n} permission(s)")
+        elif ok_n:
+            self.done.emit(True, f"{verb.title()}ed {ok_n}, {len(fails)} failed "
+                                 f"({'; '.join(fails[:3])})")
+        else:
+            self.done.emit(False, f"Could not {verb} permissions — "
+                                  + "; ".join(fails[:4]))
+
+
+class AppIconWorker(QThread):
+    # package, result: a QImage, None (no raster icon), or "unavailable" (no unzip)
+    done = pyqtSignal(str, object)
+
+    def __init__(self, adb, serial, package, apk_path, parent=None):
+        super().__init__(parent)
+        self._adb, self._serial = adb, serial
+        self._pkg, self._apk = package, apk_path
+
+    def run(self):
+        if not self._apk:
+            self.done.emit(self._pkg, None)
+            return
+        try:
+            listing = subprocess.run(
+                [self._adb, *unzip_list_args(self._serial, self._apk)],
+                capture_output=True, text=True, timeout=15)
+        except (subprocess.SubprocessError, OSError):
+            self.done.emit(self._pkg, None)
+            return
+        if listing.returncode != 0:
+            miss = "not found" in (listing.stderr or "").lower() \
+                or "inaccessible" in (listing.stderr or "").lower()
+            self.done.emit(self._pkg, "unavailable" if miss else None)
+            return
+        entry = pick_launcher_icon(parse_zip_entries(listing.stdout))
+        if not entry:
+            self.done.emit(self._pkg, None)
+            return
+        try:
+            blob = subprocess.run(
+                [self._adb, *unzip_extract_args(self._serial, self._apk, entry)],
+                capture_output=True, timeout=20)          # binary → no text=True
+        except (subprocess.SubprocessError, OSError):
+            self.done.emit(self._pkg, None)
+            return
+        img = QImage.fromData(blob.stdout)
+        self.done.emit(self._pkg, img if not img.isNull() else None)
+
+
 def _human_bytes(n: int) -> str:
     step = 1024.0
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -578,6 +780,67 @@ _INFO_ROWS = [
 ]
 
 
+class FlowLayout(QLayout):
+    """A left-to-right layout that wraps its items to the next row when they
+    don't fit — so the action buttons stay fully visible at any window width."""
+
+    def __init__(self, parent=None, hspacing=6, vspacing=6):
+        super().__init__(parent)
+        self._items: list = []
+        self._hspace, self._vspace = hspacing, vspacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        x, y, line_h = rect.x(), rect.y(), 0
+        for item in self._items:
+            hint = item.sizeHint()
+            nx = x + hint.width() + self._hspace
+            if nx - self._hspace > rect.right() and line_h > 0:
+                x = rect.x()
+                y = y + line_h + self._vspace
+                nx = x + hint.width() + self._hspace
+                line_h = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = nx
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y()
+
+
 class AppManagerView(QWidget):
     """Installed-app browser + detail pane. Self-contained: needs only ``adb``
     + a serial (via ``set_serial``). Follows the shared App picker (``set_package``
@@ -603,7 +866,19 @@ class AppManagerView(QWidget):
         self._list_worker: AppListWorker | None = None
         self._detail_worker: AppDetailWorker | None = None
         self._action_worker: AppActionWorker | None = None
+        self._cache_worker: ClearCacheWorker | None = None
+        self._bulk_worker: BulkPermWorker | None = None
         self._pull_worker: PullWorker | None = None
+        self._decompile_worker: DecompileWorker | None = None
+        self._decompile_progress = None
+        self._viewers: list = []                 # open SourceViewerWindow refs
+        # real app icons, pulled lazily from each APK (adaptive-only → None sentinel)
+        self._app_index: dict[str, AppInfo] = {}
+        self._icon_cache: dict[str, QIcon | None] = {}
+        self._icon_inflight: set[str] = set()
+        self._icon_queue: list[str] = []
+        self._icon_workers: set[QThread] = set()
+        self._icons_disabled = False              # device has no usable `unzip`
         self._build_ui()
 
     # --- construction ------------------------------------------------------
@@ -646,6 +921,10 @@ class AppManagerView(QWidget):
         self.app_list.setObjectName("AppMgrList")
         self.app_list.setIconSize(QSize(30, 30))
         self.app_list.currentItemChanged.connect(self._on_app_selected)
+        self.app_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.app_list.customContextMenuRequested.connect(self._app_list_menu)
+        # fetch real icons only for rows scrolled into view
+        self.app_list.verticalScrollBar().valueChanged.connect(self._queue_visible_icons)
         lv.addWidget(self.app_list, 1)
 
         self.count_label = QLabel("")
@@ -664,19 +943,37 @@ class AppManagerView(QWidget):
         hv = QVBoxLayout(header)
         hv.setContentsMargins(14, 10, 14, 10)
         hv.setSpacing(6)
+
+        titlerow = QHBoxLayout()
+        titlerow.setSpacing(10)
+        self.icon_label = QLabel()
+        self.icon_label.setObjectName("AppMgrIcon")
+        self.icon_label.setFixedSize(40, 40)
+        self.icon_label.setScaledContents(True)
+        self.icon_label.hide()
+        titlerow.addWidget(self.icon_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        titlebox = QVBoxLayout()
+        titlebox.setSpacing(2)
         self.title = QLabel("Select an app")
         self.title.setObjectName("AppMgrTitle")
         self.subtitle = QLabel("")
         self.subtitle.setObjectName("AppMgrSubtitle")
         self.subtitle.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        hv.addWidget(self.title)
-        hv.addWidget(self.subtitle)
+        titlebox.addWidget(self.title)
+        titlebox.addWidget(self.subtitle)
+        titlerow.addLayout(titlebox, 1)
+        hv.addLayout(titlerow)
 
-        actions = QHBoxLayout()
-        actions.setSpacing(6)
+        actions_bar = QWidget()
+        actions = FlowLayout(actions_bar)          # wraps to a 2nd row when narrow
+        sp = actions_bar.sizePolicy()
+        sp.setHeightForWidth(True)
+        sp.setVerticalPolicy(QSizePolicy.Policy.Minimum)
+        actions_bar.setSizePolicy(sp)
         self._act_buttons: list[QPushButton] = []
         self.btn_launch = self._action_btn("Launch", self._launch)
         self.btn_stop = self._action_btn("Force-stop", self._force_stop)
+        self.btn_cache = self._action_btn("Clear cache", self._clear_cache)
         self.btn_clear = self._action_btn("Clear data", self._clear_data)
         self.btn_freeze = self._action_btn("Disable", self._toggle_enabled)
         self.btn_uninstall = self._action_btn("Uninstall", self._uninstall)
@@ -684,8 +981,7 @@ class AppManagerView(QWidget):
         self.btn_info = self._action_btn("App Info", self._open_app_info)
         for b in self._act_buttons:
             actions.addWidget(b)
-        actions.addStretch(1)
-        hv.addLayout(actions)
+        hv.addWidget(actions_bar)
         rv.addWidget(header)
 
         self.tabs = QTabWidget()
@@ -725,6 +1021,32 @@ class AppManagerView(QWidget):
         self.tabs.addTab(self.info_table, "Info")
 
     def _build_perm_tab(self):
+        wrap = QWidget()
+        lay = QVBoxLayout(wrap)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        subbar = QWidget()
+        subbar.setObjectName("AppMgrSubBar")
+        sh = QHBoxLayout(subbar)
+        sh.setContentsMargins(8, 6, 8, 6)
+        sh.setSpacing(6)
+        self.btn_grant_all = QPushButton("Grant all")
+        self.btn_grant_all.setObjectName("toggle")
+        self.btn_grant_all.setToolTip("Grant every runtime permission this app requests")
+        self.btn_grant_all.clicked.connect(lambda: self._bulk_perms(grant=True))
+        self.btn_revoke_all = QPushButton("Revoke all")
+        self.btn_revoke_all.setObjectName("toggle")
+        self.btn_revoke_all.setToolTip("Revoke every runtime permission from this app")
+        self.btn_revoke_all.clicked.connect(lambda: self._bulk_perms(grant=False))
+        hint = QLabel("Runtime permissions only")
+        hint.setObjectName("AppMgrSubtitle")
+        sh.addWidget(self.btn_grant_all)
+        sh.addWidget(self.btn_revoke_all)
+        sh.addStretch(1)
+        sh.addWidget(hint)
+        lay.addWidget(subbar)
+
         self.perm_table = QTableWidget(0, 2)
         self.perm_table.setObjectName("AppMgrPermTable")
         self.perm_table.setHorizontalHeaderLabels(["Permission", "State"])
@@ -736,7 +1058,10 @@ class AppManagerView(QWidget):
             0, QHeaderView.ResizeMode.Stretch)
         self.perm_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.perm_table.customContextMenuRequested.connect(self._perm_menu)
-        self.tabs.addTab(self.perm_table, "Permissions")
+        lay.addWidget(self.perm_table, 1)
+        self.btn_grant_all.setEnabled(False)
+        self.btn_revoke_all.setEnabled(False)
+        self.tabs.addTab(wrap, "Permissions")
 
     def _build_comp_tab(self):
         self.comp_tree = QTreeWidget()
@@ -769,6 +1094,7 @@ class AppManagerView(QWidget):
     def set_serial(self, serial: str | None):
         if serial != self._serial:
             self._serial = serial
+            self._clear_icon_state()          # APK paths (and icons) are per-device
             self._maybe_reload()
 
     def set_package(self, package: str | None):
@@ -783,6 +1109,7 @@ class AppManagerView(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._maybe_reload()
+        self._queue_visible_icons()   # rows may have been filled while hidden
 
     def _maybe_reload(self):
         if not self.isVisible():
@@ -820,6 +1147,7 @@ class AppManagerView(QWidget):
             self.failed.emit(error or "Could not list apps")
             return
         self._apps = apps
+        self._app_index = {a.package: a for a in apps}
         self._apply_filter()
         self.status.emit(f"{len(apps)} apps installed")
         if self._pending_select:
@@ -841,7 +1169,8 @@ class AppManagerView(QWidget):
                 continue
             if needle and needle not in app.package.lower():
                 continue
-            it = QListWidgetItem(app_icon(app.package), app.package)
+            cached = self._icon_cache.get(app.package)
+            it = QListWidgetItem(cached or app_icon(app.package), app.package)
             it.setData(Qt.ItemDataRole.UserRole, app)
             badges = []
             if app.system:
@@ -863,6 +1192,7 @@ class AppManagerView(QWidget):
             self.app_list.blockSignals(False)
             if not found:
                 self._current = None
+        self._queue_visible_icons()
 
     def _select_in_list(self, package: str) -> bool:
         for i in range(self.app_list.count()):
@@ -874,6 +1204,84 @@ class AppManagerView(QWidget):
                 return True
         return False
 
+    # --- app icons (lazy, per-visible-row) ---------------------------------
+    def _queue_visible_icons(self, *_):
+        """Enqueue icon fetches for the rows currently scrolled into view."""
+        if self._icons_disabled or not self.adb or not self._serial:
+            return
+        vp = self.app_list.viewport().rect()
+        for i in range(self.app_list.count()):
+            it = self.app_list.item(i)
+            if not self.app_list.visualItemRect(it).intersects(vp):
+                continue
+            app = it.data(Qt.ItemDataRole.UserRole)
+            if not app or not app.apk_path:
+                continue
+            pkg = app.package
+            if pkg in self._icon_cache or pkg in self._icon_inflight \
+                    or pkg in self._icon_queue:
+                continue
+            self._icon_queue.append(pkg)
+        self._pump_icons()
+
+    def _pump_icons(self):
+        if not self.adb or not self._serial or self._icons_disabled:
+            return
+        while len(self._icon_inflight) < 3 and self._icon_queue:
+            pkg = self._icon_queue.pop(0)
+            app = self._app_index.get(pkg)
+            if not app or not app.apk_path or pkg in self._icon_cache \
+                    or pkg in self._icon_inflight:
+                continue
+            self._icon_inflight.add(pkg)
+            w = AppIconWorker(self.adb, self._serial, pkg, app.apk_path)
+            w.done.connect(self._on_icon)
+            w.finished.connect(lambda w=w: (self._workers.discard(w),
+                                            self._icon_workers.discard(w)))
+            self._icon_workers.add(w)
+            self._workers.add(w)
+            w.start()
+
+    def _on_icon(self, package, result):
+        self._icon_inflight.discard(package)
+        if result == "unavailable":                # device has no `unzip` — stop
+            self._icons_disabled = True
+            self._icon_queue.clear()
+            return
+        if isinstance(result, QImage) and not result.isNull():
+            icon = QIcon(QPixmap.fromImage(result))
+            self._icon_cache[package] = icon
+            self._apply_icon_to_item(package, icon)
+            if self._current and self._current.package == package:
+                self._set_header_icon(package)
+        else:
+            self._icon_cache[package] = None       # sentinel: keep the letter tile
+        self._pump_icons()
+
+    def _apply_icon_to_item(self, package, icon):
+        for i in range(self.app_list.count()):
+            it = self.app_list.item(i)
+            app = it.data(Qt.ItemDataRole.UserRole)
+            if app and app.package == package:
+                it.setIcon(icon)
+                return
+
+    def _set_header_icon(self, package):
+        icon = self._icon_cache.get(package)
+        pm = icon.pixmap(40, 40) if icon else app_icon(package, 40).pixmap(40, 40)
+        self.icon_label.setPixmap(pm)
+        self.icon_label.show()
+        if package not in self._icon_cache and package not in self._icon_inflight \
+                and not self._icons_disabled:
+            self._icon_queue.insert(0, package)     # prioritise the selected app
+            self._pump_icons()
+
+    def _clear_icon_state(self):
+        self._icon_cache.clear()
+        self._icon_inflight.clear()
+        self._icon_queue.clear()
+        self._icons_disabled = False
+
     def _on_app_selected(self, cur, _prev):
         if cur is None:
             return
@@ -882,6 +1290,7 @@ class AppManagerView(QWidget):
             return
         self._current = app
         self.title.setText(app.package)
+        self._set_header_icon(app.package)
         badges = " · ".join(
             b for b in ("system app" if app.system else "user app",
                         "disabled" if not app.enabled else "") if b)
@@ -927,6 +1336,8 @@ class AppManagerView(QWidget):
         self._detail = None
         self.info_table.setRowCount(0)
         self.perm_table.setRowCount(0)
+        self.btn_grant_all.setEnabled(False)
+        self.btn_revoke_all.setEnabled(False)
         self.comp_tree.clear()
         self.ops_table.setRowCount(0)
         self.sig_view.setPlainText(msg)
@@ -955,6 +1366,7 @@ class AppManagerView(QWidget):
 
     def _populate_perms(self, d: AppDetail):
         self.perm_table.setRowCount(len(d.permissions))
+        n_runtime = 0
         for r, p in enumerate(d.permissions):
             name = QTableWidgetItem(p.name)
             name.setData(Qt.ItemDataRole.UserRole, p.name)
@@ -964,10 +1376,17 @@ class AppManagerView(QWidget):
                 state, col = "denied", RED
             else:
                 state, col = "requested", TEXT_DIM
+            if p.runtime:
+                n_runtime += 1
+            else:
+                name.setForeground(QColor(TEXT_DIM))   # fixed install/normal perm
             st = QTableWidgetItem(state)
             st.setForeground(QColor(col))
             self.perm_table.setItem(r, 0, name)
             self.perm_table.setItem(r, 1, st)
+        # Grant all / Revoke all only make sense for changeable runtime permissions.
+        self.btn_grant_all.setEnabled(n_runtime > 0)
+        self.btn_revoke_all.setEnabled(n_runtime > 0)
         self.tabs.setTabText(1, f"Permissions ({len(d.permissions)})")
 
     def _populate_components(self, d: AppDetail):
@@ -1068,6 +1487,29 @@ class AppManagerView(QWidget):
                          f"Cleared data for {app.package}",
                          on_done=lambda: self._load_detail(app))
 
+    def _clear_cache(self):
+        # Cache is regenerable, so no confirmation prompt (unlike Clear data).
+        app = self._need_app()
+        if not app:
+            return
+        if self._cache_worker is not None:
+            self.status.emit("A cache clear is already running…")
+            return
+        self.status.emit(f"Clearing cache for {app.package}…")
+        w = ClearCacheWorker(self.adb, self._serial, app.package)
+
+        def handler(ok, msg, app=app):
+            if ok:
+                self.status.emit(msg)
+                self._load_detail(app)          # refresh the cache-size row
+            else:
+                self.failed.emit(msg)
+        w.done.connect(handler)
+        w.finished.connect(lambda w=w: self._forget(w, "_cache_worker"))
+        self._cache_worker = w
+        self._workers.add(w)
+        w.start()
+
     def _toggle_enabled(self):
         app = self._need_app()
         if not app:
@@ -1118,6 +1560,91 @@ class AppManagerView(QWidget):
             self._run_action(app_info_args(self._serial, app.package),
                              f"Opened settings for {app.package}")
 
+    # --- decompile (right-click an app) ------------------------------------
+    def _app_list_menu(self, pos):
+        item = self.app_list.itemAt(pos)
+        if item is None:
+            return
+        app = item.data(Qt.ItemDataRole.UserRole)
+        if not app:
+            return
+        menu = QMenu(self)
+        act_dec = menu.addAction("Decompile to Java (jadx)…")
+        act_extract = menu.addAction("Extract APK")
+        menu.addSeparator()
+        act_copy = menu.addAction("Copy package name")
+        chosen = menu.exec(self.app_list.viewport().mapToGlobal(pos))
+        if chosen == act_dec:
+            self._decompile(app)
+        elif chosen == act_extract:
+            self.app_list.setCurrentItem(item)
+            self._extract_apk()
+        elif chosen == act_copy:
+            self._copy(app.package)
+
+    def _decompile(self, app, force=False):
+        if not self._serial:
+            self.status.emit("Select a device first")
+            return
+        if self._decompile_worker is not None:
+            self.status.emit("A decompile is already running…")
+            return
+        out = os.path.join(decompile_root(), app.package)
+        src = os.path.join(out, "src")
+        if not force and os.path.isdir(src) and any(os.scandir(src)):
+            self._open_viewer(src, app)          # already decompiled — open cached
+            self.status.emit(f"Opened cached decompile of {app.package}")
+            return
+        prog = QProgressDialog(f"Decompiling {app.package}…", "Cancel", 0, 0, self)
+        prog.setWindowTitle("Decompile")
+        prog.setWindowModality(Qt.WindowModality.NonModal)
+        prog.setMinimumWidth(360)
+        prog.setAutoClose(False)
+        prog.setAutoReset(False)
+        self._decompile_progress = prog
+
+        w = DecompileWorker(self.adb, self._serial, app.package, out)
+        prog.canceled.connect(w.cancel)
+        w.progress.connect(prog.setLabelText)
+        w.done.connect(lambda ok, d, msg, app=app: self._on_decompile_done(ok, d, msg, app))
+        w.finished.connect(lambda w=w: self._forget(w, "_decompile_worker"))
+        self._decompile_worker = w
+        self._workers.add(w)
+        prog.show()
+        self.status.emit(f"Decompiling {app.package}…")
+        w.start()
+
+    def _on_decompile_done(self, ok, src_dir, message, app):
+        if self._decompile_progress is not None:
+            self._decompile_progress.close()
+            self._decompile_progress = None
+        if not ok:
+            if message != "Cancelled":
+                self.failed.emit(message)
+            else:
+                self.status.emit("Decompile cancelled")
+            return
+        self.status.emit(message)
+        self._open_viewer(src_dir, app, fresh=True)
+
+    def _open_viewer(self, src_dir, app, fresh=False):
+        viewer = SourceViewerWindow(
+            src_dir, app.package,
+            redecompile=lambda app=app: self._decompile(app, force=True))
+        self._viewers.append(viewer)
+        viewer.destroyed.connect(lambda *_: self._drop_viewer(viewer))
+        viewer.show()
+        viewer.raise_()
+        viewer.activateWindow()
+        if fresh:
+            viewer.open_first_source()
+
+    def _drop_viewer(self, viewer):
+        try:
+            self._viewers.remove(viewer)
+        except ValueError:
+            pass
+
     # --- context menus -----------------------------------------------------
     def _perm_menu(self, pos):
         app = self._current
@@ -1144,6 +1671,35 @@ class AppManagerView(QWidget):
                              f"Revoked {perm}", on_done=lambda: self._load_detail(app))
         elif chosen == act_copy:
             self._copy(perm)
+
+    def _bulk_perms(self, *, grant: bool):
+        app = self._need_app()
+        if not app or not self._detail:
+            return
+        perms = [p.name for p in self._detail.permissions if p.runtime]
+        if not perms:
+            self.status.emit("No runtime permissions to change")
+            return
+        if self._bulk_worker is not None:
+            self.status.emit("A permission change is already running…")
+            return
+        verb = "Grant" if grant else "Revoke"
+        prep = "to" if grant else "from"
+        if not self._confirm(f"{verb} all permissions?",
+                             f"{verb} all {len(perms)} runtime permission(s) "
+                             f"{prep} {app.package}?"):
+            return
+        self.status.emit(f"{verb}ing {len(perms)} permission(s)…")
+        w = BulkPermWorker(self.adb, self._serial, app.package, perms, grant)
+
+        def handler(ok, msg, app=app):
+            (self.status if ok else self.failed).emit(msg)
+            self._load_detail(app)              # refresh grant states either way
+        w.done.connect(handler)
+        w.finished.connect(lambda w=w: self._forget(w, "_bulk_worker"))
+        self._bulk_worker = w
+        self._workers.add(w)
+        w.start()
 
     def _comp_menu(self, pos):
         app = self._current
@@ -1222,9 +1778,12 @@ class AppManagerView(QWidget):
 
     def _reset_all(self, msg):
         self._apps = []
+        self._app_index = {}
         self._current = None
+        self._clear_icon_state()
         self.app_list.clear()
         self.count_label.setText(msg)
+        self.icon_label.hide()
         self.title.setText("Select an app")
         self.subtitle.setText("")
         self._clear_detail(msg)
@@ -1236,12 +1795,17 @@ class AppManagerView(QWidget):
             setattr(self, attr, None)
 
     def shutdown(self):
+        if self._decompile_worker is not None:
+            self._decompile_worker.cancel()
+        for viewer in list(self._viewers):
+            viewer.close()
         for w in list(self._workers):
             try:
                 w.wait(1500)
             except RuntimeError:
                 pass
         shutil.rmtree(self._tmp, ignore_errors=True)
+        # note: decompiled sources under decompile_root() persist across sessions
 
 
 def _html_escape(s: str) -> str:

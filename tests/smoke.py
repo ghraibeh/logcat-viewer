@@ -82,6 +82,21 @@ res, spec = matched(text_query="(unclosed", text_regex=True)
 check(spec.has_error("text"), "invalid regex records an error")
 check(len(res) == 6, "invalid regex disables field (all pass), not zero")
 
+# "|" = OR across substring terms (no regex mode needed)
+res, _ = matched(text_query="fatal|com.foo")
+check(len(res) == 2, f"find 'fatal|com.foo' matches either (2), got {len(res)}")
+res, _ = matched(tag_query="bactivitythread|gmsproxy")
+check(len(res) == 2 and {e.tag for e in res} == {"BActivityThread", "GmsProxy"},
+      "tag OR-terms match either tag (case-insensitive)")
+res, _ = matched(exclude_query="scion|gmsproxy")
+check(len(res) == 4 and all(e.tag not in ("Scion", "GmsProxy") for e in res),
+      f"exclude OR-terms drop lines matching either (4 left), got {len(res)}")
+# trailing / empty terms are ignored, so `error|` behaves like `error`
+res, _ = matched(text_query="fatal|")
+check(len(res) == 1, f"trailing '|' is ignored (still 1), got {len(res)}")
+res, _ = matched(text_query="|")
+check(len(res) == 6, "a query of only '|' has no terms -> no filtering")
+
 # --- model + full UI (offscreen) -------------------------------------------
 from PyQt6.QtWidgets import QApplication
 from logcat_viewer.model import LogTableModel
@@ -103,6 +118,22 @@ check(model.total_count() <= 100, f"ring buffer trimmed to <=100, got {model.tot
 
 win = MainWindow()
 win.show()
+
+# defaults: Level -> "All levels", Auto-scroll + Wrap off, stream controls in Logs
+check(win.level_combo.itemText(0) == "All levels" and win.level_combo.itemData(0) == 0,
+      "Level dropdown has an 'All levels' entry at the top (shows everything)")
+check(win.level_combo.currentIndex() == 0, "Level defaults to 'All levels'")
+check(not win.autoscroll_cb.isChecked(), "Auto-scroll is off by default")
+check(not win.wrap_cb.isChecked() and not win._wrap, "Wrap is off by default")
+# Start/Pause/Clear now belong to the Logs tab, not the shared device toolbar
+_logs_tab = win.tabs.widget(0)
+for _b, _n in ((win.start_btn, "Start"), (win.pause_btn, "Pause"), (win.clear_btn, "Clear")):
+    check(win.tabs.isAncestorOf(_b) and _logs_tab.isAncestorOf(_b),
+          f"{_n} lives inside the Logs tab, not the device bar")
+check(not win.tabs.isAncestorOf(win.mirror_btn), "Mirror stays on the shared device bar")
+# selecting a row must not yank the view around — autoScroll off
+check(not win.table.hasAutoScroll(), "table autoScroll off (select doesn't scroll the view)")
+
 win._on_lines(SAMPLE)   # feed lines through the real pipeline
 win._flush()
 check(win.model.total_count() == 6, f"UI pipeline ingested 6, got {win.model.total_count()}")
@@ -127,6 +158,56 @@ win._app_pkg = None
 win._app_pids = None
 win.apply_filter()
 check(win.model.rowCount() == 7, "clearing app filter restores all rows")
+
+# app filter must NOT blank out when the app closes / is between restarts:
+# select_app/_refresh_app_pids only ever add PIDs, never drop the known set
+# (an empty pid set matches nothing and would hide the whole log).
+win._app_pkg = None
+win._app_pids = None
+_fake_pids = {"n": {5678}}
+win._current_app_pkg = lambda: "com.example.app"
+win._resolve_pids = lambda pkg: set(_fake_pids["n"])
+win.select_app()
+check(win._app_pids == frozenset({5678}), "select_app resolves the running app's pids")
+_fake_pids["n"] = set()                 # app closes -> no pids on device
+win._refresh_app_pids()
+check(win._app_pids == frozenset({5678}),
+      "app closes: refresh keeps last-known pids (log stays, not blanked)")
+win.apply_filter()
+check(win.model.rowCount() == 3, "closed app: its already-captured logs stay visible")
+_fake_pids["n"] = {9999}                # app restarts with a new pid
+win._refresh_app_pids()
+check(win._app_pids == frozenset({5678, 9999}),
+      "app restarts: refresh adds the new pid (spans the restart)")
+del win._current_app_pkg, win._resolve_pids   # drop the instance overrides
+win._app_pkg = None
+win._app_pids = None
+win.apply_filter()
+
+# --- revamped filter bar: Advanced panel + Clear filters -------------------
+check(not win.advanced_panel.isVisible(), "Advanced panel is collapsed by default")
+win.advanced_btn.setChecked(True)
+check(win.advanced_panel.isVisible(), "Advanced toggle reveals the tag/PID/exclude panel")
+win.advanced_btn.setChecked(False)
+check(not win.advanced_panel.isVisible(), "Advanced toggle hides the panel again")
+# a hidden-but-active advanced filter is flagged so rows are never silently dropped
+win.tag_edit.setText("GmsProxy")
+win.apply_filter()
+check("●" in win.advanced_btn.text(), "collapsed Advanced flags an active hidden filter")
+check(win.model.rowCount() == 1, "hidden advanced tag filter still applies (1 row)")
+# Clear filters resets every field on the bar (not the log, app picker, or view)
+win.text_edit.setText("noise"); win.text_regex_cb.setChecked(True)
+win.pid_edit.setText("999"); win.exclude_edit.setText("Scion")
+win.level_combo.setCurrentIndex(4)   # a non-default level (index 0 is "All levels")
+win.clear_filters()
+check(win.text_edit.text() == "" and win.tag_edit.text() == ""
+      and win.pid_edit.text() == "" and win.exclude_edit.text() == "",
+      "Clear filters empties every filter field")
+check(not win.text_regex_cb.isChecked() and not win.tag_regex_cb.isChecked()
+      and not win.exclude_regex_cb.isChecked(), "Clear filters resets the regex toggles")
+check(win.level_combo.currentIndex() == 0, "Clear filters resets level to All levels")
+check(win.advanced_btn.text() == "Advanced", "Clear filters drops the Advanced active dot")
+check(win.model.rowCount() == 7, "Clear filters shows all rows again (log untouched)")
 
 # font size controls
 from logcat_viewer.ui import FONT_MIN, FONT_MAX
@@ -203,13 +284,142 @@ check(stop_args("SER")[stop_args("SER").index("cmd") + 1] == "stop", "stop_args 
 check(os.path.isfile(HELPER_APK), "bundled helper APK present in assets")
 check(os.path.isfile(MAP_HTML), "map.html present in assets")
 
+# --- performance monitor (pure parsing) ------------------------------------
+from logcat_viewer import monitor as mon
+_PROC = (
+    "cpu  100 0 50 800 50 0 0 0 0 0\n"
+    "cpu0 50 0 25 400 25 0 0 0 0 0\n"
+    "cpu1 50 0 25 400 25 0 0 0 0 0\n"
+    "intr 123 4 5\n"
+    "MemTotal:        8000000 kB\n"
+    "MemAvailable:    3000000 kB\n"
+    "MemFree:         1000000 kB\n"
+    "SwapTotal:       2000000 kB\n"
+    "1.50 1.20 0.90 2/900 12345\n"
+)
+st = mon.parse_cpu_stat(_PROC)
+check(st == (1000, 850), f"parse_cpu_stat sums jiffies, idle=idle+iowait, got {st}")
+check(mon.cpu_core_count(_PROC) == 2, "cpu_core_count counts per-core lines")
+mi = mon.parse_meminfo(_PROC)
+check(mi["total"] == 8000000 and mi["available"] == 3000000, "parse_meminfo reads KB values")
+check(mon.mem_used_kb(mi) == (5000000, 8000000), "mem_used_kb = total - available")
+check(mon.parse_loadavg(_PROC) == (1.50, 1.20, 0.90), "parse_loadavg reads the 3 averages")
+# busy% between two samples: Δtotal=100, Δidle=50 -> 50%
+prev = mon.parse_cpu_stat(_PROC)
+nxt = mon.parse_cpu_stat(_PROC.replace("cpu  100 0 50 800 50", "cpu  150 0 50 850 50"))
+check(abs(mon.cpu_percent(prev, nxt) - 50.0) < 0.01,
+      f"cpu_percent busy delta = 50%, got {mon.cpu_percent(prev, nxt)}")
+check(mon.cpu_percent(prev, prev) is None, "cpu_percent with no delta -> None")
+check(mon.mem_used_kb({}) is None and mon.parse_cpu_stat("nope") is None,
+      "monitor parsers tolerate junk/empty input")
+# per-app CPU/RAM parsing (dumpsys) — no root / debuggable needed
+_CPUINFO = (
+    "Load: 1.0 / 1.1 / 1.2\n"
+    "  8.3% 12345/com.example.app: 5% user + 3.3% kernel\n"
+    "  2.0% 12346/com.example.app:push: 1% user + 1% kernel\n"
+    "  4.0% 999/system_server: 2% user + 2% kernel\n"
+)
+check(abs(mon.parse_app_cpu(_CPUINFO, "com.example.app") - 10.3) < 0.01,
+      "parse_app_cpu sums the app's processes (incl. :child), got "
+      f"{mon.parse_app_cpu(_CPUINFO, 'com.example.app')}")
+check(mon.parse_app_cpu(_CPUINFO, "com.not.here") is None,
+      "parse_app_cpu -> None when the app isn't running")
+check(mon.parse_app_meminfo("App Summary\n TOTAL PSS: 234567  TOTAL RSS: 300000\n") == 234567,
+      "parse_app_meminfo reads TOTAL PSS (newer format)")
+check(mon.parse_app_meminfo("  TOTAL      45678   12000   3000\n") == 45678,
+      "parse_app_meminfo falls back to the TOTAL table row (older format)")
+check(mon.build_probe(None) == mon.PROBE and "dumpsys meminfo com.x" in mon.build_probe("com.x"),
+      "build_probe appends dumpsys reads only when a package is watched")
+check("'weird; rm'" in mon.build_probe("weird; rm"),
+      "build_probe shell-quotes the package name (injection-safe)")
+# selecting an app in the picker overlays it on the Monitor tab
+win.monitor_view.set_package("com.example.app")
+check(win.monitor_view._package == "com.example.app", "Monitor follows the App picker")
+win.monitor_view.set_package(None)
+# the Monitor tab must not poll adb until it's shown with a device
+check(win.monitor_view._worker is None, "Monitor idle (no worker) until shown with a device")
+
+# --- memory-leak detection (LeakCanary / Shark) ----------------------------
+from logcat_viewer import leakdetect as leak
+check(leak.SHARK_MAIN == "shark.MainKt" and len(leak._SHARK_JARS) >= 10,
+      "Shark analyze classpath is pinned (main class + jar set)")
+check(leak.leak_summary("====\n0 APPLICATION LEAKS\n").startswith("No application leaks"),
+      "leak_summary reads 0 leaks")
+check(leak.leak_summary("3 APPLICATION LEAKS") == "3 application leak(s) found",
+      "leak_summary reads N leaks")
+# the report is built as visual HTML (WebEngine view stays lazy — not built headless)
+_SAMPLE_LEAK = (
+    "====\nHEAP ANALYSIS RESULT\n====\n2 APPLICATION LEAKS\n\n"
+    "References underlined with \"~~~\" are likely causes.\n====\n"
+    "13,906 bytes retained by leaking objects\nSignature: abc123def456\n"
+    "┬───\n│ GC Root: System class\n├─ com.x.Foo class\n│    Leaking: NO (a class)\n"
+    "│    ↓ static Foo.bar\n╰→ com.x.LeakyThing instance\n     Leaking: YES (leak!)\n"
+    "                      ~~~~~~~~\n====\n0 LIBRARY LEAKS\n\n====\n"
+    "0 UNREACHABLE OBJECTS\n\n====\nMETADATA\n\nBuild.VERSION.SDK_INT: 36\n"
+    "Heap total bytes: 35235888\nInstance count: 412508\nClass count: 27958\n"
+    "Bitmap count: 54\nAnalysis duration: 1575 ms\n====\n")
+_html = leak.build_report_html("com.x", _SAMPLE_LEAK)
+check("<!doctype html>" in _html.lower() and "com.x" in _html,
+      "build_report_html emits an HTML document for the package")
+check(_html.count('class="card leak"') == 1 and "2 application leaks found" in _html,
+      "leak count in banner; a visual card per parsed leak trace")
+check('class="yes"' in _html and 'class="no"' in _html and 'class="cause"' in _html,
+      "leak trace colorizes Leaking YES/NO + likely-cause lines")
+check("35.2 MB" in _html and "412,508" in _html,
+      "metadata rendered as formatted stat tiles (bytes→MB, thousands)")
+_ok_html = leak.build_report_html("com.x", "====\n0 APPLICATION LEAKS\n====\nMETADATA\n")
+check('class="banner ok"' in _ok_html and 'class="card leak"' not in _ok_html,
+      "zero-leak report shows the green banner and no leak cards")
+check(not win.monitor_view.leak_btn.isEnabled(), "Detect-leaks disabled with no app selected")
+win.monitor_view.set_serial("SER"); win.monitor_view.set_package("com.example.app")
+check(win.monitor_view.leak_btn.isEnabled(), "Detect-leaks enabled once device + app are set")
+win.monitor_view.set_package(None); win.monitor_view.set_serial(None)
+
 # tabs present; the map webview stays lazy (never built in headless smoke)
-check(win.tabs.count() == 6,
-      f"main window has Logs + Location + Network HTTP + Databases + Files + Apps tabs, got {win.tabs.count()}")
+check(win.tabs.count() == 7,
+      f"main window has 7 tabs (…Apps + Monitor), got {win.tabs.count()}")
 check(win.tabs.tabText(0) == "Logs" and win.tabs.tabText(1) == "Location"
       and win.tabs.tabText(2) == "Network HTTP" and win.tabs.tabText(3) == "Databases"
-      and win.tabs.tabText(4) == "Files" and win.tabs.tabText(5) == "Apps",
-      "tab labels are Logs / Location / Network HTTP / Databases / Files / Apps")
+      and win.tabs.tabText(4) == "Files" and win.tabs.tabText(5) == "Apps"
+      and win.tabs.tabText(6) == "Monitor",
+      "tab labels end with Apps then Monitor")
+
+# Logs tab has a click-to-pick app list (All apps + clones + device apps)
+from PyQt6.QtCore import Qt as _QtLog
+_UR = _QtLog.ItemDataRole.UserRole
+win._populate_log_app_list(["clone.app"], ["com.aaa", "com.bbb"])
+check(win.log_app_list.count() == 4
+      and win.log_app_list.item(0).text() == "All apps"
+      and win.log_app_list.item(0).data(_UR) is None
+      and win.log_app_list.item(1).data(_UR) == "clone.app"
+      and "(clone)" in win.log_app_list.item(1).text(),
+      "Logs app list mirrors All apps + clones + device apps from the picker")
+win._app_pkg = "com.bbb"
+win._sync_log_app_selection()
+check(win.log_app_list.currentItem().data(_UR) == "com.bbb",
+      "_sync_log_app_selection highlights the current app in the Logs list")
+win._filter_log_app_list("aaa")
+check(not win.log_app_list.item(0).isHidden()          # All apps always shown
+      and not win.log_app_list.item(2).isHidden()      # com.aaa matches
+      and win.log_app_list.item(3).isHidden(),         # com.bbb filtered out
+      "Logs app-list search hides non-matching apps but keeps All apps")
+win._filter_log_app_list("")
+# both the Logs and Monitor tabs embed an app-picker panel, kept in sync
+check(len(win._app_panels) == 2, f"Logs + Monitor each have an app panel, got {len(win._app_panels)}")
+_mon_panel = win._app_panels[1]
+check(_mon_panel.list.count() == 4 and _mon_panel.list.item(1).data(_UR) == "clone.app",
+      "Monitor app panel is populated from the same picker data")
+win._app_pkg = "com.aaa"
+win._sync_log_app_selection()
+check(_mon_panel.list.currentItem().data(_UR) == "com.aaa",
+      "selecting an app highlights it in the Monitor panel too")
+# picking in the Monitor panel drives the shared selection (→ overlays on Monitor)
+_mon_panel.list.setCurrentRow(3)   # com.bbb
+check(win._app_pkg == "com.bbb" and win.monitor_view._package == "com.bbb",
+      "picking in the Monitor app panel selects that app everywhere")
+win._filter_log_app_list("")
+win._app_pkg = None
+win._sync_log_app_selection()
 win.mock_view.set_serial("DEVICE1")
 win.mock_view.set_serial(None)
 check(win.mock_view._web is None, "map webview stays lazy until the Location tab is shown")
@@ -237,6 +447,7 @@ check(mv2.enable_btn.isChecked() is False, "Enable Mock reverts when no location
 # --- network intercept -----------------------------------------------------
 from logcat_viewer.intercept import (
     reverse_args, set_proxy_args, clear_proxy_args, reverse_remove_args,
+    get_proxy_args, restore_proxy_args, proxy_restore_cmd, proxy_watchdog_script,
     parse_sni, parse_head, _split_url, _parse_status, flow_to_curl, pretty_body,
     build_flow_export, have_mitmproxy, _json_to_flow, Flow, FlowTableModel,
     FlowFilterSpec, InterceptView, MITM_ADDON,
@@ -246,6 +457,27 @@ from logcat_viewer.intercept import (
 check(set_proxy_args("SER", 8099)[-3:] == ["global", "http_proxy", "127.0.0.1:8099"],
       "set_proxy_args points global http_proxy at the reverse tunnel")
 check(clear_proxy_args("SER")[-1] == ":0", "clear_proxy_args disables the proxy (:0)")
+check(get_proxy_args("SER")[-4:] == ["settings", "get", "global", "http_proxy"],
+      "get_proxy_args reads the current global http_proxy")
+# restore: a real prior proxy is written back verbatim…
+check(restore_proxy_args("SER", "10.0.2.2:8888")[-4:]
+      == ["put", "global", "http_proxy", "10.0.2.2:8888"],
+      "restore_proxy_args re-applies the device's original proxy verbatim")
+# …but 'no proxy' states delete the setting (true original), not leave a stale :0
+check(all(restore_proxy_args("SER", v)[-3:] == ["delete", "global", "http_proxy"]
+          for v in ("", "null", ":0", "127.0.0.1:8099")),
+      "restore_proxy_args deletes the setting when the device had no real proxy")
+# device-side watchdog: restores real proxy on SIGHUP, exits clean on stdin byte
+check(proxy_restore_cmd("10.0.2.2:8888") == "settings put global http_proxy 10.0.2.2:8888"
+      and proxy_restore_cmd("null") == "settings delete global http_proxy",
+      "proxy_restore_cmd builds the device-shell restore command")
+_wd = proxy_watchdog_script("10.0.2.2:8888")
+check("trap 'settings put global http_proxy 10.0.2.2:8888' HUP INT TERM" in _wd
+      and "read _" in _wd and "trap - HUP INT TERM" in _wd,
+      "proxy_watchdog_script traps SIGHUP to restore but disarms on a stdin byte")
+# injection-proofing: a value with shell metachars is rejected → delete, not exec
+check(proxy_restore_cmd("x; rm -rf /") == "settings delete global http_proxy",
+      "proxy_restore_cmd rejects unsafe proxy values (no shell injection)")
 check(reverse_args("SER", 8099) == ["-s", "SER", "reverse", "tcp:8099", "tcp:8099"],
       "reverse_args tunnels the port both ways")
 check(reverse_remove_args("SER", 8099) == ["-s", "SER", "reverse", "--remove", "tcp:8099"],
@@ -793,8 +1025,10 @@ from logcat_viewer.appmgr import (
     AppManagerView, AppInfo, parse_pkg_list_line, build_app_list,
     parse_permissions, parse_components, parse_appops, parse_general,
     parse_app_detail, list_packages_args, dumpsys_args, launch_args,
-    clear_args, disable_args, uninstall_args, grant_args, component_args,
+    clear_args, clear_cache_args, runas_clear_cache_args, su_clear_cache_args,
+    disable_args, uninstall_args, grant_args, component_args,
     appops_set_args, app_icon, _human_bytes,
+    parse_zip_entries, pick_launcher_icon, unzip_list_args, unzip_extract_args,
 )
 
 # pm list packages -f -i -U --show-versioncode → AppInfo fields
@@ -826,6 +1060,12 @@ check(dumpsys_args("S1", "com.foo")[-3:] == ["dumpsys", "package", "com.foo"]
       and clear_args("S1", "com.foo")[-3:] == ["pm", "clear", "com.foo"]
       and disable_args("S1", "com.foo")[-5:] == ["pm", "disable-user", "--user", "0", "com.foo"],
       "dumpsys/launch/clear/disable builders emit the right adb tokens")
+check(clear_cache_args("S1", "com.foo")[-4:] == ["pm", "clear", "--cache-only", "com.foo"]
+      and runas_clear_cache_args("S1", "com.foo")[3:]
+          == ["run-as", "com.foo", "rm", "-rf", "cache", "code_cache"]
+      and su_clear_cache_args("S1", "com.foo")[3:6] == ["su", "-c", "rm"]
+      and su_clear_cache_args("S1", "com.foo")[-1] == "/data/data/com.foo/code_cache",
+      "clear-cache builders emit pm --cache-only + run-as/su rm fallbacks")
 check(uninstall_args("S1", "com.foo") == ["-s", "S1", "uninstall", "com.foo"]
       and uninstall_args("S1", "com.foo", keep_data=True)[3] == "-k"
       and grant_args("S1", "com.foo", "P")[-4:] == ["pm", "grant", "com.foo", "P"]
@@ -888,11 +1128,17 @@ check(_g["versionName"] == "1.2.3" and _g["versionCode"] == "42"
       and "DEBUGGABLE" in _g["flags"],
       "parse_general reads version/sdk/dataDir/times/flags from dumpsys")
 
-_perms = {p.name: p.granted for p in parse_permissions(_DUMP)}
+_pl = parse_permissions(_DUMP)
+_perms = {p.name: p.granted for p in _pl}
 check(_perms.get("android.permission.INTERNET") is True
       and _perms.get("android.permission.CAMERA") is False
       and _perms.get("android.permission.ACCESS_FINE_LOCATION") is True,
       "parse_permissions merges install+runtime grant state (3 perms)")
+_rt = {p.name for p in _pl if p.runtime}
+check("android.permission.CAMERA" in _rt
+      and "android.permission.ACCESS_FINE_LOCATION" in _rt
+      and "android.permission.INTERNET" not in _rt,
+      "parse_permissions flags runtime perms (changeable) vs install perms")
 
 _c = parse_components(_DUMP, "com.example.app")
 _acts = {x.name: x.enabled for x in _c["activities"]}
@@ -920,9 +1166,41 @@ check(_human_bytes(0) == "0 B" and _human_bytes(1536).endswith("KB")
       "_human_bytes formats sizes")
 check(not app_icon("com.example.app").isNull(), "app_icon draws a letter tile")
 
+# launcher-icon extraction from an APK entry listing (APK == ZIP, via unzip)
+_ZIPL = """Archive:  /data/app/com.example.app/base.apk
+  Length      Date    Time    Name
+---------  ---------- -----   ----
+     1024  2024-01-01 00:00   AndroidManifest.xml
+     8000  2024-01-01 00:00   res/mipmap-mdpi/ic_launcher.png
+    40000  2024-01-01 00:00   res/mipmap-xxxhdpi/ic_launcher.png
+    39000  2024-01-01 00:00   res/mipmap-xxxhdpi/ic_launcher_round.png
+      900  2024-01-01 00:00   res/mipmap-anydpi-v26/ic_launcher.xml
+    12000  2024-01-01 00:00   res/drawable-xhdpi/splash.png
+---------                     -------
+    99999                     6 files"""
+_ents = parse_zip_entries(_ZIPL)
+check("res/mipmap-xxxhdpi/ic_launcher.png" in _ents
+      and "res/mipmap-mdpi/ic_launcher.png" in _ents,
+      "parse_zip_entries reads the Name column (last token) of unzip -l")
+check(pick_launcher_icon(_ents) == "res/mipmap-xxxhdpi/ic_launcher.png",
+      "pick_launcher_icon prefers the densest raster ic_launcher (not round/xml/drawable)")
+check(pick_launcher_icon(["res/mipmap-anydpi-v26/ic_launcher.xml",
+                          "res/drawable/bg.png"]) is None,
+      "pick_launcher_icon returns None when only adaptive-XML / non-launcher exist")
+check(unzip_list_args("S1", "/a/base.apk")[-3:] == ["unzip", "-l", "/a/base.apk"]
+      and unzip_extract_args("S1", "/a/base.apk", "res/x.png")[2] == "exec-out"
+      and unzip_extract_args("S1", "/a/base.apk", "res/x.png")[-4:]
+          == ["unzip", "-p", "/a/base.apk", "res/x.png"],
+      "unzip list/extract builders emit shell -l and exec-out -p")
+
 # the Apps tab exists, touches no adb at rest, populates list + detail offscreen
 av = win.appmgr_view
 check(isinstance(av, AppManagerView), "the Apps tab is an AppManagerView")
+check(av.btn_cache.text() == "Clear cache" and len(av._act_buttons) == 8,
+      "the Apps tab has a Clear cache action button")
+check(av.btn_grant_all.text() == "Grant all" and av.btn_revoke_all.text() == "Revoke all"
+      and not av.btn_grant_all.isEnabled(),
+      "the Permissions tab has Grant all / Revoke all buttons (disabled at rest)")
 check(av._list_worker is None and av._detail_worker is None,
       "no App-Manager worker runs while the hidden tab is not shown")
 av._apps = [AppInfo("com.example.app", system=False, enabled=False, uid="10234"),
@@ -940,10 +1218,75 @@ av._on_detail_done(True, _detail, "", 7)
 check(av.info_table.rowCount() > 5 and av.perm_table.rowCount() == 3
       and av.comp_tree.topLevelItemCount() == 4 and av.ops_table.rowCount() == 1,
       "AppManagerView populates Info/Permissions/Components/App Ops from a detail")
+check(av.btn_grant_all.isEnabled() and av.btn_revoke_all.isEnabled(),
+      "Grant all / Revoke all enable once an app with runtime perms is shown")
 av._on_detail_done(True, parse_app_detail("x", "", ""), "", 3)   # stale seq 3 ≠ 7
 check(av.perm_table.rowCount() == 3, "a stale detail (old seq) is ignored")
+
+# a fetched real icon replaces the letter tile on the row + header
+from PyQt6.QtGui import QImage as _QImage
+_img = _QImage(24, 24, _QImage.Format.Format_RGB32)
+_img.fill(0xFF3355AA)
+av._on_icon("com.example.app", _img)
+check(av._icon_cache.get("com.example.app") is not None
+      and not av.app_list.item(0).icon().isNull()
+      and not av.icon_label.pixmap().isNull(),
+      "_on_icon applies a fetched icon to the row + header")
+av._on_icon("com.android.systemui", "unavailable")
+check(av._icons_disabled, "'unavailable' (no unzip on device) disables icon fetching")
 av.shutdown()
 check(not os.path.isdir(av._tmp), "AppManagerView.shutdown() removes the staged-APK temp dir")
+
+# ---------------------------------------------------------------------------
+# Decompiler (jadx) + source viewer
+import tempfile as _tf
+import shutil as _shutil
+from logcat_viewer.decompile import (
+    SourceViewerWindow, Highlighter, CodeEditor,
+    system_jadx, system_java, decompile_root,
+)
+# tool discovery never raises and returns str|None
+check(system_jadx() is None or isinstance(system_jadx(), str), "system_jadx() returns str|None")
+check(system_java() is None or isinstance(system_java(), str), "system_java() returns str|None")
+check(os.path.isdir(decompile_root()), "decompile_root() creates its cache dir")
+
+# highlighter switches Java/XML modes without error
+_doc = CodeEditor()
+_hl = Highlighter(_doc.document())
+_doc.setPlainText("// c\n@Override\npublic class A { String s=\"x\"; int n=3; }")
+_hl.set_mode("java")
+_doc.setPlainText("<a b=\"c\"><!-- x --></a>")
+_hl.set_mode("xml")
+check(_doc.line_number_width() > 0, "CodeEditor draws a line-number gutter")
+
+# the source viewer opens a decompiled tree and loads a file into the editor
+_srcroot = _tf.mkdtemp(prefix="smoke-src-")
+os.makedirs(os.path.join(_srcroot, "sources", "com", "x"), exist_ok=True)
+_javap = os.path.join(_srcroot, "sources", "com", "x", "Main.java")
+with open(_javap, "w") as _f:
+    _f.write("package com.x;\npublic class Main { /* hi */ }\n")
+_sv = SourceViewerWindow(_srcroot, "com.x")
+_sv._load_file(_javap)
+check("public class Main" in _sv.editor.toPlainText()
+      and _sv.path_label.text().endswith("Main.java"),
+      "SourceViewerWindow loads a .java file into the code editor")
+_sv._load_file(_javap.replace("Main.java", "logo.png"))  # nonexistent binary-ext path
+_sv.close()
+_shutil.rmtree(_srcroot, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+# About dialog: builds, draws a non-null logo, and credits the author
+# ---------------------------------------------------------------------------
+from PyQt6.QtWidgets import QLabel as _QLabel, QPushButton as _QPushButton
+from logcat_viewer.about import AboutDialog, logo_pixmap, AUTHOR
+check(not logo_pixmap(64).isNull(), "about.logo_pixmap() draws a non-null app mark")
+_about = AboutDialog()
+_texts = " ".join(_l.text() for _l in _about.findChildren(_QLabel))
+check("Logcat Viewer" in _texts and AUTHOR in _texts,
+      "AboutDialog shows the app name and author credit")
+check(_about.findChild(_QPushButton, "AboutClose") is not None,
+      "AboutDialog has a Close button")
+_about.close()
 
 print()
 if fails:

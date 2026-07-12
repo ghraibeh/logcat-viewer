@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtCore import Qt, QProcess, QTimer, QUrl
+from PyQt6.QtCore import Qt, QProcess, QTimer, QUrl, QSize, pyqtSignal
 from PyQt6.QtGui import (
+    QAction,
     QDesktopServices,
     QFont,
     QFontMetrics,
@@ -19,15 +20,19 @@ from PyQt6.QtWidgets import (
     QCompleter,
     QDockWidget,
     QFileDialog,
+    QFrame,
     QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSplitter,
     QTableView,
     QTabWidget,
     QVBoxLayout,
@@ -42,7 +47,9 @@ from .mocklocation import MockLocationView
 from .intercept import InterceptView
 from .dbinspect import DatabaseView
 from .files import FilesView
-from .appmgr import AppManagerView
+from .appmgr import AppManagerView, app_icon
+from .monitor import MonitorView
+from .about import APP_NAME as ABOUT_APP_NAME, show_about
 from .pull import PullWorker
 from .filters import FilterSpec
 from .model import COL_MSG, COL_PID, COL_TID, COL_TIME, COL_LEVEL, COL_TAG, LogTableModel
@@ -110,6 +117,83 @@ class LogTable(QTableView):
         QGuiApplication.clipboard().setText("\n".join(out))
 
 
+class AppPickerPanel(QWidget):
+    """Reusable left-hand click-to-pick app list (Filter box + list of All apps
+    + VA clones + device apps). Emits `picked(pkg | None)`; the Logs and Monitor
+    tabs each embed one and stay in sync through the shared App picker."""
+
+    picked = pyqtSignal(object)   # package name, or None for "All apps"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("LogAppPanel")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        bar = QWidget()
+        bar.setObjectName("LogAppBar")
+        bh = QHBoxLayout(bar)
+        bh.setContentsMargins(8, 6, 8, 6)
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setObjectName("LogAppSearch")
+        self.filter_edit.setPlaceholderText("Filter apps…")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.textChanged.connect(self.apply_filter)
+        bh.addWidget(self.filter_edit)
+        v.addWidget(bar)
+        self.list = QListWidget()
+        self.list.setObjectName("LogAppList")
+        self.list.setIconSize(QSize(24, 24))
+        self.list.currentItemChanged.connect(self._on_current)
+        v.addWidget(self.list, 1)
+
+    def populate(self, clones, device_only):
+        lst = self.list
+        lst.blockSignals(True)
+        lst.clear()
+        all_item = QListWidgetItem(app_icon("* all"), "All apps")
+        all_item.setData(Qt.ItemDataRole.UserRole, None)
+        lst.addItem(all_item)
+        for c in clones:
+            it = QListWidgetItem(app_icon(c), f"{c}   (clone)")
+            it.setData(Qt.ItemDataRole.UserRole, c)
+            it.setToolTip(f"{c}  (VA clone)")
+            lst.addItem(it)
+        for d in device_only:
+            it = QListWidgetItem(app_icon(d), d)
+            it.setData(Qt.ItemDataRole.UserRole, d)
+            it.setToolTip(d)
+            lst.addItem(it)
+        lst.blockSignals(False)
+        self.apply_filter(self.filter_edit.text())
+
+    def select(self, pkg):
+        """Highlight the row for `pkg` (or 'All apps') without emitting picked."""
+        lst = self.list
+        lst.blockSignals(True)
+        row = 0
+        for i in range(lst.count()):
+            if lst.item(i).data(Qt.ItemDataRole.UserRole) == pkg:
+                row = i
+                break
+        lst.setCurrentRow(row)
+        lst.blockSignals(False)
+
+    def apply_filter(self, text=""):
+        needle = (text or "").strip().lower()
+        lst = self.list
+        for i in range(lst.count()):
+            it = lst.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) is None:
+                it.setHidden(False)                    # "All apps" always visible
+            else:
+                it.setHidden(bool(needle) and needle not in it.text().lower())
+
+    def _on_current(self, cur, _prev=None):
+        if cur is not None:
+            self.picked.emit(cur.data(Qt.ItemDataRole.UserRole))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -127,15 +211,17 @@ class MainWindow(QMainWindow):
         self._app_pkg = None            # selected app package, or None for "All apps"
         self._app_pids = None           # frozenset of that app's live PIDs, or None
         self._font_pt = DEFAULT_FONT_PT
-        self._wrap = True               # word-wrap messages across multiple lines
+        self._wrap = False              # word-wrap messages across multiple lines
         self._resizing = False          # re-entrancy guard for row auto-sizing
         self._msg_col_w = MSG_MIN_W     # Message column width in non-wrap mode (grow-only)
         self._install_proc = None       # running `adb install` QProcess, if any
         self._installing = ""           # names of APK(s) currently installing
         self._clone_hosts = {}          # clone package -> VA host (for pulling clone APKs)
         self._pull_worker = None        # running PullWorker, if any
+        self._app_panels = []           # click-to-pick app lists (Logs + Monitor tabs)
 
         self._build_ui()
+        self._build_menu()
         self._wire()
         self.setAcceptDrops(True)       # drag-drop .apk files onto the window
         self.refresh_devices()
@@ -191,8 +277,11 @@ class MainWindow(QMainWindow):
         self.mirror_btn = QPushButton("Mirror")
         self.mirror_btn.setCheckable(True)
         self.mirror_btn.setToolTip("Mirror the selected device's screen")
+        self.about_btn = QPushButton("ⓘ")
+        self.about_btn.setObjectName("toggle")
+        self.about_btn.setToolTip("About Logcat Viewer")
         self.autoscroll_cb = QCheckBox("Auto-scroll")
-        self.autoscroll_cb.setChecked(True)
+        self.autoscroll_cb.setChecked(False)
         row1.addWidget(QLabel("Device"))
         row1.addWidget(self.device_combo, 1)
         row1.addWidget(self.refresh_btn)
@@ -203,21 +292,18 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.reload_apps_btn)
         row1.addWidget(self.pull_btn)
         row1.addSpacing(6)
-        row1.addWidget(self.start_btn)
-        row1.addWidget(self.pause_btn)
-        row1.addWidget(self.clear_btn)
+        # Start / Pause / Clear are logcat-stream controls, not device-wide — they
+        # live in the Logs tab's filter bar (see the primary row below), so the
+        # shared device bar only keeps device-level actions (incl. Mirror).
         row1.addWidget(self.mirror_btn)
+        row1.addWidget(self.about_btn)
         tb.addLayout(row1)
 
-        # Row 2: view + filter bar
-        row2 = QHBoxLayout()
-        row2.setSpacing(8)
-        row2.addWidget(self.autoscroll_cb)
+        # --- Filter widgets (laid out in the two-tier filter bar below) ------
+        # View controls (NOT filters) — Auto-scroll / Wrap / font stepper.
         self.wrap_cb = QCheckBox("Wrap")
         self.wrap_cb.setChecked(self._wrap)
         self.wrap_cb.setToolTip("Wrap long messages across multiple lines")
-        row2.addWidget(self.wrap_cb)
-        row2.addSpacing(8)
         self.font_dec_btn = QPushButton("A−")
         self.font_dec_btn.setObjectName("toggle")
         self.font_dec_btn.setToolTip("Decrease text size  (⌘−)")
@@ -226,40 +312,39 @@ class MainWindow(QMainWindow):
         self.font_inc_btn = QPushButton("A+")
         self.font_inc_btn.setObjectName("toggle")
         self.font_inc_btn.setToolTip("Increase text size  (⌘+)")
-        row2.addWidget(self.font_dec_btn)
-        row2.addWidget(self.font_label)
-        row2.addWidget(self.font_inc_btn)
-        row2.addSpacing(8)
+
+        # Primary filters: Level + one prominent search box.
         self.level_combo = QComboBox()
+        self.level_combo.setToolTip("Show this level and above")
+        self.level_combo.addItem("All levels", 0)  # 0 < any priority -> keep everything
         for name, prio in LEVELS:
             self.level_combo.addItem(name, prio)
+        _OR_HINT = "Use | for OR — e.g. error|success matches either. Or enable .* for regex."
+        self.text_edit = QLineEdit()
+        self.text_edit.setPlaceholderText("🔍  Search tag + message   (error|success)")
+        self.text_edit.setClearButtonEnabled(True)
+        self.text_edit.setToolTip("Show lines whose tag or message matches.\n" + _OR_HINT)
+        self.text_regex_cb = self._regex_toggle("Treat search as a regular expression")
+
+        # Advanced filters (revealed by the Advanced toggle).
         self.tag_edit = QLineEdit()
-        self.tag_edit.setPlaceholderText("tag")
+        self.tag_edit.setPlaceholderText("tag  (e.g. Activity|View)")
+        self.tag_edit.setToolTip("Show lines whose tag matches.\n" + _OR_HINT)
         self.tag_regex_cb = self._regex_toggle("Treat tag filter as a regular expression")
         self.pid_edit = QLineEdit()
-        self.pid_edit.setPlaceholderText("PID(s)")
-        self.pid_edit.setMaximumWidth(110)
-        self.text_edit = QLineEdit()
-        self.text_edit.setPlaceholderText("search tag + message…")
-        self.text_regex_cb = self._regex_toggle("Treat search as a regular expression")
+        self.pid_edit.setPlaceholderText("e.g. 1234, 5678")
+        self.pid_edit.setMaximumWidth(140)
         self.exclude_edit = QLineEdit()
-        self.exclude_edit.setPlaceholderText("exclude")
+        self.exclude_edit.setPlaceholderText("hide lines matching  (debug|verbose)")
+        self.exclude_edit.setToolTip("Hide lines whose tag or message matches.\n" + _OR_HINT)
         self.exclude_regex_cb = self._regex_toggle("Treat exclude as a regular expression")
 
-        row2.addWidget(QLabel("Level"))
-        row2.addWidget(self.level_combo)
-        row2.addSpacing(4)
-        row2.addWidget(QLabel("Tag"))
-        row2.addWidget(self.tag_edit, 2)
-        row2.addWidget(self.tag_regex_cb)
-        row2.addWidget(QLabel("PID"))
-        row2.addWidget(self.pid_edit)
-        row2.addWidget(QLabel("Find"))
-        row2.addWidget(self.text_edit, 3)
-        row2.addWidget(self.text_regex_cb)
-        row2.addWidget(QLabel("Exclude"))
-        row2.addWidget(self.exclude_edit, 2)
-        row2.addWidget(self.exclude_regex_cb)
+        self.advanced_btn = QPushButton("Advanced")
+        self.advanced_btn.setObjectName("toggle")
+        self.advanced_btn.setCheckable(True)
+        self.advanced_btn.setToolTip("Show tag / PID / exclude filters")
+        self.clear_filters_btn = QPushButton("Clear filters")
+        self.clear_filters_btn.setToolTip("Reset every filter on this bar (does not clear the log)")
 
         root.addWidget(toolbar)
 
@@ -271,14 +356,67 @@ class MainWindow(QMainWindow):
         logs_v = QVBoxLayout(logs_tab)
         logs_v.setContentsMargins(0, 0, 0, 0)
         logs_v.setSpacing(0)
+
+        # Split: a click-to-pick app list on the left, the log view on the right.
+        logs_split = QSplitter(Qt.Orientation.Horizontal)
+        logs_split.addWidget(self._build_log_app_panel())
+
+        logs_right = QWidget()
+        logs_rv = QVBoxLayout(logs_right)
+        logs_rv.setContentsMargins(0, 0, 0, 0)
+        logs_rv.setSpacing(0)
+
         # Filter bar lives inside the Logs tab (it only affects the log view).
+        # Two tiers: a primary row (Level + search + view controls) and a
+        # collapsible Advanced panel (tag / PID / exclude).
         filter_bar = QWidget()
         filter_bar.setObjectName("FilterBar")
         fb = QVBoxLayout(filter_bar)
         fb.setContentsMargins(12, 8, 12, 8)
-        fb.setSpacing(0)
-        fb.addLayout(row2)
-        logs_v.addWidget(filter_bar)
+        fb.setSpacing(8)
+
+        # -- Primary row --  (stream controls · filters · view controls)
+        primary = QHBoxLayout()
+        primary.setSpacing(8)
+        primary.addWidget(self.start_btn)
+        primary.addWidget(self.pause_btn)
+        primary.addWidget(self.clear_btn)
+        primary.addSpacing(10)
+        primary.addWidget(self._vsep())
+        primary.addSpacing(10)
+        primary.addWidget(QLabel("Level"))
+        primary.addWidget(self.level_combo)
+        primary.addWidget(self._field_group(self.text_edit, self.text_regex_cb), 1)
+        primary.addWidget(self.advanced_btn)
+        primary.addWidget(self.clear_filters_btn)
+        primary.addSpacing(10)
+        primary.addWidget(self._vsep())
+        primary.addSpacing(10)
+        primary.addWidget(self.autoscroll_cb)
+        primary.addWidget(self.wrap_cb)
+        primary.addSpacing(6)
+        primary.addWidget(self.font_dec_btn)
+        primary.addWidget(self.font_label)
+        primary.addWidget(self.font_inc_btn)
+        fb.addLayout(primary)
+
+        # -- Advanced panel (hidden until the Advanced toggle is on) --
+        self.advanced_panel = QWidget()
+        adv = QHBoxLayout(self.advanced_panel)
+        adv.setContentsMargins(0, 0, 0, 0)
+        adv.setSpacing(8)
+        adv.addWidget(QLabel("Tag"))
+        adv.addWidget(self._field_group(self.tag_edit, self.tag_regex_cb), 2)
+        adv.addSpacing(6)
+        adv.addWidget(QLabel("PID"))
+        adv.addWidget(self.pid_edit)
+        adv.addSpacing(6)
+        adv.addWidget(QLabel("Exclude"))
+        adv.addWidget(self._field_group(self.exclude_edit, self.exclude_regex_cb), 2)
+        self.advanced_panel.setVisible(False)
+        fb.addWidget(self.advanced_panel)
+
+        logs_rv.addWidget(filter_bar)
 
         # --- Log table ------------------------------------------------------
         self.table = LogTable()
@@ -294,6 +432,10 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # Don't auto-scroll to the current cell when a row is selected — with the
+        # wide Message column that yanks the view horizontally (and sometimes to
+        # the bottom). The view should only move when the user scrolls it.
+        self.table.setAutoScroll(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -316,7 +458,7 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(COL_TID, 60)
         self.table.setColumnWidth(COL_LEVEL, 46)
         self.table.setColumnWidth(COL_TAG, 220)
-        logs_v.addWidget(self.table, 1)
+        logs_rv.addWidget(self.table, 1)
 
         # --- Detail pane (full selected line) -------------------------------
         self.detail = QPlainTextEdit()
@@ -326,7 +468,13 @@ class MainWindow(QMainWindow):
         self.detail.setFrameShape(QPlainTextEdit.Shape.NoFrame)
         self.detail.setMaximumHeight(72)
         self.detail.setPlaceholderText("Select a row to see the full line…")
-        logs_v.addWidget(self.detail)
+        logs_rv.addWidget(self.detail)
+
+        logs_split.addWidget(logs_right)
+        logs_split.setStretchFactor(0, 0)
+        logs_split.setStretchFactor(1, 1)
+        logs_split.setSizes([240, 900])
+        logs_v.addWidget(logs_split)
         self.tabs.addTab(logs_tab, "Logs")
 
         # Location tab: MapLibre map + mock-GPS controls.
@@ -348,6 +496,18 @@ class MainWindow(QMainWindow):
         # Apps tab: browse installed packages + inspect/manage each one.
         self.appmgr_view = AppManagerView(self.adb or "")
         self.tabs.addTab(self.appmgr_view, "Apps")
+
+        # Monitor tab: live CPU + RAM, with the same click-to-pick app list as
+        # the Logs tab down the left (picking overlays that app's CPU/RAM).
+        self.monitor_view = MonitorView(self.adb or "")
+        mon_split = QSplitter(Qt.Orientation.Horizontal)
+        mon_split.addWidget(self._make_app_panel())
+        mon_split.addWidget(self.monitor_view)
+        mon_split.setStretchFactor(0, 0)
+        mon_split.setStretchFactor(1, 1)
+        mon_split.setSizes([240, 900])
+        self._monitor_tab = mon_split
+        self.tabs.addTab(mon_split, "Monitor")
 
         root.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
@@ -372,12 +532,66 @@ class MainWindow(QMainWindow):
             self.pull_btn.setEnabled(False)
             self.device_combo.addItem("adb not found — set $ADB or add to PATH", None)
 
+    def _build_menu(self):
+        """Native menu bar. On macOS the About action (tagged AboutRole) is
+        auto-relocated by Qt into the application menu, where users expect
+        “About Logcat Viewer”."""
+        self.about_action = QAction(f"About {ABOUT_APP_NAME}", self)
+        self.about_action.setMenuRole(QAction.MenuRole.AboutRole)
+        self.about_action.triggered.connect(self.show_about)
+        help_menu = self.menuBar().addMenu("Help")
+        help_menu.addAction(self.about_action)
+
+    def show_about(self):
+        show_about(self)
+
     def _regex_toggle(self, tip: str) -> QPushButton:
         btn = QPushButton(".*")
         btn.setObjectName("toggle")
         btn.setCheckable(True)
         btn.setToolTip(tip)
         return btn
+
+    def _field_group(self, edit: QLineEdit, regex_btn: QPushButton) -> QWidget:
+        """Pack a text field and its own .* regex toggle into one control so the
+        toggle unmistakably belongs to that field (no more identical, floating
+        .* buttons)."""
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+        h.addWidget(edit, 1)
+        h.addWidget(regex_btn)
+        return w
+
+    @staticmethod
+    def _vsep() -> QFrame:
+        line = QFrame()
+        line.setObjectName("FilterSep")
+        line.setFixedWidth(1)
+        return line
+
+    def _toggle_advanced(self, on: bool):
+        self.advanced_panel.setVisible(on)
+        self._update_advanced_label()
+
+    def _update_advanced_label(self):
+        """Mark the Advanced toggle with a dot when it hides active filters, so
+        collapsing it never silently drops rows."""
+        hidden_active = (not self.advanced_btn.isChecked()) and bool(
+            self.tag_edit.text().strip() or self.pid_edit.text().strip()
+            or self.exclude_edit.text().strip())
+        self.advanced_btn.setText("Advanced ●" if hidden_active else "Advanced")
+
+    def clear_filters(self):
+        """Reset every field on the filter bar (but not the log buffer, the app
+        picker, or the view controls)."""
+        for w in (self.text_edit, self.tag_edit, self.pid_edit, self.exclude_edit):
+            w.clear()
+        for cb in (self.text_regex_cb, self.tag_regex_cb, self.exclude_regex_cb):
+            cb.setChecked(False)
+        self.level_combo.setCurrentIndex(0)  # "All levels" = show everything
+        self.apply_filter()
 
     def _make_mono(self) -> QFont:
         f = QFont("SF Mono")
@@ -515,6 +729,8 @@ class MainWindow(QMainWindow):
         self.start_btn.clicked.connect(self.toggle_stream)
         self.pause_btn.toggled.connect(self.set_paused)
         self.clear_btn.clicked.connect(self.clear)
+        self.advanced_btn.toggled.connect(self._toggle_advanced)
+        self.clear_filters_btn.clicked.connect(self.clear_filters)
         self.reload_apps_btn.clicked.connect(self.reload_apps)
         self.install_btn.clicked.connect(self.choose_apks)
         self.pull_btn.clicked.connect(self.pull_selected_app)
@@ -523,6 +739,7 @@ class MainWindow(QMainWindow):
         self.device_combo.activated.connect(lambda *_: self.reload_apps())
         self.device_combo.activated.connect(lambda *_: self._mirror_device_changed())
 
+        self.about_btn.clicked.connect(self.show_about)
         self.mirror_btn.toggled.connect(self.mirror_dock.setVisible)
         self.mirror_dock.visibilityChanged.connect(self._on_mirror_visibility)
         self.mirror_view.fullscreen_changed.connect(self._on_mirror_fullscreen)
@@ -566,6 +783,13 @@ class MainWindow(QMainWindow):
         self.appmgr_view.status.connect(lambda m: self.statusBar().showMessage(m, 5000))
         self.appmgr_view.failed.connect(self._on_appmgr_failed)
         self.appmgr_view.saved.connect(self._on_appmgr_saved)
+
+        # Monitor tab: live CPU/RAM of the selected device.
+        self.device_combo.activated.connect(
+            lambda *_: self.monitor_view.set_serial(self.device_combo.currentData()))
+        self.monitor_view.status.connect(lambda m: self.statusBar().showMessage(m, 5000))
+        self.monitor_view.failed.connect(
+            lambda m: self.statusBar().showMessage(f"✗ {m}", 8000))
 
         self._app_pid_timer = QTimer(self)
         self._app_pid_timer.timeout.connect(self._refresh_app_pids)
@@ -653,6 +877,52 @@ class MainWindow(QMainWindow):
         self.files_view.set_serial(self.device_combo.currentData())
         self.appmgr_view.set_serial(self.device_combo.currentData())
 
+    # --- click-to-pick app lists (Logs + Monitor tabs) ---------------------
+    def _make_app_panel(self):
+        """Create an AppPickerPanel, register it so reload/select keep it in
+        sync, and wire its pick back into the shared App picker."""
+        panel = AppPickerPanel()
+        panel.picked.connect(self._on_app_panel_picked)
+        self._app_panels.append(panel)
+        return panel
+
+    def _build_log_app_panel(self):
+        panel = self._make_app_panel()
+        # Back-compat handles used elsewhere (and by the smoke suite).
+        self.log_app_list = panel.list
+        self.log_app_filter = panel.filter_edit
+        return panel
+
+    def _populate_log_app_list(self, clones, device_only):
+        """Rebuild every app-list panel from the same data as the App picker."""
+        for panel in self._app_panels:
+            panel.populate(clones, device_only)
+        self._sync_log_app_selection()
+
+    def _on_app_panel_picked(self, pkg):
+        # Reflect the choice into the shared App picker, then run the normal
+        # select_app() so every tab (DB / Files / Apps / Monitor) follows along.
+        self.app_combo.blockSignals(True)
+        if pkg:
+            i = self.app_combo.findData(pkg)
+            if i >= 0:
+                self.app_combo.setCurrentIndex(i)
+            else:
+                self.app_combo.setEditText(pkg)
+        else:
+            self.app_combo.setCurrentIndex(0)
+        self.app_combo.blockSignals(False)
+        self.select_app()
+
+    def _sync_log_app_selection(self):
+        """Highlight the row matching the current app in every panel."""
+        for panel in self._app_panels:
+            panel.select(self._app_pkg or None)
+
+    def _filter_log_app_list(self, text=""):
+        if self._app_panels:
+            self._app_panels[0].apply_filter(text)   # the Logs panel
+
     def reload_apps(self):
         """Repopulate the picker: gLite clones first (marked), then device apps.
 
@@ -689,6 +959,7 @@ class MainWindow(QMainWindow):
         else:
             self.app_combo.setCurrentIndex(0)
         self.app_combo.blockSignals(False)
+        self._populate_log_app_list(clones, device_only)   # mirror into the Logs list
         self.statusBar().showMessage(
             f"{len(clones)} clone{'s' if len(clones) != 1 else ''} + "
             f"{len(device_only)} device apps", 4000)
@@ -709,13 +980,23 @@ class MainWindow(QMainWindow):
             self._app_pids = None
             self._app_pid_timer.stop()
         else:
+            switched = (pkg != self._app_pkg)
             self._app_pkg = pkg
-            self._app_pids = frozenset(self._resolve_pids(pkg))
+            resolved = frozenset(self._resolve_pids(pkg))
+            # A fresh selection starts from the app's current PIDs; re-selecting
+            # the same app keeps the PIDs we already know (so its logs don't
+            # vanish while it's closed / between restarts — see _refresh_app_pids).
+            if switched or self._app_pids is None:
+                self._app_pids = resolved
+            elif resolved:
+                self._app_pids = self._app_pids | resolved
             if not self._app_pid_timer.isActive():
                 self._app_pid_timer.start(APP_PID_REFRESH_MS)
         self.db_view.set_package(pkg or None)   # the DB inspector follows the App picker
         self.files_view.set_package(pkg or None)  # the file explorer follows it too
         self.appmgr_view.set_package(pkg or None)  # selects that app in the Apps tab
+        self.monitor_view.set_package(pkg or None)  # overlay its CPU/RAM on the Monitor
+        self._sync_log_app_selection()          # keep the Logs list highlight in sync
         self.apply_filter()
 
     def pull_selected_app(self):
@@ -777,13 +1058,22 @@ class MainWindow(QMainWindow):
             return set()
 
     def _refresh_app_pids(self):
-        """Re-resolve the selected app's PIDs so a restart/launch is picked up."""
+        """Re-resolve the selected app's PIDs so a restart/launch is picked up.
+
+        We only ever *add* newly-seen PIDs; we never drop known ones. If we
+        blanked the set when the app isn't running, an empty frozenset would
+        match no PID and hide the entire log the instant the app closes. Keeping
+        the last-known PIDs leaves the app's final/crash logs on screen and
+        picks up its new PID(s) across a restart."""
         if not self._app_pkg:
             self._app_pid_timer.stop()
             return
-        new = frozenset(self._resolve_pids(self._app_pkg))
-        if new != self._app_pids:
-            self._app_pids = new
+        resolved = frozenset(self._resolve_pids(self._app_pkg))
+        if not resolved:
+            return  # app not running right now — keep last-known PIDs
+        merged = resolved if self._app_pids is None else (self._app_pids | resolved)
+        if merged != self._app_pids:
+            self._app_pids = merged
             self.apply_filter()
 
     def toggle_stream(self):
@@ -847,6 +1137,9 @@ class MainWindow(QMainWindow):
         elif w is self.appmgr_view:
             self.appmgr_view.set_serial(self.device_combo.currentData())
             self.appmgr_view.set_package(self._current_app_pkg() or None)
+        elif w is self._monitor_tab:
+            self.monitor_view.set_serial(self.device_combo.currentData())
+            self.monitor_view.set_package(self._current_app_pkg() or None)
 
     def _on_mock_failed(self, message):
         self.statusBar().showMessage(f"✗ {message}", 10000)
@@ -1129,6 +1422,7 @@ class MainWindow(QMainWindow):
             exclude_regex=self.exclude_regex_cb.isChecked(),
         ).compile()
         self.model.set_filter(spec)
+        self._update_advanced_label()
         self._mark(self.tag_edit, spec.has_error("tag"))
         self._mark(self.pid_edit, spec.has_error("pid"))
         self._mark(self.text_edit, spec.has_error("text"))
@@ -1242,4 +1536,5 @@ class MainWindow(QMainWindow):
         self.db_view.shutdown()          # remove pulled DB snapshots
         self.files_view.shutdown()       # stop transfers + remove staged temp files
         self.appmgr_view.shutdown()      # stop app-mgr workers + remove staged APKs
+        self.monitor_view.shutdown()     # stop the CPU/RAM polling thread
         super().closeEvent(event)

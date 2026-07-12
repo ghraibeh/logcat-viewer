@@ -14,9 +14,17 @@ Two tiers, one UI:
 
 The proxy engine lives in a ``QThread`` (its own asyncio loop) and only ever
 *emits signals* — it never touches widgets. The device wiring (``adb reverse`` /
-``settings put global http_proxy``) is applied on enable and, critically, torn
-down synchronously on *every* exit path: a proxy left pointing at a dead reverse
-tunnel leaves the device with no internet.
+``settings put global http_proxy``) is applied on enable — after snapshotting the
+device's *original* proxy — and, critically, restored synchronously on *every*
+exit path (disable / device switch / app close): the device is put back exactly
+as it was (original proxy re-applied, or the setting deleted if it had none), so
+a proxy left pointing at a dead reverse tunnel never strands the device offline.
+
+For the case the host *can't* clean up — the device is unplugged / reboots / adb
+dies / the app crashes — a device-side **watchdog** (a held-open ``adb shell``
+whose shell traps SIGHUP) restores the original proxy on the device itself when
+the link drops. A normal stop releases it via one byte on its stdin so it exits
+*without* restoring (the host already did), avoiding any clobber of a new session.
 """
 from __future__ import annotations
 
@@ -117,6 +125,57 @@ def set_proxy_args(serial: str, port: int) -> list[str]:
 def clear_proxy_args(serial: str) -> list[str]:
     """adb args to clear the global HTTP proxy (``:0`` = disabled, no reboot)."""
     return ["-s", serial, "shell", "settings", "put", "global", "http_proxy", ":0"]
+
+
+def get_proxy_args(serial: str) -> list[str]:
+    """adb args to read the device's current global HTTP proxy (``null`` = unset)."""
+    return ["-s", serial, "shell", "settings", "get", "global", "http_proxy"]
+
+
+# A device proxy value is host:port-ish; anything with shell metacharacters is
+# rejected (defence-in-depth, since it's embedded in the on-device shell script).
+_SAFE_PROXY = re.compile(r"[A-Za-z0-9._:\-\[\]]+")
+
+
+def _real_proxy(original: str) -> str:
+    """The device's genuine prior proxy to restore, or '' if it had none.
+
+    Empty / ``null`` / ``:0`` / our-own ``127.0.0.1:`` tunnel / anything with
+    unsafe characters → '' (meaning: delete the setting, the true clean state)."""
+    val = (original or "").strip()
+    if (val and val.lower() != "null" and val != ":0"
+            and not val.startswith("127.0.0.1:") and _SAFE_PROXY.fullmatch(val)):
+        return val
+    return ""
+
+
+def restore_proxy_args(serial: str, original: str) -> list[str]:
+    """adb args to put the proxy back exactly as it was before we touched it —
+    the prior proxy verbatim, or delete the setting if the device had none."""
+    val = _real_proxy(original)
+    if val:
+        return ["-s", serial, "shell", "settings", "put", "global", "http_proxy", val]
+    return ["-s", serial, "shell", "settings", "delete", "global", "http_proxy"]
+
+
+def proxy_restore_cmd(original: str) -> str:
+    """The device-shell command that restores the original proxy (or deletes it)."""
+    val = _real_proxy(original)
+    return (f"settings put global http_proxy {val}" if val
+            else "settings delete global http_proxy")
+
+
+def proxy_watchdog_script(original: str) -> str:
+    """A tiny device-side script (run over a held-open ``adb shell``) that
+    self-heals the proxy when the connection drops.
+
+    * On **disconnect / app crash** adbd delivers SIGHUP to this shell → the trap
+      restores the device's original proxy. This is the safety net for when the
+      host never got to run its own teardown.
+    * On a **normal stop** the app writes one byte to the shell's stdin → ``read``
+      returns → the trap is disarmed and it exits *without* restoring (the host
+      restores synchronously), so a later stray trap can't clobber a new session."""
+    return f"trap '{proxy_restore_cmd(original)}' HUP INT TERM; read _ 2>/dev/null; trap - HUP INT TERM"
 
 
 def reverse_remove_args(serial: str, port: int) -> list[str]:
@@ -1054,7 +1113,7 @@ class ProxySetupWorker(QThread):
     """Wire the device to the host proxy: ``adb reverse`` then ``settings put``.
     Never sets the proxy if the reverse tunnel fails (would strand the device)."""
 
-    done = pyqtSignal(bool, str)   # ok, message
+    done = pyqtSignal(bool, str, str)   # ok, message, original_proxy (to restore later)
 
     def __init__(self, adb: str, serial: str, port: int, parent=None):
         super().__init__(parent)
@@ -1062,21 +1121,34 @@ class ProxySetupWorker(QThread):
         self._serial = serial
         self._port = port
 
+    def _read_original_proxy(self) -> str:
+        """Snapshot the device's current proxy BEFORE we overwrite it, so it can
+        be restored verbatim on teardown (some devices route through a real
+        proxy — wiping it strands the device's internet)."""
+        try:
+            g = subprocess.run([self._adb, *get_proxy_args(self._serial)],
+                               capture_output=True, text=True, timeout=8)
+            return (g.stdout or "").strip()
+        except (subprocess.SubprocessError, OSError):
+            return ""
+
     def run(self):
+        original = self._read_original_proxy()
         try:
             r = subprocess.run([self._adb, *reverse_args(self._serial, self._port)],
                                capture_output=True, text=True, timeout=8)
             if r.returncode != 0:
                 msg = (r.stderr or r.stdout or "").strip().splitlines()
                 self.done.emit(False, "adb reverse failed: "
-                               + (msg[-1] if msg else "needs Android 5+ / a connected device"))
+                               + (msg[-1] if msg else "needs Android 5+ / a connected device"),
+                               original)
                 return
             subprocess.run([self._adb, *set_proxy_args(self._serial, self._port)],
                            capture_output=True, text=True, timeout=8)
         except (subprocess.SubprocessError, OSError) as exc:
-            self.done.emit(False, f"proxy setup failed: {exc}")
+            self.done.emit(False, f"proxy setup failed: {exc}", original)
             return
-        self.done.emit(True, f"Proxy on 127.0.0.1:{self._port}")
+        self.done.emit(True, f"Proxy on 127.0.0.1:{self._port}", original)
 
 
 class CertPushWorker(QThread):
@@ -1146,12 +1218,14 @@ class CertPushWorker(QThread):
                         pass
 
 
-def teardown_proxy(adb: str, serial: str, port: int) -> None:
-    """Synchronously clear the device proxy + reverse tunnel. Best-effort but
-    must run on every exit path — a dangling proxy kills the device's internet."""
+def teardown_proxy(adb: str, serial: str, port: int, original: str = "") -> None:
+    """Synchronously restore the device's original proxy + drop the reverse
+    tunnel. Best-effort but must run on every exit path — a dangling proxy kills
+    the device's internet. ``original`` is the value captured at enable time; the
+    device is put back exactly as it was (or the proxy is deleted if it had none)."""
     if not adb or not serial:
         return
-    for args in (clear_proxy_args(serial), reverse_remove_args(serial, port)):
+    for args in (restore_proxy_args(serial, original), reverse_remove_args(serial, port)):
         try:
             subprocess.run([adb, *args], capture_output=True, text=True, timeout=5)
         except (subprocess.SubprocessError, OSError):
@@ -1684,6 +1758,8 @@ class InterceptView(QWidget):
         self._cert_worker: CertPushWorker | None = None
         self._active_serial: str | None = None
         self._active_port = DEFAULT_PORT
+        self._orig_proxy = ""                # device's proxy before we wired it, to restore
+        self._watchdog: QProcess | None = None   # on-device self-heal if the link drops
         self._engine_is_mitm = False
         self._fell_back = False
         self._seq = 0
@@ -1889,10 +1965,11 @@ class InterceptView(QWidget):
         self._setup_worker.done.connect(self._on_setup_done)
         self._setup_worker.start()
 
-    def _on_setup_done(self, ok: bool, message: str):
+    def _on_setup_done(self, ok: bool, message: str, original: str = ""):
         if self._setup_worker is not None:
             self._setup_worker.wait(3000)   # let the thread fully finish before GC
         self._setup_worker = None
+        self._orig_proxy = original         # restore exactly this on teardown
         self.enable_btn.setEnabled(True)
         if not ok:
             self.port_spin.setEnabled(True)
@@ -1901,6 +1978,7 @@ class InterceptView(QWidget):
             self.failed.emit(message)
             return
         self._enabled = True
+        self._start_watchdog()          # self-heal the proxy if the device drops
         self._set_toggle(True)
         self._start_engine()
 
@@ -1932,17 +2010,66 @@ class InterceptView(QWidget):
             self._engine.wait(3000)
             self._engine = None
 
+    def _start_watchdog(self):
+        """Hold an ``adb shell`` open on the device that restores the original
+        proxy if the connection drops without us tearing it down (unplug, reboot,
+        adb kill, app crash)."""
+        self._stop_watchdog()
+        if not self.adb or not self._active_serial:
+            return
+        wd = QProcess(self)
+        wd.finished.connect(self._on_watchdog_finished)
+        wd.start(self.adb, ["-s", self._active_serial, "shell",
+                            proxy_watchdog_script(self._orig_proxy)])
+        self._watchdog = wd
+
+    def _stop_watchdog(self):
+        """Ask the device watchdog to exit *without* restoring (the host restores
+        synchronously on a normal stop) — a byte on its stdin releases its
+        ``read`` and disarms the trap."""
+        wd = self._watchdog
+        self._watchdog = None
+        if wd is None:
+            return
+        try:
+            wd.finished.disconnect()           # deliberate stop → don't treat as a disconnect
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            if wd.state() != QProcess.ProcessState.NotRunning:
+                wd.write(b"\n")
+                wd.closeWriteChannel()
+                if not wd.waitForFinished(1500):
+                    wd.kill()
+                    wd.waitForFinished(1000)
+        except (RuntimeError, OSError):
+            pass
+
+    def _on_watchdog_finished(self, *_):
+        """Reached only when the watchdog dies on its own — i.e. the device
+        dropped. Its on-device trap has already restored the proxy; stop cleanly."""
+        self._watchdog = None
+        if self._enabled:
+            self.status.emit("Device disconnected — intercept stopped; "
+                             "device proxy restored on-device")
+            self._disable()
+
     def _disable(self):
         was = self._enabled
         self._enabled = False
         self._stop_engine()
+        self._stop_watchdog()
         if was and self._active_serial:
-            teardown_proxy(self.adb, self._active_serial, self._active_port)
+            teardown_proxy(self.adb, self._active_serial, self._active_port,
+                           self._orig_proxy)
         self.port_spin.setEnabled(True)
         self._set_toggle(False)
         self._set_status("Intercept off")
         if was:
-            self.status.emit("Intercept disabled — device proxy cleared")
+            restored = "restored" if self._orig_proxy and \
+                not self._orig_proxy.lower().startswith(("null", ":0", "127.0.0.1:")) \
+                else "cleared"
+            self.status.emit(f"Intercept disabled — device proxy {restored}")
 
     def _on_decrypt_toggled(self, _checked: bool):
         # Swap engines in place (device wiring stays up) while enabled.

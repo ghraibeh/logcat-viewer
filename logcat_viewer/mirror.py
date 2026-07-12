@@ -119,8 +119,12 @@ class H264MirrorWorker(QThread):
     — smooth (30–60 fps) at a fraction of the bandwidth — which is the same
     technique scrcpy and Android Studio's mirror use.
 
-    `--time-limit 0` runs the encoder unbounded; if a device ignores that and
-    stops (older builds cap at ~180s), the EOF just triggers a fresh session."""
+    Each `screenrecord` session is capped at `--time-limit 180` (the maximum
+    every build accepts) and the outer loop transparently reconnects on EOF, so
+    the stream is effectively unbounded. We deliberately avoid `--time-limit 0`
+    ("unbounded"): real devices honor it, but some emulators/VMs read 0 as *stop
+    immediately* and emit an empty stream — the mirror would paint one primed
+    frame and then freeze."""
     frame = pyqtSignal(QImage)
     failed = pyqtSignal(str)
 
@@ -183,7 +187,7 @@ class H264MirrorWorker(QThread):
             return
 
         cmd = [self._adb, "-s", self._serial, "exec-out", "screenrecord",
-               "--output-format=h264", "--time-limit", "0",
+               "--output-format=h264", "--time-limit", "180",
                "--bit-rate", self._bitrate, "-"]
         self._kill_remote()   # clear any straggler holding the encoder
         self.msleep(120)      # let the encoder free before we grab it

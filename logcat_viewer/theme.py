@@ -230,6 +230,15 @@ QTabBar::tab:selected {{ color: {TEXT}; border-bottom: 2px solid {ACCENT}; }}
 
 /* Filter bar (Logs tab) and mock-location control bar (Location tab) */
 #FilterBar {{ background: {SURFACE}; border-bottom: 1px solid {BORDER}; }}
+#FilterSep {{ background: {BORDER}; }}
+
+/* Performance Monitor tab */
+QLabel#MonHeading {{ font-size: 16px; font-weight: 600; color: {TEXT}; }}
+#MonCard {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px; }}
+QLabel#MonCaption {{ color: {TEXT_DIM}; font-weight: 600; letter-spacing: 1px; }}
+QLabel#MonValue {{ font-size: 30px; font-weight: 700; color: {TEXT}; }}
+QLabel#MonSub {{ color: {TEXT_DIM}; font-family: Menlo, monospace; font-size: 12px; }}
+QLabel#MonApp {{ font-family: Menlo, monospace; font-size: 12px; font-weight: 600; }}
 #MockBar {{ background: {SURFACE}; border-top: 1px solid {BORDER}; }}
 #MockStatus {{ color: {TEXT_DIM}; font-family: Menlo, monospace; font-size: 12px; }}
 
@@ -353,8 +362,24 @@ QTableView#ExplorerTable QHeaderView::section {{
     color: {TEXT_DIM}; font-family: Menlo, monospace; font-size: 12px;
 }}
 
+/* Logs tab — left app-picker list */
+#LogAppPanel {{ background: {BG}; }}
+#LogAppBar {{ background: {SURFACE}; border-bottom: 1px solid {BORDER}; border-right: 1px solid {BORDER}; }}
+#LogAppSearch {{
+    background: {BG}; color: {TEXT}; border: 1px solid {BORDER};
+    border-radius: 6px; padding: 4px 8px;
+}}
+#LogAppSearch:focus {{ border: 1px solid {ACCENT}; }}
+#LogAppList {{
+    background: {BG}; border: none; border-right: 1px solid {BORDER}; outline: none;
+}}
+#LogAppList::item {{ border-radius: 6px; padding: 4px 6px; margin: 1px 4px; }}
+#LogAppList::item:hover {{ background: {SURFACE_2}; }}
+#LogAppList::item:selected {{ background: rgba(79, 140, 255, 0.22); color: {TEXT}; }}
+
 /* App Management tab */
 #AppMgrBar {{ background: {SURFACE}; border-bottom: 1px solid {BORDER}; }}
+#AppMgrSubBar {{ background: {SURFACE}; border-bottom: 1px solid {BORDER}; }}
 #AppMgrSearch {{
     background: {BG}; color: {TEXT}; border: 1px solid {BORDER};
     border-radius: 6px; padding: 4px 8px;
@@ -393,12 +418,47 @@ QTableView#ExplorerTable QHeaderView::section {{
     font-family: Menlo, monospace; font-size: 12px; padding: 8px;
 }}
 
+/* Decompiled source viewer window */
+#SrcViewer {{ background: {BG}; }}
+#SrcBar {{ background: {SURFACE}; border-bottom: 1px solid {BORDER}; }}
+#SrcPath {{ color: {TEXT_DIM}; font-family: Menlo, monospace; font-size: 11px; }}
+#SrcFilter {{
+    background: {BG}; color: {TEXT}; border: 1px solid {BORDER};
+    border-radius: 6px; padding: 4px 8px; min-width: 180px;
+}}
+#SrcFilter:focus {{ border: 1px solid {ACCENT}; }}
+#SrcTree {{
+    background: {BG}; border: none; border-right: 1px solid {BORDER}; outline: none;
+}}
+#SrcTree::item {{ padding: 2px 2px; }}
+#SrcTree::item:selected {{ background: rgba(79, 140, 255, 0.22); color: {TEXT}; }}
+QPlainTextEdit {{ background: {BG}; color: {TEXT}; border: none; }}
+
 /* Transient "copied" toast */
 #Toast {{
     background: {SURFACE_3}; color: {TEXT};
     border: 1px solid {BORDER_2}; border-radius: 9px;
     padding: 8px 16px; font-weight: 600;
 }}
+
+/* About dialog */
+#AboutDialog {{ background: {BG}; }}
+#AboutName {{ color: {TEXT}; font-size: 23px; font-weight: 700; letter-spacing: 0.2px; }}
+#AboutVersion {{ color: {TEXT_DIM}; font-family: Menlo, monospace; font-size: 12px; }}
+#AboutTagline {{ color: {TEXT_DIM}; font-size: 13px; }}
+#AboutSep {{ background: {BORDER}; border: none; max-height: 1px; }}
+#AboutFeatureTitle {{ font-size: 12px; }}
+#AboutCreditLabel {{ color: {TEXT_DIM}; font-size: 12px; }}
+#AboutAuthor {{ color: {ACCENT_H}; font-size: 16px; font-weight: 700; }}
+#AboutContact a {{ color: {TEXT_DIM}; text-decoration: none; font-size: 12px; }}
+#AboutContact a:hover {{ color: {ACCENT_H}; }}
+#AboutMeta {{ color: {TEXT_DIM}; font-size: 11px; }}
+QPushButton#AboutClose {{
+    background: {ACCENT}; border: 1px solid {ACCENT}; color: #ffffff;
+    font-weight: 600; padding: 6px 26px; border-radius: 7px;
+}}
+QPushButton#AboutClose:hover {{ background: {ACCENT_H}; border-color: {ACCENT_H}; }}
+QPushButton#AboutClose:pressed {{ background: {ACCENT}; }}
 """
 
 

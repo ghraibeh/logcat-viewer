@@ -4,8 +4,8 @@ A native-feeling macOS desktop app (Python + PyQt6) that streams **live `adb log
 and filters it like logcat — by **level, tag, PID, free text, and regex** — with live,
 as-you-type filtering over a large in-memory buffer, plus a set of device tools (install/pull APK,
 screen mirror, screenshot, screen recording, **mock GPS location**, HTTP intercept, SQLite database
-inspector, a **file explorer** with two-way transfer & drag-and-drop, and an **App-Manager-style app
-manager**).
+inspector, a **file explorer** with two-way transfer & drag-and-drop, an **App-Manager-style app
+manager**, and a **CPU/RAM performance monitor**).
 
 Standalone project — it works with **any** `adb`-visible device and app; its only external
 requirement is the `adb` binary.
@@ -97,32 +97,64 @@ Pick a device, press **Start**. Existing buffer dumps immediately, then it follo
   - **Manage** — **New folder**, **Rename**, and **Delete** (with a confirmation prompt), plus
     right-click **Copy device path**. Everything runs off the UI thread.
 - **App Management** — the **Apps** tab is an **[App-Manager](https://github.com/muntashirakon/AppManager)-style**
-  view of every installed package (letter-tile icons, search + **All / User / System / Disabled**
-  filter). Pick an app to see a rich detail pane:
+  view of every installed package (**real app icons**, pulled lazily from each APK — extracted straight
+  out of the APK zip via the device's `unzip`, no root and no whole-APK download — with a drawn
+  letter-tile fallback; search + **All / User / System / Disabled** filter). Pick an app to see a rich
+  detail pane:
   - **Info** — version name/code, min/target SDK, UID, installer, first-install / last-update times,
     data dir, code path, ABI, flags, and **APK / data / cache sizes**.
   - **Permissions** — every requested permission with its **granted / denied** state; right-click to
-    **Grant** or **Revoke** (`pm grant`/`revoke`).
+    **Grant** or **Revoke** (`pm grant`/`revoke`), or use **Grant all** / **Revoke all** to change
+    every changeable runtime permission at once (install/normal perms are dimmed and left untouched).
   - **Components** — activities, services, receivers, and providers (from the manifest resolver
     tables); right-click to **Enable / Disable / Reset** a component (`pm enable`/`disable`).
   - **App Ops** — per-op modes (`appops get`); right-click to set **allow / deny / ignore / default /
     foreground** (`appops set`), or add any op by name.
   - **Signature** — the signing summary from `dumpsys package`.
-  - **Actions** — **Launch**, **Force-stop**, **Clear data**, **Enable/Disable** (freeze), **Uninstall**
-    (both with a confirmation prompt), **Extract APK** (pulls base + splits to this Mac, with an
-    *Open Folder* button), and **App Info** (opens the OS App-details screen). All device work runs
-    off the UI thread; destructive commands prompt for permission.
-- **App filter** — searchable **App** picker lists installed apps (plus sandboxed app clones running
-  inside a virtualization host, which aren't OS-installed). Selecting one filters the stream to that
-  app's PIDs — matching `pkg` **and** `pkg:*`, so all extra/`:child` processes are included. PIDs are
-  re-resolved every 3s, so an app launch or restart is picked up automatically.
+  - **Decompile to Java** — right-click an app → **Decompile to Java (jadx)**. It pulls the APK and
+    runs **jadx** (DEX → readable Java + decoded resources/manifest), then opens a **source explorer**
+    window: a file tree of the decompiled project on the left and a read-only **code editor** on the
+    right (line numbers + Java/XML syntax highlighting), with a file filter, **Re-decompile**, and
+    **Open in Finder**. jadx + a Java runtime are **provisioned on first use** — an existing jadx/Java
+    is used if present, otherwise they're downloaded once into
+    `~/Library/Application Support/logcat-viewer/` and cached (no manual install). Results are cached
+    per app, so re-opening is instant.
+  - **Actions** — **Launch**, **Force-stop**, **Clear cache** (only the cache — tries
+    `pm clear --cache-only`, then `run-as`/rooted-`su` `rm`), **Clear data**, **Enable/Disable**
+    (freeze), **Uninstall** (Clear data + Uninstall confirm first), **Extract APK** (pulls base +
+    splits to this Mac, with an *Open Folder* button), and **App Info** (opens the OS App-details
+    screen). All device work runs off the UI thread.
+- **Performance Monitor** — the **Monitor** tab shows the device's **live CPU and RAM** usage:
+  overall CPU% (from `/proc/stat` jiffies deltas) with core count and 1/5/15-min load averages, and
+  memory used/total (from `/proc/meminfo`), each with a rolling history **sparkline**. Pick an app in
+  the shared **App** picker and its **per-process CPU% and memory (PSS)** overlay onto the same cards
+  as a second line (via `dumpsys cpuinfo`/`meminfo` — works for **any running app**, no root or
+  debuggable build needed). A refresh-rate selector (0.5 – 5 s) sets the poll interval. Sampling runs
+  on a background thread and only while the tab is open with a device selected, so it costs nothing
+  otherwise. A **🔎 Detect leaks** button runs **memory-leak detection** on the selected app
+  (below).
+- **Memory-leak detection (LeakCanary / Shark)** — on the **Monitor** tab, pick an app and hit
+  **Detect leaks**: it captures a managed heap dump (`am dumpheap`), pulls the `.hprof`, and analyzes
+  it with LeakCanary's **Shark** engine, opening a report window with the application leaks and each
+  leak's shortest path to the GC root (plus a *Save report* / *Open .hprof folder*). Works on **any
+  debuggable app** (or any app on a rooted device) — no LeakCanary library baked in. Shark + a JRE are
+  **auto-provisioned on first use** (downloaded once, cached), same as the jadx decompiler.
+- **App filter** — the **Logs** tab has a **click-to-pick app list** down the left side (**All apps**
+  + every installed app, plus sandboxed app **clones** running inside a virtualization host) — no
+  typing; a filter box narrows it. There's also the searchable **App** picker in the top toolbar; the
+  two stay in sync and either filters the stream to that app's PIDs — matching `pkg` **and** `pkg:*`,
+  so all extra/`:child` processes are included. PIDs are re-resolved every 3s, so an app launch or
+  restart is picked up automatically.
 - **Filter bar (all live, debounced):**
-  - **Level** — minimum priority (Verbose → Fatal).
-  - **Tag** — substring or, with the `.*` toggle, **regex** (e.g. `ActivityManager|WindowManager`).
-  - **PID** — one or several (`1234, 5678`).
-  - **Find** — matches the whole line (tag + message); substring or regex.
-  - **Exclude** — hide matching lines; substring or regex.
-  - Invalid regex turns the field red and is ignored (log keeps flowing) rather than erroring.
+  - **Level** — **All levels**, or a minimum priority (Verbose → Fatal).
+  - **Find** — the primary search box; matches the tag + message. Type `|`-separated terms for **OR**
+    (e.g. `error|success`), or flip the `.*` toggle for full **regex**.
+  - **Advanced** (collapsed by default) reveals:
+    - **Tag** — substring, `|`-OR terms, or regex (e.g. `ActivityManager|WindowManager`).
+    - **PID** — one or several (`1234, 5678`).
+    - **Exclude** — hide matching lines; substring, `|`-OR terms, or regex.
+  - **Clear filters** resets every field; invalid regex turns the field red and is ignored (log keeps
+    flowing) rather than erroring.
 - **Color by level** (legible in light & dark), monospace table.
 - **Right-click menu** on the log: **Copy** selected lines, **Clear log**, and **Force-crash**
   the app (the filtered app, or the right-clicked row's process) — `am force-stop` + `kill -9`
@@ -187,11 +219,14 @@ logcat_viewer/
   mirror.py    screen mirror (H.264 + screencap), screenshot, screen recording, MirrorView
   pull.py      PullWorker: pull an app's APK(s) off the device
   mocklocation.py  mock GPS: setup worker (auto-install helper + appops), set/stop, MockLocationView
-  intercept.py     Network Intercept: built-in HTTP(S) proxy (+ optional mitmproxy), InterceptView
+  intercept.py     Network Intercept: built-in HTTP(S) proxy (+ optional mitmproxy); snapshots & restores the device's original proxy, incl. an on-device watchdog that self-heals it if the link drops, InterceptView
   dbinspect.py     Database Inspector: list/pull an app's SQLite DBs (run-as), stdlib-sqlite reader, DatabaseView
   files.py         File Explorer: browse/transfer/manage device files (run-as/su), drag&drop, FilesView
   appmgr.py        App Management: list apps + inspect/manage (perms, components, app-ops, actions), AppManagerView
-  ui.py        MainWindow: controls, live filter bar, Logs/Location/Network/Databases/Files/Apps tabs, docks, wiring
+  decompile.py     Decompile APK→Java (jadx, auto-provisioned) + source-tree/code-viewer, SourceViewerWindow
+  monitor.py       Performance Monitor: /proc CPU+RAM poller (QThread) + sparkline dashboard + per-app overlay + Detect-leaks, MonitorView
+  leakdetect.py    Memory-leak detection: am dumpheap → pull → LeakCanary Shark analyze (auto-provisioned jars+JRE), LeakDetectWorker + LeakReportWindow
+  ui.py        MainWindow: controls, live filter bar, Logs/Location/Network/Databases/Files/Apps/Monitor tabs, docks, wiring
   __main__.py  entry point
   assets/      map.html (MapLibre picker) + mocklocation.apk (prebuilt helper)
 android-helper/  source + build.sh for the mock-location helper APK (LocationManager test providers)
@@ -202,6 +237,7 @@ tests/
   live_dbinspect.py  drives the DB inspector (list → pull → read tables/rows) against a device
   live_files.py      drives the file explorer (list → push → pull → mkdir/rename/delete) against a device
   live_appmgr.py     drives app management (list → detail → extract APK → force-stop) against a device
+  decompile_check.py decompiles the bundled APK with jadx and opens it in the source viewer (offline)
 ```
 
 ## Tests
@@ -213,6 +249,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_mock.py <serial>   # mock 
 QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_dbinspect.py <serial> [pkg]  # DB inspector, end-to-end
 QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_files.py <serial> [pkg]      # file explorer, end-to-end
 QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_appmgr.py <serial> [pkg]     # app management, end-to-end
+QT_QPA_PLATFORM=offscreen .venv/bin/python tests/decompile_check.py                # jadx decompile of the bundled APK (offline)
 ```
 
 ## Development

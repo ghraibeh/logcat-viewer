@@ -23,9 +23,10 @@ from PyQt6.QtWidgets import QApplication
 
 from logcat_viewer import adb as adblib
 from logcat_viewer.appmgr import (
-    AppManagerView, AppListWorker, AppDetailWorker, AppActionWorker,
-    force_stop_args as _fs,
+    AppManagerView, AppListWorker, AppDetailWorker, AppActionWorker, AppIconWorker,
+    ClearCacheWorker, BulkPermWorker, force_stop_args as _fs,
 )
+from PyQt6.QtGui import QImage
 
 app = QApplication([])
 adb = adblib.find_adb()
@@ -111,10 +112,46 @@ try:
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
-# --- 4. one reversible state-change: force-stop the target -------------------
+# --- 3b. real app icon straight out of the APK (no whole-APK download) -------
+res = run_worker(AppIconWorker(adb, serial, target, tinfo.apk_path if tinfo else ""),
+                 timeout=30000)
+pkg, result = res if res else (target, None)
+if result == "unavailable":
+    print("     (device has no `unzip`; icons fall back to letter tiles)")
+    check(True, "icon fetch degrades gracefully without unzip")
+elif isinstance(result, QImage) and not result.isNull():
+    check(result.width() > 0 and result.height() > 0,
+          f"AppIconWorker decoded a {result.width()}x{result.height()} icon for {target}")
+else:
+    print(f"     ({target} has no raster launcher icon — adaptive-only; tile fallback)")
+    check(True, "adaptive-only app falls back to the letter tile")
+
+# --- 4. reversible state-changes: force-stop + clear cache -------------------
 res = run_worker(AppActionWorker(adb, _fs(serial, target), f"force-stop {target}"))
 ok, msg = res if res else (False, "no result")
 check(ok, f"AppActionWorker force-stop: {msg}")
+
+res = run_worker(ClearCacheWorker(adb, serial, target))
+ok, msg = res if res else (False, "no result")
+# cache clear can legitimately fail on a locked-down system app w/o root — report either way
+print(f"     clear-cache → {msg}")
+check(ok or "Could not clear cache" in msg,
+      "ClearCacheWorker ran its fallback chain and reported a result")
+
+# bulk revoke → grant round-trip over the target's runtime permissions (reversible)
+runtime = [p.name for p in (detail.permissions if detail else []) if p.runtime]
+if runtime:
+    res = run_worker(BulkPermWorker(adb, serial, target, runtime, False))  # revoke all
+    ok, msg = res if res else (False, "no result")
+    print(f"     revoke-all → {msg}")
+    check(ok or "Could not" in msg, "BulkPermWorker revoke-all ran across runtime perms")
+    res = run_worker(BulkPermWorker(adb, serial, target, runtime, True))   # grant back
+    ok, msg = res if res else (False, "no result")
+    print(f"     grant-all  → {msg}")
+    check(ok or "Could not" in msg, "BulkPermWorker grant-all restored runtime perms")
+else:
+    print("     (target has no runtime permissions to bulk-change)")
+    check(True, "no runtime perms to bulk-change — skipped")
 
 # --- 5. the wired view lists apps on the real device -------------------------
 view = AppManagerView(adb)
