@@ -30,7 +30,9 @@ from PyQt6.QtWidgets import (
 )
 
 from .pull import PullWorker
+from .crash import CrashView
 from .decompile import DecompileWorker, SourceViewerWindow, decompile_root
+from .prefs import PrefsView
 from .theme import TEXT, TEXT_DIM, GREEN, RED, AMBER, ACCENT
 
 # App-ops modes an app op can be set to (the values `appops set` accepts).
@@ -88,6 +90,7 @@ class AppDetail:
     providers: list = field(default_factory=list)
     appops: list = field(default_factory=list)           # [AppOp]
     signatures: list = field(default_factory=list)       # [str] summary lines
+    running: list = field(default_factory=list)          # live services (dicts)
 
 
 # --- pure command builders (Qt-free) ------------------------------------------
@@ -111,6 +114,34 @@ def list_filtered_args(serial: str, flag: str) -> list[str]:
 
 def dumpsys_args(serial: str, package: str) -> list[str]:
     return _sh(serial) + ["dumpsys", "package", package]
+
+
+def running_services_args(serial: str, package: str) -> list[str]:
+    return _sh(serial) + ["dumpsys", "activity", "services", package]
+
+
+# "* ServiceRecord{27e4bd2 u0 com.example/.MyService}" — newer builds append
+# extras (e.g. " c:<caller>") inside the braces after the component.
+_SVC_REC_RE = re.compile(r"\* ServiceRecord\{\S+ u\d+ ([^}\s]+)[^}]*\}")
+_SVC_PROC_RE = re.compile(r"app=ProcessRecord\{\S+ (\d+):(\S+?)[/}]")
+
+
+def parse_running_services(text: str) -> list[dict]:
+    """Live services from `dumpsys activity services <pkg>`:
+    [{'component', 'pid', 'process', 'foreground', 'started'}]"""
+    heads = list(_SVC_REC_RE.finditer(text))
+    out = []
+    for i, m in enumerate(heads):
+        block = text[m.start():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
+        pm = _SVC_PROC_RE.search(block)
+        out.append({
+            "component": m.group(1),
+            "pid": int(pm.group(1)) if pm else None,
+            "process": pm.group(2) if pm else "",
+            "foreground": "isForeground=true" in block,
+            "started": "startRequested=true" in block,
+        })
+    return out
 
 
 def appops_get_args(serial: str, package: str, *, cmd: bool = True) -> list[str]:
@@ -578,6 +609,11 @@ class AppDetailWorker(QThread):
             if self._apk else ""
         detail.general["dataSize"] = self._du(".")
         detail.general["cacheSize"] = self._du("cache")
+        try:
+            detail.running = parse_running_services(
+                self._run(running_services_args(self._serial, self._pkg), timeout=10).stdout)
+        except (subprocess.SubprocessError, OSError):
+            detail.running = []
         self.done.emit(True, detail, "", self._seq)
 
     def _size(self, argv) -> str:
@@ -991,6 +1027,10 @@ class AppManagerView(QWidget):
         self._build_comp_tab()
         self._build_ops_tab()
         self._build_sig_tab()
+        self._build_running_tab()
+        self._build_prefs_tab()
+        self._build_crash_tab()
+        self.tabs.currentChanged.connect(self._on_subtab_changed)
         rv.addWidget(self.tabs, 1)
         split.addWidget(right)
 
@@ -1090,11 +1130,53 @@ class AppManagerView(QWidget):
         self.sig_view.setObjectName("AppMgrSig")
         self.tabs.addTab(self.sig_view, "Signature")
 
+    def _build_running_tab(self):
+        self.run_table = QTableWidget(0, 4)
+        self.run_table.setObjectName("AppMgrRunTable")
+        self.run_table.setHorizontalHeaderLabels(
+            ["Service", "Process", "PID", "State"])
+        self.run_table.verticalHeader().setVisible(False)
+        self.run_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.run_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.run_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        self.tabs.addTab(self.run_table, "Running")
+
+    def _build_prefs_tab(self):
+        """SharedPreferences editor, embedded — follows the app selected here
+        (it lazy-loads only while its sub-tab is actually visible)."""
+        self.prefs_view = PrefsView(self.adb)
+        self.prefs_view.status.connect(self.status)
+        self.prefs_view.failed.connect(self.failed)
+        self.tabs.addTab(self.prefs_view, "Prefs")
+
+    def _build_crash_tab(self):
+        """Crash/ANR viewer, embedded — its “This app” filter follows the app
+        selected here; live-crash pings badge this sub-tab until it's opened."""
+        self.crash_view = CrashView(self.adb)
+        self.crash_view.status.connect(self.status)
+        self.crash_view.failed.connect(self.failed)
+        self.tabs.addTab(self.crash_view, "Crashes")
+
+    def notify_live_crash(self):
+        """Relay a live FATAL/ANR ping into the embedded crash view and badge
+        the sub-tab (cleared when it's opened)."""
+        self.crash_view.notify_live_crash()
+        idx = self.tabs.indexOf(self.crash_view)
+        if idx >= 0 and self.tabs.currentWidget() is not self.crash_view:
+            self.tabs.setTabText(idx, "Crashes ●")
+
+    def _on_subtab_changed(self, index):
+        if self.tabs.widget(index) is self.crash_view:
+            self.tabs.setTabText(index, "Crashes")
+
     # --- shared-selection contract -----------------------------------------
     def set_serial(self, serial: str | None):
         if serial != self._serial:
             self._serial = serial
             self._clear_icon_state()          # APK paths (and icons) are per-device
+            self.prefs_view.set_serial(serial)
+            self.crash_view.set_serial(serial)
             self._maybe_reload()
 
     def set_package(self, package: str | None):
@@ -1298,6 +1380,8 @@ class AppManagerView(QWidget):
             f"UID {app.uid or '—'} · v{app.version_code or '—'} · {badges}")
         self.btn_freeze.setText("Enable" if not app.enabled else "Disable")
         self._set_actions_enabled(True)
+        self.prefs_view.set_package(app.package)   # Prefs + Crashes sub-tabs follow
+        self.crash_view.set_package(app.package)
         self._clear_detail("Loading…")
         self._load_detail(app)
 
@@ -1331,6 +1415,7 @@ class AppManagerView(QWidget):
         self._populate_components(detail)
         self._populate_ops(detail)
         self._populate_sig(detail)
+        self._populate_running(detail)
 
     def _clear_detail(self, msg):
         self._detail = None
@@ -1340,6 +1425,8 @@ class AppManagerView(QWidget):
         self.btn_revoke_all.setEnabled(False)
         self.comp_tree.clear()
         self.ops_table.setRowCount(0)
+        self.run_table.setRowCount(0)
+        self.tabs.setTabText(5, "Running")
         self.sig_view.setPlainText(msg)
         self.info_table.setRowCount(1)
         self.info_table.setItem(0, 0, QTableWidgetItem(""))
@@ -1435,6 +1522,21 @@ class AppManagerView(QWidget):
         self.sig_view.setHtml(
             f"<div style='font-family:Menlo,monospace;font-size:12px;color:{TEXT}'>"
             f"{body}</div>")
+
+    def _populate_running(self, d: AppDetail):
+        self.run_table.setRowCount(len(d.running))
+        for r, svc in enumerate(d.running):
+            state = ", ".join(b for b in (
+                "foreground" if svc.get("foreground") else "",
+                "started" if svc.get("started") else "bound") if b)
+            vals = (svc.get("component", ""), svc.get("process", ""),
+                    str(svc.get("pid") or "—"), state)
+            for c, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                if svc.get("foreground") and c == 3:
+                    item.setForeground(QColor(GREEN))
+                self.run_table.setItem(r, c, item)
+        self.tabs.setTabText(5, f"Running ({len(d.running)})" if d.running else "Running")
 
     # --- per-app actions ---------------------------------------------------
     def _need_app(self) -> AppInfo | None:
@@ -1786,6 +1888,8 @@ class AppManagerView(QWidget):
         self.icon_label.hide()
         self.title.setText("Select an app")
         self.subtitle.setText("")
+        self.prefs_view.set_package(None)
+        self.crash_view.set_package(None)
         self._clear_detail(msg)
         self._set_actions_enabled(False)
 
@@ -1795,6 +1899,8 @@ class AppManagerView(QWidget):
             setattr(self, attr, None)
 
     def shutdown(self):
+        self.prefs_view.shutdown()
+        self.crash_view.shutdown()
         if self._decompile_worker is not None:
             self._decompile_worker.cancel()
         for viewer in list(self._viewers):

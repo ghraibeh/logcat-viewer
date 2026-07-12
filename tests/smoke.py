@@ -336,8 +336,12 @@ check(mon.parse_app_meminfo("App Summary\n TOTAL PSS: 234567  TOTAL RSS: 300000\
       "parse_app_meminfo reads TOTAL PSS (newer format)")
 check(mon.parse_app_meminfo("  TOTAL      45678   12000   3000\n") == 45678,
       "parse_app_meminfo falls back to the TOTAL table row (older format)")
-check(mon.build_probe(None) == mon.PROBE and "dumpsys meminfo com.x" in mon.build_probe("com.x"),
-      "build_probe appends dumpsys reads only when a package is watched")
+check(mon.build_probe(None).startswith(mon.PROBE)
+      and "dumpsys battery" in mon.build_probe(None)
+      and "dumpsys cpuinfo" not in mon.build_probe(None)
+      and "dumpsys meminfo com.x" in mon.build_probe("com.x")
+      and "dumpsys gfxinfo com.x" in mon.build_probe("com.x"),
+      "build_probe: battery always; cpu/mem/gfx dumpsys only when a package is watched")
 check("'weird; rm'" in mon.build_probe("weird; rm"),
       "build_probe shell-quotes the package name (injection-safe)")
 # selecting an app in the picker overlays it on the Monitor tab
@@ -384,13 +388,20 @@ check(win.monitor_view.leak_btn.isEnabled(), "Detect-leaks enabled once device +
 win.monitor_view.set_package(None); win.monitor_view.set_serial(None)
 
 # tabs present; the map webview stays lazy (never built in headless smoke)
-check(win.tabs.count() == 7,
-      f"main window has 7 tabs (…Apps + Monitor), got {win.tabs.count()}")
+check(win.tabs.count() == 10,
+      f"main window has 10 tabs (…Monitor + Inspector/Controls/Toolbox), got {win.tabs.count()}")
 check(win.tabs.tabText(0) == "Logs" and win.tabs.tabText(1) == "Location"
       and win.tabs.tabText(2) == "Network HTTP" and win.tabs.tabText(3) == "Databases"
-      and win.tabs.tabText(4) == "Files" and win.tabs.tabText(5) == "Apps"
-      and win.tabs.tabText(6) == "Monitor",
-      "tab labels end with Apps then Monitor")
+      and win.tabs.tabText(4) == "Files" and win.tabs.tabText(5).startswith("Apps")
+      and win.tabs.tabText(6) == "Monitor" and win.tabs.tabText(7) == "Inspector"
+      and win.tabs.tabText(8) == "Controls" and win.tabs.tabText(9) == "Toolbox",
+      "tab labels: the 7 originals then Inspector/Controls/Toolbox "
+      "(Prefs + Crashes live inside the Apps tab; Apps may carry the live ● badge)")
+check(win.appmgr_view.tabs.tabText(6) == "Prefs"
+      and win.appmgr_view.tabs.tabText(7).startswith("Crashes")
+      and win.appmgr_view.prefs_view is not None
+      and win.appmgr_view.crash_view is not None,
+      "Prefs + Crashes are the Apps tab's 7th/8th sub-tabs")
 
 # Logs tab has a click-to-pick app list (All apps + clones + device apps)
 from PyQt6.QtCore import Qt as _QtLog
@@ -1248,6 +1259,16 @@ check(av.btn_grant_all.isEnabled() and av.btn_revoke_all.isEnabled(),
 av._on_detail_done(True, parse_app_detail("x", "", ""), "", 3)   # stale seq 3 ≠ 7
 check(av.perm_table.rowCount() == 3, "a stale detail (old seq) is ignored")
 
+# selecting an app in the list points the embedded Prefs + Crashes sub-tabs at it
+from PyQt6.QtCore import Qt as _QtAM
+_sel_pkg = av.app_list.item(0).data(_QtAM.ItemDataRole.UserRole).package
+av._on_app_selected(av.app_list.item(0), None)
+check(av.prefs_view._package == _sel_pkg and av.crash_view._package == _sel_pkg,
+      "the Prefs + Crashes sub-tabs follow the app selected in the Apps list")
+check(av.prefs_view._workers == [] and av.prefs_view.file_list.count() == 0
+      and av.crash_view._worker is None,
+      "hidden Prefs/Crashes sub-tabs stay idle (no adb workers) on selection")
+
 # a fetched real icon replaces the letter tile on the row + header
 from PyQt6.QtGui import QImage as _QImage
 _img = _QImage(24, 24, _QImage.Format.Format_RGB32)
@@ -1298,6 +1319,347 @@ check("public class Main" in _sv.editor.toPlainText()
 _sv._load_file(_javap.replace("Main.java", "logo.png"))  # nonexistent binary-ext path
 _sv.close()
 _shutil.rmtree(_srcroot, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+# Crashes tab: crash-buffer splitting, dropbox splitting, mapping retrace
+# ---------------------------------------------------------------------------
+from logcat_viewer import crash as crashmod
+
+_CRASH_BUF = "\n".join([
+    "--------- beginning of crash",
+    "07-11 10:00:01.100  1111  1111 E AndroidRuntime: FATAL EXCEPTION: main",
+    "07-11 10:00:01.101  1111  1111 E AndroidRuntime: Process: com.foo.bar, PID: 1111",
+    "07-11 10:00:01.102  1111  1111 E AndroidRuntime: java.lang.IllegalStateException: boom",
+    "07-11 10:00:01.103  1111  1111 E AndroidRuntime: \tat a.b.c.d(SourceFile:3)",
+    "07-11 10:05:02.000  2222  2222 E AndroidRuntime: FATAL EXCEPTION: main",
+    "07-11 10:05:02.001  2222  2222 E AndroidRuntime: Process: com.baz, PID: 2222",
+    "07-11 10:05:02.002  2222  2222 E AndroidRuntime: java.lang.NullPointerException",
+])
+_blocks = crashmod.split_crash_blocks(_CRASH_BUF)
+check(len(_blocks) == 2, f"crash buffer splits into 2 blocks (per PID), got {len(_blocks)}")
+check(_blocks[0].process == "com.foo.bar" and _blocks[1].process == "com.baz",
+      "crash blocks extract the crashing process name")
+check("IllegalStateException" in _blocks[0].title, "crash block headline is the exception")
+check(_blocks[0].kind == "crash" and "at a.b.c.d" in _blocks[0].text,
+      "crash block keeps the full trace text")
+
+_DROPBOX = (
+    "2026-07-11 09:00:00 data_app_anr (text, 100 bytes)\n"
+    "Process: com.foo.bar\nANR in com.foo.bar (com.foo.bar/.Main)\nReason: broadcast\n"
+    "========================================\n"
+    "2026-07-11 09:30:00 data_app_anr (text, 90 bytes)\n"
+    "Process: com.baz\nANR in com.baz\n")
+_drops = crashmod.split_dropbox_print(_DROPBOX, "data_app_anr")
+check(len(_drops) == 2 and _drops[0].when == "2026-07-11 09:00:00"
+      and _drops[0].kind == "anr" and _drops[1].process == "com.baz",
+      "dumpsys dropbox --print output splits into dated ANR entries")
+
+_MAPPING = (
+    "# compiler: R8\n"
+    "com.example.Foo -> a.b.c:\n"
+    "    java.lang.String name -> a\n"
+    "    1:3:void doWork(int):10:12 -> d\n")
+_mp = crashmod.parse_mapping(_MAPPING)
+check(_mp.classes.get("a.b.c") == "com.example.Foo", "mapping.txt class line parsed")
+_re_traced = crashmod.retrace(_mp, "\tat a.b.c.d(SourceFile:3)\nCaused by: a.b.c: nope")
+check("com.example.Foo.doWork" in _re_traced and "Foo.java:12" in _re_traced,
+      f"retrace maps class+method+line (got {_re_traced!r})")
+check("Caused by: com.example.Foo" in _re_traced,
+      "retrace also rewrites bare obfuscated class tokens")
+check(crashmod.crash_buffer_args("S")[:4] == ["-s", "S", "logcat", "-b"],
+      "crash_buffer_args reads the crash buffer")
+check(_blocks[0].plain.startswith("FATAL EXCEPTION")
+      and "07-11" not in _blocks[0].plain and "at a.b.c.d" in _blocks[0].plain,
+      "crash blocks keep a prefix-free `plain` body for rendering")
+
+# grouping — repeated identical crashes collapse with a count
+_grp = crashmod.group_crashes(_blocks + _blocks)   # every crash twice
+check(len(_grp) == 2 and all(g["count"] == 2 for g in _grp)
+      and _grp[0]["item"] is _blocks[0],
+      "group_crashes collapses identical records (×N) keeping the newest")
+
+# trace-line classification
+check(crashmod.classify_trace_line("\tat com.foo.Bar.baz(Bar.java:9)", "com.foo") == "frame-app"
+      and crashmod.classify_trace_line("\tat android.os.Looper.loop(Looper.java:1)", "com.foo") == "frame"
+      and crashmod.classify_trace_line("Caused by: java.lang.ArithmeticException: / by zero") == "cause"
+      and crashmod.classify_trace_line("java.lang.IllegalStateException: boom") == "exception"
+      and crashmod.classify_trace_line("Process: com.foo, PID: 1") == "text",
+      "classify_trace_line tells app/framework frames, causes, exceptions apart")
+
+# obfuscation heuristic
+check(crashmod.looks_obfuscated("at a.b.c(SourceFile:1)\nat b1.c.d(SourceFile:2)")
+      and not crashmod.looks_obfuscated("at com.example.Foo.bar(Foo.java:1)\n"
+                                        "at android.os.Looper.loop(Looper.java:1)"),
+      "looks_obfuscated spots 1–2 letter package frames only")
+
+# HTML rendering: header chips, app-frame highlight, framework folding, causes
+_HTML_BODY = "\n".join(
+    ["FATAL EXCEPTION: main", "Process: com.foo, PID: 1",
+     "java.lang.IllegalStateException: boom",
+     "\tat com.foo.Main.go(Main.kt:12)"]
+    + [f"\tat android.fw.C{i}.m(C{i}.java:{i})" for i in range(6)]
+    + ["Caused by: java.lang.ArithmeticException: / by zero",
+       "\tat com.foo.Math.div(Math.kt:3)"])
+_it = crashmod.CrashItem("crash", "07-11 10:00:01", "com.foo",
+                         "java.lang.IllegalStateException: boom",
+                         _HTML_BODY, "crash buffer", plain=_HTML_BODY)
+_h = crashmod.build_crash_html(_it, app_pkg="com.foo", count=3)
+check("CRASH" in _h and "×3" in _h and "com.foo" in _h,
+      "crash HTML shows the kind chip, ×N badge and process")
+check("6 framework frames" in _h and "fold:0" in _h and "android.fw.C2" not in _h,
+      "runs of framework frames fold behind a fold: link")
+check("com.foo.Main.go" in _h and "Main.kt:12" in _h,
+      "app frames stay visible and highlighted")
+check("cause0" in _h and "root cause" in _h,
+      "Caused-by chain renders chips + anchors, marking the root cause")
+_h2 = crashmod.build_crash_html(_it, app_pkg="com.foo", expanded={0})
+check("android.fw.C2" in _h2, "an expanded fold shows its framework frames")
+_h3 = crashmod.build_crash_html(_it, hint_obfuscated=True)
+check("mapping.txt" in _h3, "obfuscation hint banner appears when flagged")
+_h4 = crashmod.build_crash_html(_it, retraced=True)
+check("RETRACED" in _h4, "retraced badge appears when a mapping is applied")
+
+# ---------------------------------------------------------------------------
+# Intent tester: pure am arg building
+# ---------------------------------------------------------------------------
+from logcat_viewer.intents import build_am_args
+_am = build_am_args("S", "start", action="android.intent.action.VIEW",
+                    data="myapp://x", extras=[("string", "k", "v"), ("boolean", "b", "true")])
+check(_am[:5] == ["-s", "S", "shell", "am", "start"] and "-W" in _am
+      and "-a" in _am and "-d" in _am and "--es" in _am and "--ez" in _am,
+      "build_am_args: start waits (-W) and carries action/data/typed extras")
+check("-W" not in build_am_args("S", "broadcast", action="a.b"),
+      "build_am_args: broadcast does not wait")
+_amc = build_am_args("S", "startservice", component="com.x/.Svc")
+check(_amc[-2:] == ["-n", "com.x/.Svc"], "build_am_args: component via -n")
+
+# ---------------------------------------------------------------------------
+# Layout inspector: bounds parsing, tree building, hit-testing
+# ---------------------------------------------------------------------------
+from logcat_viewer import inspector as insp
+check(insp.parse_bounds("[0,63][1080,231]") == (0, 63, 1080, 231), "parse_bounds")
+check(insp.parse_bounds("junk") is None, "parse_bounds tolerates junk")
+_UIXML = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<hierarchy rotation="0">'
+    '<node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" text="">'
+    '<node class="android.widget.Button" resource-id="com.x:id/go" '
+    'bounds="[100,200][300,300]" text="GO"/>'
+    "</node></hierarchy>UI hierchary dumped to: /dev/tty")
+_root = insp.build_ui_tree(_UIXML)
+check(_root is not None and len(_root.children) == 1
+      and len(_root.children[0].children) == 1,
+      "build_ui_tree parses nested nodes (and survives the trailing dump notice)")
+_btn = insp.node_at(_root, 150, 250)
+check(_btn is not None and _btn.attrs.get("resource-id") == "com.x:id/go",
+      "node_at picks the deepest node under the point")
+check("Button" in _btn.label and "#go" in _btn.label and "GO" in _btn.label,
+      "UiNode.label shows class + resource-id + text")
+check(insp.node_at(_root, 50, 2000).attrs["class"].endswith("FrameLayout"),
+      "node_at falls back to the container outside the button")
+
+# ---------------------------------------------------------------------------
+# Device controls: state script/parse + setter arg builders
+# ---------------------------------------------------------------------------
+from logcat_viewer import controls as ctl
+_script = ctl.read_state_script()
+check("@@night@@" in _script and "@@battery@@" in _script and "@@doze@@" in _script,
+      "read_state_script emits marked sections in one shell round-trip")
+_state = ctl.interpret_state(ctl.parse_state(
+    "@@night@@\nNight mode: yes\n@@font_scale@@\n1.15\n@@density@@\n"
+    "Physical density: 440\nOverride density: 500\n@@anim@@\n0\n"
+    "@@show_touches@@\n1\n@@pointer@@\n0\n@@layout@@\ntrue\n@@hwui@@\nfalse\n"
+    "@@finish@@\nnull\n@@stay@@\n7\n@@battery@@\n  level: 73\n  temperature: 285\n"
+    "  USB powered: true\n@@doze@@\nIDLE\n"))
+check(_state["night"] and _state["layout"] and _state["anim_off"]
+      and _state["show_touches"] and not _state["pointer"],
+      "interpret_state reads the developer toggles")
+check(_state["font_scale"] == 1.15 and _state["density"] == 500
+      and _state["density_overridden"] and _state["stay"],
+      "interpret_state reads font scale + override density + stay-awake")
+check(_state["battery_level"] == 73 and _state["battery_powered"]
+      and _state["doze_idle"], "interpret_state reads battery + doze")
+check(ctl.set_layout_bounds(True)[1] == ctl._SYSPROPS_POKE,
+      "layout-bounds setter pokes SYSPROPS so it applies live")
+check(len(ctl.set_animations(True)) == 3, "animations setter writes all three scales")
+check(ctl.set_doze(True)[0][-1] == "unplug" and ctl.set_doze(False)[0][-1] == "unforce",
+      "doze on unplugs first; doze off unforces")
+check(ctl.set_standby_bucket("com.x", "rare")[0][-2:] == ["com.x", "rare"]
+      and "set-standby-bucket" in ctl.set_standby_bucket("com.x", "rare")[0],
+      "standby-bucket setter targets the app")
+
+# ---------------------------------------------------------------------------
+# Monitor additions: battery + gfxinfo parsing
+# ---------------------------------------------------------------------------
+check(mon.parse_battery("  level: 87\n  temperature: 273\n  AC powered: true\n")
+      == {"level": 87, "temp_c": 27.3, "powered": True},
+      "parse_battery reads level/temp/powered")
+check(mon.parse_battery("garbage") is None, "parse_battery tolerates junk")
+_gfx = mon.parse_gfxinfo(
+    "Total frames rendered: 1200\nJanky frames: 60 (5.00%)\n"
+    "50th percentile: 8ms\n90th percentile: 14ms\n95th percentile: 20ms\n"
+    "99th percentile: 32ms\n")
+check(_gfx["total"] == 1200 and _gfx["janky"] == 60 and _gfx["janky_pct"] == 5.0
+      and _gfx["p90"] == 14, "parse_gfxinfo reads totals + percentiles")
+check(mon.parse_gfxinfo("No process found") is None, "parse_gfxinfo -> None when app absent")
+
+# ---------------------------------------------------------------------------
+# Wireless adb: IP parsing + success detection
+# ---------------------------------------------------------------------------
+from logcat_viewer import wireless as wifi
+check(wifi.parse_device_ip(
+    "192.168.1.0/24 dev wlan0 proto kernel scope link src 192.168.1.42\n")
+    == "192.168.1.42", "parse_device_ip reads the wlan src address")
+check(wifi.parse_device_ip("no route") is None, "parse_device_ip tolerates junk")
+check(wifi.looks_ok("connected to 192.168.1.42:5555")
+      and wifi.looks_ok("Successfully paired to 192.168.1.42:37000")
+      and not wifi.looks_ok("failed to connect"), "wireless success detection")
+check(wifi.pair_args("h:1", "123") == ["pair", "h:1", "123"]
+      and wifi.tcpip_args("SER")[:2] == ["-s", "SER"], "wireless arg builders")
+
+# ---------------------------------------------------------------------------
+# Mirror text injection escaping
+# ---------------------------------------------------------------------------
+from logcat_viewer.mirror import escape_input_text
+check(escape_input_text("hi there") == "hi%sthere", "input-text: space -> %s")
+check(escape_input_text('a"b$c') == 'a\\"b\\$c', "input-text escapes shell specials")
+check(escape_input_text("line1\nline2") == "line1%sline2", "input-text folds newlines")
+
+# ---------------------------------------------------------------------------
+# SharedPreferences: XML parse/build round-trip + type validation
+# ---------------------------------------------------------------------------
+from logcat_viewer import prefs as prefsmod
+_PREFS_XML = (
+    "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n"
+    "    <string name=\"user\">alice&amp;bob</string>\n"
+    "    <boolean name=\"dark\" value=\"true\" />\n"
+    "    <int name=\"count\" value=\"7\" />\n"
+    "    <set name=\"tags\">\n        <string>a</string>\n        <string>b</string>\n"
+    "    </set>\n</map>\n")
+_prefs = prefsmod.parse_prefs_xml(_PREFS_XML)
+check([p.key for p in _prefs] == ["user", "dark", "count", "tags"],
+      "parse_prefs_xml reads every entry type")
+check(_prefs[0].value == "alice&bob" and _prefs[3].value == "a, b",
+      "prefs values decode (entities, string-sets flattened)")
+_rebuilt = prefsmod.build_prefs_xml(_prefs)
+check(prefsmod.parse_prefs_xml(_rebuilt) == _prefs,
+      "build_prefs_xml round-trips through parse_prefs_xml")
+check(prefsmod.validate_pref_value("int", "12") is None
+      and prefsmod.validate_pref_value("int", "xx") is not None
+      and prefsmod.validate_pref_value("boolean", "maybe") is not None,
+      "pref value validation by type")
+check(prefsmod.ls_prefs_args("S", "com.x")[-2:] == ["ls", "shared_prefs"]
+      and "run-as" in prefsmod.cat_pref_args("S", "com.x", "a.xml")
+      and "su" in prefsmod.write_pref_args("S", "com.x", "a.xml", su=True),
+      "prefs arg builders (run-as + su variants)")
+
+# ---------------------------------------------------------------------------
+# Toolbox: monkey / perfetto / notifications / bugreport helpers
+# ---------------------------------------------------------------------------
+from logcat_viewer.stress import monkey_args, KILL_MONKEY
+_ma = monkey_args("S", "com.x", 500, 42, 100)
+check("monkey" in _ma and "-p" in _ma and "500" == _ma[-1] and "--throttle" in _ma,
+      "monkey_args builds the stress command")
+check("com.android.commands.monkey" in KILL_MONKEY, "monkey device-side kill command")
+
+from logcat_viewer.perfetto import perfetto_args, pull_trace_args, REMOTE_TRACE
+_pa = perfetto_args("S", 10, ["sched", "gfx"])
+check("perfetto" in _pa and "-t" in _pa and "10s" in _pa and "gfx" in _pa,
+      "perfetto_args builds the capture command")
+check(pull_trace_args("S", "/tmp/x")[2:] == ["pull", REMOTE_TRACE, "/tmp/x"],
+      "pull_trace_args pulls the remote trace")
+
+from logcat_viewer.notifs import parse_notifications
+_NOTIF_DUMP = (
+    "  NotificationRecord(0x1234: pkg=com.foo user=UserHandle{0} id=101 ...)\n"
+    "      android.title=String (Hello)\n      android.text=String (World)\n"
+    "      mChannel= NotificationChannel{mId='alerts', mName=Alerts}\n"
+    "      key=0|com.foo|101|null|10123\n      when=+2m30s ago\n"
+    "  NotificationRecord(0x9999: pkg=com.bar user=UserHandle{0} id=7 ...)\n"
+    "      key=0|com.bar|7|null|10456\n")
+_notifs = parse_notifications(_NOTIF_DUMP)
+check(len(_notifs) == 2 and _notifs[0].pkg == "com.foo" and _notifs[1].pkg == "com.bar",
+      "parse_notifications splits records by package")
+check(_notifs[0].title == "Hello" and _notifs[0].text == "World"
+      and _notifs[0].channel == "alerts", "parse_notifications reads title/text/channel")
+check(len(parse_notifications(_NOTIF_DUMP + _NOTIF_DUMP)) == 2,
+      "parse_notifications dedupes repeated records by key")
+
+# ---------------------------------------------------------------------------
+# App manager: running-services parsing
+# ---------------------------------------------------------------------------
+from logcat_viewer.appmgr import parse_running_services
+_SVC_DUMP = (
+    "ACTIVITY MANAGER SERVICES (dumpsys activity services)\n"
+    "  User 0 active services:\n"
+    "  * ServiceRecord{27e4bd2 u0 com.foo/.SyncService}\n"
+    "    app=ProcessRecord{86dbc2f 12345:com.foo/u0a123}\n"
+    "    isForeground=true foregroundId=101\n"
+    "    startRequested=true stopIfKilled=false\n"
+    "  * ServiceRecord{99aa u0 com.foo/.BoundService}\n"
+    "    app=ProcessRecord{77bb 12345:com.foo/u0a123}\n")
+_svcs = parse_running_services(_SVC_DUMP)
+check(len(_svcs) == 2 and _svcs[0]["component"] == "com.foo/.SyncService",
+      "parse_running_services finds ServiceRecords")
+check(_svcs[0]["foreground"] and _svcs[0]["started"] and _svcs[0]["pid"] == 12345,
+      "parse_running_services reads pid/foreground/started")
+check(not _svcs[1]["foreground"] and not _svcs[1]["started"],
+      "bound-only service has neither flag")
+
+# ---------------------------------------------------------------------------
+# Log tools: export text + preset persistence
+# ---------------------------------------------------------------------------
+from logcat_viewer import logtools as lt
+check(lt.export_text(entries).splitlines()[0] == SAMPLE[0],
+      "export_text round-trips raw threadtime lines")
+_ptmp = os.path.join(_tf.mkdtemp(prefix="smoke-presets-"), "p.json")
+check(lt.save_presets({"errors": {"min_priority": 5, "text": "boom"}}, _ptmp)
+      and lt.load_presets(_ptmp)["errors"]["text"] == "boom",
+      "filter presets save/load round-trip")
+check(lt.load_presets("/nonexistent/none.json") == {},
+      "load_presets tolerates a missing file")
+check(lt.clean_preset({"text": "x", "bogus": 1}) == {"text": "x"},
+      "clean_preset drops unknown fields")
+
+# ---------------------------------------------------------------------------
+# New tabs wired into the main window (idle until shown with a device)
+# ---------------------------------------------------------------------------
+_cv = win.appmgr_view.crash_view
+check(win.inspector_view._worker is None and _cv._worker is None,
+      "Inspector/Crashes idle (no workers) at startup")
+_cv.set_package(None)
+check(_cv.crash_toggle.isChecked() and _cv.anr_toggle.isChecked()
+      and _cv.other_toggle.isChecked() and not _cv.app_only.isEnabled(),
+      "crash kind filters default on; This-app disabled without an app")
+_cv.set_package("com.example.app")
+check(_cv.app_only.isEnabled(), "This-app filter enables when an app is picked")
+_cv.set_package(None)
+_fatal = "07-11 10:20:00.000  4242  4242 E AndroidRuntime: FATAL EXCEPTION: main"
+win._on_lines([_fatal])
+_ai = win.tabs.indexOf(win.appmgr_view)
+_csub = win.appmgr_view.tabs.indexOf(_cv)
+check(win.tabs.tabText(_ai) == "Apps ●",
+      "a live FATAL EXCEPTION line badges the Apps tab")
+check(win.appmgr_view.tabs.tabText(_csub) == "Crashes ●",
+      "…and the Crashes sub-tab inside it")
+check(_cv._pending_scan, "hidden crash view defers the live rescan to its next show")
+win._on_tab_changed(_ai)
+check(win.tabs.tabText(_ai) == "Apps", "opening the Apps tab clears its badge")
+win.appmgr_view.tabs.setCurrentIndex(_csub)
+check(win.appmgr_view.tabs.tabText(_csub) == "Crashes",
+      "opening the Crashes sub-tab clears its badge")
+_cv._pending_scan = False
+win.pending.clear()   # drop the injected line so later model checks see no extras
+check(win.preset_combo.count() >= 1 and win.preset_combo.itemText(0) == "Presets…",
+      "filter-preset picker present on the Logs filter bar")
+_pv = win._preset_values()
+check(set(lt.PRESET_FIELDS) == set(_pv.keys()),
+      "preset values cover exactly the persisted fields")
+win._apply_preset_values({"min_priority": 5, "text": "boom", "tag": "T"})
+check(win.text_edit.text() == "boom" and win.advanced_btn.isChecked(),
+      "applying a preset fills the bar and reveals Advanced when it sets tag/pid/exclude")
+win.clear_filters()
+win.advanced_btn.setChecked(False)
 
 # ---------------------------------------------------------------------------
 # About dialog: builds, draws a non-null logo, and credits the author

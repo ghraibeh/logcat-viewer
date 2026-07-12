@@ -49,6 +49,8 @@ Pick a device, press **Start**. Existing buffer dumps immediately, then it follo
     stays on the screen until you press **Stop**; the file is finalized cleanly by SIGINT-ing the
     on-device `screenrecord` (so the MP4 is never truncated), pulled off the device, and the device
     copy deleted. (screenrecord self-stops at the device's ~180s limit; the recording is still saved.)
+  - **📋 Paste / ⌨ Type** — types the Mac clipboard (`⌘V` on the mirror) or a typed string into the
+    focused field on the device via `input text` (shell-escaped; ASCII — an `input` limitation).
 - **Mock GPS location** — the **Location** tab shows a **MapLibre** map; click the map, drag the pin,
   search a place by name, type coordinates, or pick a preset, then hit **Enable Mock**. Works on **all
   Android versions**: modern Android only accepts a mock fix from an app that is the selected mock
@@ -111,6 +113,11 @@ Pick a device, press **Start**. Existing buffer dumps immediately, then it follo
   - **App Ops** — per-op modes (`appops get`); right-click to set **allow / deny / ignore / default /
     foreground** (`appops set`), or add any op by name.
   - **Signature** — the signing summary from `dumpsys package`.
+  - **Running** — the app's live services (`dumpsys activity services`): component, process, PID,
+    foreground/started state.
+  - **Prefs** — the **SharedPreferences editor** (see below), scoped to the selected app.
+  - **Crashes** — the **crash/ANR viewer** (see below), with its "This app" filter following the
+    selected app.
   - **Decompile to Java** — right-click an app → **Decompile to Java (jadx)**. It pulls the APK and
     runs **jadx** (DEX → readable Java + decoded resources/manifest), then opens a **source explorer**
     window: a file tree of the decompiled project on the left and a read-only **code editor** on the
@@ -139,6 +146,49 @@ Pick a device, press **Start**. Existing buffer dumps immediately, then it follo
   leak's shortest path to the GC root (plus a *Save report* / *Open .hprof folder*). Works on **any
   debuggable app** (or any app on a rooted device) — no LeakCanary library baked in. Shark + a JRE are
   **auto-provisioned on first use** (downloaded once, cached), same as the jadx decompiler.
+- **Layout Inspector** — the **Inspector** tab captures a screenshot + the **view hierarchy**
+  (`uiautomator dump`, works for any app) side by side: click the screenshot to select the view
+  under the cursor (or browse the tree), see its **bounds highlighted** and every property
+  (resource-id, class, text, clickable…). No debuggable build needed.
+- **Crashes & ANRs** — the **Apps ▸ Crashes** sub-tab scans the dedicated **logcat crash buffer**
+  plus the system's **dropbox** records (`data_app_crash` / `anr` / `wtf` / native) and presents
+  them **Crashlytics-style**: identical crashes **group with an ×N badge**, and the trace renders
+  as a structured view — exception headline card, **your app's frames highlighted**, long runs of
+  framework frames **folded behind a click**, and a **Caused-by chain** with the root cause marked
+  (click to jump). Filter by kind (💥/⏳/🧨), by the selected app (the filter follows the app you
+  pick in the Apps list), or free-text. When a **FATAL EXCEPTION / ANR appears in the live stream,
+  the Apps tab badges `Apps ●`** (and the sub-tab `Crashes ●`) and the view re-scans itself.
+  Obfuscated traces are auto-detected with a hint to load an **R8/ProGuard `mapping.txt`**, which
+  retraces **locally** (classes, methods, line numbers — no retrace binary; the mapping is
+  remembered across sessions). Copy or save any record as text.
+- **SharedPreferences editor** — the **Apps ▸ Prefs** sub-tab lists the selected app's
+  `shared_prefs/*.xml` (run-as for debuggable apps, `su` fallback on rooted devices), shows typed
+  key/values, validates edits by type, and writes the rebuilt XML back to the device. A
+  **Force-stop** button makes the app re-read the file on next launch.
+- **Device Controls** — the **Controls** tab is one-click toggles for the things devs flip daily:
+  **dark mode**, **font scale**, **display density**, **animations off**, **show taps / pointer
+  location / layout bounds / GPU profile bars** (applied live via a SYSPROPS poke), **don't keep
+  activities**, **stay awake** — plus **battery mocking** (`dumpsys battery`), **force Doze**
+  (`deviceidle force-idle`) and per-app **standby buckets** for background-work testing. Current
+  device state is read back in one shell round-trip.
+- **Toolbox** — one tab of small everyday tools:
+  - **Intents** — fire deep links (`am start -W -a VIEW -d <uri>`) or compose full intents
+    (activity / broadcast / service, action, data, mime, component, **typed extras**) and read
+    `am`'s verdict inline.
+  - **Monkey** — reproducible UI stress runs (`monkey -p pkg -s seed`) with live output; crashes it
+    triggers land in the Crashes tab. The on-device monkey is always killed on stop.
+  - **Perfetto** — record a system trace (UI/jank, scheduling, memory presets; 5–60 s) and pull it
+    for ui.perfetto.dev.
+  - **Notifications** — the device's active notifications (package, channel, title, text) via
+    `dumpsys notification --noredact`.
+  - **Bugreport** — full `adb bugreport` zip with a progress bar.
+- **Wireless adb** — the **📶** toolbar button pairs (Android 11+ pairing code), connects to
+  `host:port`, or **switches the current USB device to Wi-Fi** in one click (`tcpip 5555` +
+  connect to the device's wlan IP).
+- **Log export / import & filter presets** — **File ▸ Export Filtered/Entire Log** writes the
+  buffer as threadtime text (`⌘E`); **File ▸ Open Log File** (`⌘O`) loads a saved log back into
+  the viewer through the same parser/filters. The filter bar has **named presets** (＋ saves the
+  current filters, the picker applies one) persisted across sessions.
 - **App filter** — the **Logs** tab has a **click-to-pick app list** down the left side (**All apps**
   + every installed app, plus sandboxed app **clones** running inside a virtualization host) — no
   typing; a filter box narrows it. There's also the searchable **App** picker in the top toolbar; the
@@ -224,9 +274,21 @@ logcat_viewer/
   files.py         File Explorer: browse/transfer/manage device files (run-as/su), drag&drop, FilesView
   appmgr.py        App Management: list apps + inspect/manage (perms, components, app-ops, actions), AppManagerView
   decompile.py     Decompile APK→Java (jadx, auto-provisioned) + source-tree/code-viewer, SourceViewerWindow
-  monitor.py       Performance Monitor: /proc CPU+RAM poller (QThread) + sparkline dashboard + per-app overlay + Detect-leaks, MonitorView
+  monitor.py       Performance Monitor: /proc CPU+RAM+battery poller (QThread) + per-app gfxinfo jank stats + sparkline dashboard + Detect-leaks, MonitorView
   leakdetect.py    Memory-leak detection: am dumpheap → pull → LeakCanary Shark analyze (auto-provisioned jars+JRE), LeakDetectWorker + LeakReportWindow
-  ui.py        MainWindow: controls, live filter bar, Logs/Location/Network/Databases/Files/Apps/Monitor tabs, docks, wiring
+  inspector.py     Layout Inspector: screencap + uiautomator dump → screenshot + hierarchy tree with hit-testing, InspectorView
+  crash.py         Crashes (Apps sub-tab): crash-buffer + dropbox scanner, grouped + rendered traces, R8/ProGuard mapping.txt retrace (local), CrashView
+  prefs.py         SharedPreferences editor (Apps sub-tab): run-as/su list/read, typed edit + validation, dd write-back, PrefsView
+  controls.py      Device Controls: dev toggles / battery mock / Doze / standby buckets, one-round-trip state read, ControlsView
+  intents.py       Intent tester: deep links + full am start/broadcast/startservice with typed extras, IntentView
+  stress.py        Monkey runner: seeded stress runs with live output + clean device-side kill, MonkeyView
+  perfetto.py      Perfetto capture: preset categories + duration → pull trace for ui.perfetto.dev, PerfettoView
+  notifs.py        Notification inspector: dumpsys notification --noredact parser, NotifsView
+  bugreport.py     Bugreport: adb bugreport zip with progress, BugreportView
+  toolbox.py       Toolbox tab: hosts Intents/Monkey/Perfetto/Notifications/Bugreport as sub-tabs
+  wireless.py      Wireless adb: pair / connect / switch-USB-device-to-Wi-Fi dialog + workers
+  logtools.py      log export text + named filter presets (JSON in app-support)
+  ui.py        MainWindow: controls, live filter bar, Logs/Location/Network/Databases/Files/Apps (incl. Prefs+Crashes sub-tabs)/Monitor/Inspector/Controls/Toolbox tabs, docks, wiring
   __main__.py  entry point
   assets/      map.html (MapLibre picker) + mocklocation.apk (prebuilt helper)
 android-helper/  source + build.sh for the mock-location helper APK (LocationManager test providers)
@@ -237,6 +299,7 @@ tests/
   live_dbinspect.py  drives the DB inspector (list → pull → read tables/rows) against a device
   live_files.py      drives the file explorer (list → push → pull → mkdir/rename/delete) against a device
   live_appmgr.py     drives app management (list → detail → extract APK → force-stop) against a device
+  live_tools.py      drives the dev-tool suite (crashes, inspector, controls state, probe, notifs, services, perfetto) read-only against a device
   decompile_check.py decompiles the bundled APK with jadx and opens it in the source viewer (offline)
 ```
 
@@ -249,6 +312,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_mock.py <serial>   # mock 
 QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_dbinspect.py <serial> [pkg]  # DB inspector, end-to-end
 QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_files.py <serial> [pkg]      # file explorer, end-to-end
 QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_appmgr.py <serial> [pkg]     # app management, end-to-end
+QT_QPA_PLATFORM=offscreen .venv/bin/python tests/live_tools.py <serial>            # dev-tool suite, read-only, end-to-end
 QT_QPA_PLATFORM=offscreen .venv/bin/python tests/decompile_check.py                # jadx decompile of the bundled APK (offline)
 ```
 
@@ -262,5 +326,5 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python tests/decompile_check.py             
 
 ## Not built (easy follow-ons)
 
-Export to file, saved/named filter presets, custom highlight rules, GPX route playback for the mock
-location. Say the word.
+Custom highlight rules, GPX route playback for the mock location, QR-code Wi-Fi pairing, DataStore
+(protobuf) editing in the Prefs tab. Say the word.

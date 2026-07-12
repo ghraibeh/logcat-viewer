@@ -32,10 +32,12 @@ from .leakdetect import LeakDetectWorker, LeakReportWindow, leak_summary
 # loadavg line is three floats), so no separators are needed.
 PROBE = "cat /proc/stat /proc/meminfo /proc/loadavg"
 
-# When a package is being watched we append two dumpsys reads (no root / no
+# When a package is being watched we append dumpsys reads (no root / no
 # debuggable needed) behind markers so the output can be split back apart.
 _CPU_MARK = "@@CPU@@"
 _MEM_MARK = "@@MEM@@"
+_BAT_MARK = "@@BAT@@"
+_GFX_MARK = "@@GFX@@"
 
 _LOADAVG_RE = re.compile(r"^\s*(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)")
 # dumpsys cpuinfo rows: "  8.3% 12345/com.example.app: 5% user + 3.3% kernel"
@@ -43,11 +45,49 @@ _APP_CPU_RE = re.compile(r"^\s*([\d.]+)%\s+\d+/(\S+?):", re.M)
 
 
 def build_probe(package: str | None) -> str:
-    if not package:
-        return PROBE
-    q = shlex.quote(package)
-    return (f"{PROBE}; echo {_CPU_MARK}; dumpsys cpuinfo 2>/dev/null"
-            f"; echo {_MEM_MARK}; dumpsys meminfo {q} 2>/dev/null")
+    """The one-round-trip shell probe: procfs + battery, plus per-app cpuinfo /
+    meminfo / gfxinfo (frame stats) when an app is being watched."""
+    script = PROBE
+    if package:
+        q = shlex.quote(package)
+        script += (f"; echo {_CPU_MARK}; dumpsys cpuinfo 2>/dev/null"
+                   f"; echo {_MEM_MARK}; dumpsys meminfo {q} 2>/dev/null")
+    script += f"; echo {_BAT_MARK}; dumpsys battery 2>/dev/null"
+    if package:
+        q = shlex.quote(package)
+        script += f"; echo {_GFX_MARK}; dumpsys gfxinfo {q} 2>/dev/null"
+    return script
+
+
+def parse_battery(text: str):
+    """{'level': %, 'temp_c': °C, 'powered': bool} from dumpsys battery, or None."""
+    m = re.search(r"level:\s*(\d+)", text)
+    if not m:
+        return None
+    out = {"level": int(m.group(1)), "temp_c": None,
+           "powered": bool(re.search(r"(AC|USB|Wireless) powered: true", text))}
+    t = re.search(r"temperature:\s*(-?\d+)", text)
+    if t:
+        out["temp_c"] = int(t.group(1)) / 10.0   # reported in tenths of °C
+    return out
+
+
+def parse_gfxinfo(text: str):
+    """Cumulative frame stats from dumpsys gfxinfo: total/janky frames, jank %
+    and frame-time percentiles. None when the app renders nothing."""
+    total = re.search(r"Total frames rendered:\s*(\d+)", text)
+    if not total:
+        return None
+    out = {"total": int(total.group(1)), "janky": 0, "janky_pct": 0.0}
+    j = re.search(r"Janky frames:\s*(\d+)\s*\(([\d.]+)%\)", text)
+    if j:
+        out["janky"] = int(j.group(1))
+        out["janky_pct"] = float(j.group(2))
+    for pct in (50, 90, 95, 99):
+        m = re.search(rf"{pct}th percentile:\s*(\d+)ms", text)
+        if m:
+            out[f"p{pct}"] = int(m.group(1))
+    return out
 
 
 def parse_app_cpu(text: str, package: str):
@@ -168,6 +208,7 @@ class MonitorWorker(QThread):
     def run(self):
         prev_cpu = None
         prev_cores = None
+        prev_gfx = None
         probe = build_probe(self._package)
         while self._run:
             try:
@@ -181,8 +222,20 @@ class MonitorWorker(QThread):
             if not self._run:
                 return
             text = r.stdout
+            gfx = None
+            text, _, gfx_txt = text.partition(_GFX_MARK)
+            text, _, bat_txt = text.partition(_BAT_MARK)
+            battery = parse_battery(bat_txt)
             app = None
             if self._package:
+                gfx = parse_gfxinfo(gfx_txt)
+                if gfx is not None:
+                    # jank% across just the frames rendered since the last sample
+                    if prev_gfx and gfx["total"] > prev_gfx["total"]:
+                        df = gfx["total"] - prev_gfx["total"]
+                        dj = max(0, gfx["janky"] - prev_gfx["janky"])
+                        gfx["recent_pct"] = 100.0 * dj / df
+                    prev_gfx = {"total": gfx["total"], "janky": gfx["janky"]}
                 text, _, rest = text.partition(_CPU_MARK)
                 cpu_txt, _, mem_txt = rest.partition(_MEM_MARK)
                 acpu = parse_app_cpu(cpu_txt, self._package)
@@ -205,6 +258,8 @@ class MonitorWorker(QThread):
                 "load": parse_loadavg(text),
                 "cores": cpu_core_count(text),
                 "cores_pct": cores_pct,
+                "battery": battery,
+                "gfx": gfx,
                 "app": app,
             })
             slept = 0
@@ -418,7 +473,22 @@ class MonitorView(QWidget):
         cards.setColumnStretch(0, 1)
         cards.setColumnStretch(1, 1)
 
-        # Per-core CPU meter spans both columns beneath the CPU/Memory cards.
+        # Battery + UI-rendering (jank) cards.
+        self.bat_value = QLabel("—")
+        self.bat_sub = QLabel("waiting for device…")
+        self.bat_app = QLabel("")
+        self.bat_graph = SparkGraph(theme.GREEN_H, self._APP_COLOR)
+        cards.addWidget(self._card("Battery", self.bat_value, self.bat_sub,
+                                   self.bat_app, self.bat_graph), 1, 0)
+
+        self.gfx_value = QLabel("—")
+        self.gfx_sub = QLabel("pick an app to see its frame stats")
+        self.gfx_app = QLabel("")
+        self.gfx_graph = SparkGraph(theme.RED, self._APP_COLOR)
+        cards.addWidget(self._card("UI Rendering (jank)", self.gfx_value, self.gfx_sub,
+                                   self.gfx_app, self.gfx_graph), 1, 1)
+
+        # Per-core CPU meter spans both columns beneath the cards.
         core_card = QWidget()
         core_card.setObjectName("MonCard")
         cv = QVBoxLayout(core_card)
@@ -429,9 +499,10 @@ class MonitorView(QWidget):
         cv.addWidget(cap)
         self.core_bars = CoreBars()
         cv.addWidget(self.core_bars, 1)
-        cards.addWidget(core_card, 1, 0, 1, 2)
+        cards.addWidget(core_card, 2, 0, 1, 2)
         cards.setRowStretch(0, 3)
-        cards.setRowStretch(1, 2)
+        cards.setRowStretch(1, 3)
+        cards.setRowStretch(2, 2)
         root.addLayout(cards, 1)
 
     def _card(self, name, value_lbl, sub_lbl, app_lbl, graph) -> QWidget:
@@ -473,6 +544,10 @@ class MonitorView(QWidget):
         self._package = package
         self.cpu_graph.clear()
         self.mem_graph.clear()
+        self.gfx_graph.clear()
+        self.gfx_value.setText("—")
+        self.gfx_sub.setText("pick an app to see its frame stats"
+                             if not package else "waiting for frames…")
         self.core_bars.clear()
         self._reset_app_readouts()
         self._update_leak_btn()
@@ -571,11 +646,18 @@ class MonitorView(QWidget):
     def _reset_readouts(self):
         self.cpu_value.setText("—")
         self.mem_value.setText("—")
+        self.bat_value.setText("—")
+        self.gfx_value.setText("—")
         msg = "waiting for device…" if self._serial else "No device selected"
         self.cpu_sub.setText(msg)
         self.mem_sub.setText(msg)
+        self.bat_sub.setText(msg)
+        self.gfx_sub.setText("pick an app to see its frame stats"
+                             if not self._package else msg)
         self.cpu_graph.clear()
         self.mem_graph.clear()
+        self.bat_graph.clear()
+        self.gfx_graph.clear()
         self.core_bars.clear()
         self._reset_app_readouts()
 
@@ -616,6 +698,31 @@ class MonitorView(QWidget):
             amem = (app or {}).get("mem_kb")
             self.mem_graph.push(frac, None if (not amem or not total) else amem / total)
             self.mem_sub.setText(f"{self._gb(total - used)} GB free")
+
+        bat = s.get("battery")
+        if bat:
+            self.bat_value.setText(f"{bat['level']}%")
+            bits = []
+            if bat.get("temp_c") is not None:
+                bits.append(f"{bat['temp_c']:.1f} °C")
+            bits.append("charging" if bat.get("powered") else "unplugged")
+            self.bat_sub.setText("   ·   ".join(bits))
+            self.bat_graph.push(bat["level"] / 100.0)
+
+        gfx = s.get("gfx")
+        if self._package:
+            if gfx:
+                shown = gfx.get("recent_pct", gfx.get("janky_pct", 0.0))
+                self.gfx_value.setText(f"{shown:.1f}% janky")
+                pcts = "  ".join(f"p{p} {gfx[f'p{p}']}ms" for p in (50, 90, 95, 99)
+                                 if f"p{p}" in gfx)
+                self.gfx_sub.setText(
+                    f"{gfx['total']:,} frames · {gfx['janky']:,} janky "
+                    f"({gfx['janky_pct']:.1f}% lifetime)   {pcts}")
+                self.gfx_graph.push(min(1.0, shown / 100.0))
+            else:
+                self.gfx_value.setText("—")
+                self.gfx_sub.setText("no frames rendered (app visible?)")
 
         # app overlay read-outs
         if app is not None:

@@ -63,6 +63,25 @@ def apk_paths(mime) -> list[str]:
         return []
     return [u.toLocalFile() for u in mime.urls() if u.toLocalFile().lower().endswith(".apk")]
 
+
+# Characters the device shell would eat when `adb shell input text …` re-parses
+# the command line. `input` itself needs spaces sent as %s. Escaped one by one;
+# a literal "%s" in the text and non-ASCII chars are `input`'s own limitations.
+_INPUT_SPECIALS = "\\\"'`&|;<>()*~$#?[]{}"
+
+
+def escape_input_text(text: str) -> str:
+    """Make arbitrary text safe for `adb shell input text <arg>`."""
+    out = []
+    for ch in text.replace("\r\n", " ").replace("\n", " ").replace("\t", " "):
+        if ch == " ":
+            out.append("%s")
+        elif ch in _INPUT_SPECIALS:
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
 # Number of staggered capture threads. screencap on the device serializes only
 # partially, so overlapping N roundtrips raises the effective frame rate.
 CAPTURE_THREADS = 2
@@ -536,18 +555,25 @@ class MirrorView(QWidget):
         self.shot_btn.setToolTip("Save a screenshot to ~/Downloads")
         self.rec_btn = QPushButton("⏺ Rec")
         self.rec_btn.setToolTip("Record the screen to an MP4 in ~/Downloads")
+        self.paste_btn = QPushButton("📋")
+        self.paste_btn.setToolTip("Type the Mac clipboard into the focused field (⌘V)")
+        self.type_btn = QPushButton("⌨")
+        self.type_btn.setToolTip("Type text into the focused field on the device")
         self.fullscreen_btn = QPushButton("⛶")
         self.fullscreen_btn.setToolTip("Full screen mirror (Esc to exit)")
         self.scrcpy_btn = QPushButton("⤢ scrcpy")
         self.scrcpy_btn.setToolTip("Open full-quality interactive mirror (scrcpy)")
         for b in (self.back_btn, self.home_btn, self.recents_btn,
-                  self.shot_btn, self.rec_btn, self.fullscreen_btn, self.scrcpy_btn):
+                  self.shot_btn, self.rec_btn, self.paste_btn, self.type_btn,
+                  self.fullscreen_btn, self.scrcpy_btn):
             b.setObjectName("toggle")
         self.back_btn.clicked.connect(lambda: self._key(KEY_BACK))
         self.home_btn.clicked.connect(lambda: self._key(KEY_HOME))
         self.recents_btn.clicked.connect(lambda: self._key(KEY_RECENTS))
         self.shot_btn.clicked.connect(self.screenshot)
         self.rec_btn.clicked.connect(self.toggle_record)
+        self.paste_btn.clicked.connect(self.paste_clipboard)
+        self.type_btn.clicked.connect(self.type_text)
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
         self.scrcpy_btn.clicked.connect(self._launch_scrcpy)
         self.scrcpy_btn.setEnabled(shutil.which("scrcpy") is not None)
@@ -556,6 +582,8 @@ class MirrorView(QWidget):
         bar.addWidget(self.recents_btn)
         bar.addWidget(self.shot_btn)
         bar.addWidget(self.rec_btn)
+        bar.addWidget(self.paste_btn)
+        bar.addWidget(self.type_btn)
         bar.addStretch(1)
         bar.addWidget(self.fullscreen_btn)
         bar.addWidget(self.scrcpy_btn)
@@ -614,6 +642,9 @@ class MirrorView(QWidget):
     def keyPressEvent(self, event):
         if self.is_fullscreen() and event.key() == Qt.Key.Key_Escape:
             self.exit_fullscreen()
+            return
+        if event.matches(QKeySequence.StandardKey.Paste):
+            self.paste_clipboard()
             return
         super().keyPressEvent(event)
 
@@ -710,6 +741,28 @@ class MirrorView(QWidget):
 
     def _key(self, code):
         self._input(["keyevent", str(code)])
+
+    def send_text(self, text: str):
+        """Type text into the focused field via `input text` (ASCII-ish only —
+        an `input` limitation; newlines become spaces)."""
+        if not self._serial:
+            self._flash_error("Mirror not connected")
+            return
+        text = text.strip("\x00")
+        if not text:
+            return
+        self._input(["text", escape_input_text(text)])
+
+    def paste_clipboard(self):
+        from PyQt6.QtGui import QGuiApplication
+        self.send_text(QGuiApplication.clipboard().text())
+
+    def type_text(self):
+        from PyQt6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getText(self, "Type on device",
+                                        "Text for the focused field:")
+        if ok and text:
+            self.send_text(text)
 
     def _launch_scrcpy(self):
         scrcpy = shutil.which("scrcpy")

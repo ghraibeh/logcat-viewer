@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 
 from . import adb as adblib
 from . import apps as applib
+from . import logtools
 from .delegates import LevelBadgeDelegate, MessageDelegate, WRAP_FLAGS
 from .mirror import MirrorView
 from .mocklocation import MockLocationView
@@ -49,6 +50,10 @@ from .dbinspect import DatabaseView
 from .files import FilesView
 from .appmgr import AppManagerView, app_icon
 from .monitor import MonitorView
+from .inspector import InspectorView
+from .controls import ControlsView
+from .toolbox import ToolboxView
+from .wireless import WirelessDialog
 from .about import APP_NAME as ABOUT_APP_NAME, show_about
 from .pull import PullWorker
 from .filters import FilterSpec
@@ -219,6 +224,7 @@ class MainWindow(QMainWindow):
         self._clone_hosts = {}          # clone package -> VA host (for pulling clone APKs)
         self._pull_worker = None        # running PullWorker, if any
         self._app_panels = []           # click-to-pick app lists (Logs + Monitor tabs)
+        self._crash_badged = False      # "Crashes ●" tab badge is showing
 
         self._build_ui()
         self._build_menu()
@@ -248,6 +254,9 @@ class MainWindow(QMainWindow):
         self.device_combo.setMinimumWidth(220)
         self.refresh_btn = QPushButton("⟳")
         self.refresh_btn.setToolTip("Refresh device list")
+        self.wifi_btn = QPushButton("📶")
+        self.wifi_btn.setObjectName("toggle")
+        self.wifi_btn.setToolTip("Connect a device over Wi-Fi (pair / connect / switch USB→Wi-Fi)")
         self.install_btn = QPushButton("Install…")
         self.install_btn.setToolTip("Install APK(s) to the selected device — or drag .apk files onto the window")
         self.app_combo = AppCombo()
@@ -285,6 +294,7 @@ class MainWindow(QMainWindow):
         row1.addWidget(QLabel("Device"))
         row1.addWidget(self.device_combo, 1)
         row1.addWidget(self.refresh_btn)
+        row1.addWidget(self.wifi_btn)
         row1.addWidget(self.install_btn)
         row1.addSpacing(6)
         row1.addWidget(QLabel("App"))
@@ -346,6 +356,17 @@ class MainWindow(QMainWindow):
         self.clear_filters_btn = QPushButton("Clear filters")
         self.clear_filters_btn.setToolTip("Reset every filter on this bar (does not clear the log)")
 
+        # Named filter presets (persisted to the app-support dir).
+        self.preset_combo = QComboBox()
+        self.preset_combo.setToolTip("Apply a saved filter preset")
+        self.preset_combo.setMinimumWidth(120)
+        self.preset_save_btn = QPushButton("＋")
+        self.preset_save_btn.setObjectName("toggle")
+        self.preset_save_btn.setToolTip("Save the current filters as a named preset")
+        self.preset_del_btn = QPushButton("−")
+        self.preset_del_btn.setObjectName("toggle")
+        self.preset_del_btn.setToolTip("Delete the selected preset")
+
         root.addWidget(toolbar)
 
         # --- Tabs: Logs | Location (device row above stays shared) ----------
@@ -387,6 +408,9 @@ class MainWindow(QMainWindow):
         primary.addWidget(QLabel("Level"))
         primary.addWidget(self.level_combo)
         primary.addWidget(self._field_group(self.text_edit, self.text_regex_cb), 1)
+        primary.addWidget(self.preset_combo)
+        primary.addWidget(self.preset_save_btn)
+        primary.addWidget(self.preset_del_btn)
         primary.addWidget(self.advanced_btn)
         primary.addWidget(self.clear_filters_btn)
         primary.addSpacing(10)
@@ -509,6 +533,20 @@ class MainWindow(QMainWindow):
         self._monitor_tab = mon_split
         self.tabs.addTab(mon_split, "Monitor")
 
+        # Inspector tab: screenshot + uiautomator view-hierarchy browser.
+        self.inspector_view = InspectorView(self.adb or "")
+        self.tabs.addTab(self.inspector_view, "Inspector")
+
+        # Controls tab: device/dev toggles + battery & Doze simulation.
+        # (SharedPreferences editing + the crash/ANR viewer live inside the
+        # Apps tab as sub-tabs — they're per-app surfaces.)
+        self.controls_view = ControlsView(self.adb or "")
+        self.tabs.addTab(self.controls_view, "Controls")
+
+        # Toolbox tab: intents / monkey / perfetto / notifications / bugreport.
+        self.toolbox_view = ToolboxView(self.adb or "")
+        self.tabs.addTab(self.toolbox_view, "Toolbox")
+
         root.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
         self._apply_font()  # sets fonts + row height for the current size
@@ -536,6 +574,19 @@ class MainWindow(QMainWindow):
         """Native menu bar. On macOS the About action (tagged AboutRole) is
         auto-relocated by Qt into the application menu, where users expect
         “About Logcat Viewer”."""
+        file_menu = self.menuBar().addMenu("File")
+        open_act = QAction("Open Log File…", self)
+        open_act.setShortcut(QKeySequence.StandardKey.Open)
+        open_act.triggered.connect(self.open_log_file)
+        file_menu.addAction(open_act)
+        exp_act = QAction("Export Filtered Log…", self)
+        exp_act.setShortcut(QKeySequence("Ctrl+E"))
+        exp_act.triggered.connect(lambda: self.export_log(filtered=True))
+        file_menu.addAction(exp_act)
+        exp_all_act = QAction("Export Entire Log…", self)
+        exp_all_act.triggered.connect(lambda: self.export_log(filtered=False))
+        file_menu.addAction(exp_all_act)
+
         self.about_action = QAction(f"About {ABOUT_APP_NAME}", self)
         self.about_action.setMenuRole(QAction.MenuRole.AboutRole)
         self.about_action.triggered.connect(self.show_about)
@@ -791,6 +842,27 @@ class MainWindow(QMainWindow):
         self.monitor_view.failed.connect(
             lambda m: self.statusBar().showMessage(f"✗ {m}", 8000))
 
+        # Inspector / Controls / Toolbox tabs.
+        for view in (self.inspector_view, self.controls_view, self.toolbox_view):
+            self.device_combo.activated.connect(
+                lambda *_, v=view: v.set_serial(self.device_combo.currentData()))
+            view.status.connect(lambda m: self.statusBar().showMessage(m, 5000))
+            view.failed.connect(self._on_tool_failed)
+        # The crash viewer lives inside the Apps tab; its saves keep their own title.
+        self.appmgr_view.crash_view.saved.connect(
+            lambda ok, m, d: self._notify_saved("Crash record", ok, m, d))
+        self.toolbox_view.saved.connect(
+            lambda ok, m, d: self._notify_saved("Toolbox", ok, m, d))
+
+        # Wireless adb dialog.
+        self.wifi_btn.clicked.connect(self.show_wireless)
+
+        # Filter presets.
+        self._reload_presets()
+        self.preset_combo.activated.connect(self._on_preset_pick)
+        self.preset_save_btn.clicked.connect(self._save_preset)
+        self.preset_del_btn.clicked.connect(self._delete_preset)
+
         self._app_pid_timer = QTimer(self)
         self._app_pid_timer.timeout.connect(self._refresh_app_pids)
 
@@ -855,11 +927,10 @@ class MainWindow(QMainWindow):
             self.start_btn.setEnabled(False)
             self.install_btn.setEnabled(False)
             self.pull_btn.setEnabled(False)
-            self.mock_view.set_serial(None)
-            self.intercept_view.set_serial(None)
-            self.db_view.set_serial(None)
-            self.files_view.set_serial(None)
-            self.appmgr_view.set_serial(None)
+            for view in (self.mock_view, self.intercept_view, self.db_view,
+                         self.files_view, self.appmgr_view, self.monitor_view,
+                         self.inspector_view, self.controls_view, self.toolbox_view):
+                view.set_serial(None)
             return
         for d in devices:
             self.device_combo.addItem(d.label, d.serial)
@@ -871,11 +942,11 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(True)
         self.install_btn.setEnabled(True)
         self.pull_btn.setEnabled(True)
-        self.mock_view.set_serial(self.device_combo.currentData())
-        self.intercept_view.set_serial(self.device_combo.currentData())
-        self.db_view.set_serial(self.device_combo.currentData())
-        self.files_view.set_serial(self.device_combo.currentData())
-        self.appmgr_view.set_serial(self.device_combo.currentData())
+        serial = self.device_combo.currentData()
+        for view in (self.mock_view, self.intercept_view, self.db_view,
+                     self.files_view, self.appmgr_view, self.monitor_view,
+                     self.inspector_view, self.controls_view, self.toolbox_view):
+            view.set_serial(serial)
 
     # --- click-to-pick app lists (Logs + Monitor tabs) ---------------------
     def _make_app_panel(self):
@@ -996,6 +1067,8 @@ class MainWindow(QMainWindow):
         self.files_view.set_package(pkg or None)  # the file explorer follows it too
         self.appmgr_view.set_package(pkg or None)  # selects that app in the Apps tab
         self.monitor_view.set_package(pkg or None)  # overlay its CPU/RAM on the Monitor
+        self.controls_view.set_package(pkg or None)  # standby-bucket target
+        self.toolbox_view.set_package(pkg or None)   # monkey target
         self._sync_log_app_selection()          # keep the Logs list highlight in sync
         self.apply_filter()
 
@@ -1137,9 +1210,17 @@ class MainWindow(QMainWindow):
         elif w is self.appmgr_view:
             self.appmgr_view.set_serial(self.device_combo.currentData())
             self.appmgr_view.set_package(self._current_app_pkg() or None)
+            if self._crash_badged:   # Crashes lives inside this tab now
+                self._crash_badged = False
+                self.tabs.setTabText(index, "Apps")
         elif w is self._monitor_tab:
             self.monitor_view.set_serial(self.device_combo.currentData())
             self.monitor_view.set_package(self._current_app_pkg() or None)
+        elif w is self.inspector_view or w is self.toolbox_view:
+            w.set_serial(self.device_combo.currentData())
+        elif w is self.controls_view:
+            w.set_serial(self.device_combo.currentData())
+            w.set_package(self._current_app_pkg() or None)
 
     def _on_mock_failed(self, message):
         self.statusBar().showMessage(f"✗ {message}", 10000)
@@ -1287,6 +1368,169 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"✗ {message}", 10000)
 
+    # --- new device tools (Inspector / Crashes / Prefs / Controls / Toolbox) ---
+    def _on_tool_failed(self, message):
+        self.statusBar().showMessage(f"✗ {message}", 10000)
+
+    def _flag_live_crash(self):
+        """The live stream just showed a FATAL EXCEPTION / ANR: ping the crash
+        viewer inside the Apps tab (it badges its own sub-tab + re-scans when
+        visible) and badge the Apps tab itself until it's opened."""
+        self.appmgr_view.notify_live_crash()
+        if not self._crash_badged:
+            self._crash_badged = True
+            idx = self.tabs.indexOf(self.appmgr_view)
+            if idx >= 0:
+                self.tabs.setTabText(idx, "Apps ●")
+
+    def _notify_saved(self, title, ok, message, directory):
+        """Shared non-modal “saved a file” feedback (status bar + Open Folder)."""
+        if not ok:
+            self.statusBar().showMessage(f"✗ {message}", 10000)
+            return
+        self.statusBar().showMessage(f"✓ {message}", 8000)
+        box = QMessageBox(self)
+        box.setModal(False)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(title)
+        box.setText(f"✓  {message}")
+        if directory:
+            open_btn = box.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.buttonClicked.connect(
+                lambda b, d=directory: QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+                if b is open_btn else None)
+        box.show()
+
+    def show_wireless(self):
+        if not self.adb:
+            self.statusBar().showMessage("adb not found", 5000)
+            return
+        dlg = WirelessDialog(self.adb, self.device_combo.currentData(), self)
+        dlg.devices_changed.connect(self.refresh_devices)
+        dlg.setModal(False)
+        dlg.show()
+
+    # --- filter presets ------------------------------------------------------
+    def _preset_values(self) -> dict:
+        return {
+            "min_priority": self.level_combo.currentData() or 0,
+            "text": self.text_edit.text(),
+            "text_regex": self.text_regex_cb.isChecked(),
+            "tag": self.tag_edit.text(),
+            "tag_regex": self.tag_regex_cb.isChecked(),
+            "pids": self.pid_edit.text(),
+            "exclude": self.exclude_edit.text(),
+            "exclude_regex": self.exclude_regex_cb.isChecked(),
+        }
+
+    def _apply_preset_values(self, v: dict):
+        idx = self.level_combo.findData(v.get("min_priority", 0))
+        self.level_combo.setCurrentIndex(max(0, idx))
+        self.text_edit.setText(v.get("text", ""))
+        self.text_regex_cb.setChecked(bool(v.get("text_regex")))
+        self.tag_edit.setText(v.get("tag", ""))
+        self.tag_regex_cb.setChecked(bool(v.get("tag_regex")))
+        self.pid_edit.setText(v.get("pids", ""))
+        self.exclude_edit.setText(v.get("exclude", ""))
+        self.exclude_regex_cb.setChecked(bool(v.get("exclude_regex")))
+        if v.get("tag") or v.get("pids") or v.get("exclude"):
+            self.advanced_btn.setChecked(True)   # reveal what the preset set
+        self.apply_filter()
+
+    def _reload_presets(self, select: str = ""):
+        self._presets = logtools.load_presets()
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItem("Presets…", None)
+        for name in sorted(self._presets):
+            self.preset_combo.addItem(name, name)
+        i = self.preset_combo.findData(select) if select else -1
+        self.preset_combo.setCurrentIndex(i if i > 0 else 0)
+        self.preset_combo.blockSignals(False)
+
+    def _on_preset_pick(self, _idx):
+        name = self.preset_combo.currentData()
+        if name and name in self._presets:
+            self._apply_preset_values(logtools.clean_preset(self._presets[name]))
+            self.statusBar().showMessage(f"Preset applied: {name}", 4000)
+
+    def _save_preset(self):
+        from PyQt6.QtWidgets import QInputDialog
+        current = self.preset_combo.currentData() or ""
+        name, ok = QInputDialog.getText(self, "Save filter preset",
+                                        "Preset name:", text=current)
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        self._presets[name] = self._preset_values()
+        if logtools.save_presets(self._presets):
+            self._reload_presets(select=name)
+            self.statusBar().showMessage(f"✓ Preset saved: {name}", 5000)
+        else:
+            self.statusBar().showMessage("✗ Couldn't write the presets file", 8000)
+
+    def _delete_preset(self):
+        name = self.preset_combo.currentData()
+        if not name:
+            self.statusBar().showMessage("Select a preset to delete", 4000)
+            return
+        self._presets.pop(name, None)
+        logtools.save_presets(self._presets)
+        self._reload_presets()
+        self.statusBar().showMessage(f"Preset deleted: {name}", 4000)
+
+    # --- log export / import ----------------------------------------------------
+    def export_log(self, filtered: bool = True):
+        n = self.model.rowCount() if filtered else self.model.total_count()
+        if n == 0:
+            self.statusBar().showMessage("Nothing to export", 4000)
+            return
+        kind = "filtered" if filtered else "full"
+        import time as _time
+        default = os.path.join(os.path.expanduser("~/Downloads"),
+                               f"logcat-{kind}-{_time.strftime('%Y%m%d-%H%M%S')}.txt")
+        path, _ = QFileDialog.getSaveFileName(self, f"Export {kind} log ({n:,} lines)",
+                                              default, "Log files (*.txt *.log)")
+        if not path:
+            return
+        if filtered:
+            entries = [self.model.entry_at(r) for r in range(self.model.rowCount())]
+        else:
+            entries = self.model.entries
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(logtools.export_text(entries))
+        except OSError as exc:
+            self.statusBar().showMessage(f"✗ Export failed: {exc}", 10000)
+            return
+        self._notify_saved("Log exported", True,
+                           f"{len(entries):,} lines → {os.path.basename(path)}",
+                           os.path.dirname(path))
+
+    def open_log_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open a saved logcat file", os.path.expanduser("~/Downloads"),
+            "Log files (*.txt *.log);;All files (*)")
+        if not path:
+            return
+        if self.reader and self.reader.running:
+            self.reader.stop()   # a live stream would interleave with the file
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError as exc:
+            self.statusBar().showMessage(f"✗ Couldn't open: {exc}", 10000)
+            return
+        entries = [e for e in (parse_line(l) for l in lines) if e is not None]
+        self.clear()
+        self.model.append_batch(entries)
+        self._schedule_relayout()
+        self._update_status()
+        self.statusBar().showMessage(
+            f"Loaded {len(entries):,} lines from {os.path.basename(path)} "
+            f"({len(lines) - len(entries):,} non-log lines skipped)", 8000)
+
     # --- APK install -------------------------------------------------------
     def choose_apks(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -1382,6 +1626,11 @@ class MainWindow(QMainWindow):
             e = parse_line(line)
             if e is not None:
                 self.pending.append(e)
+                # Live-crash ping (cheap: priority gate first, then two tags).
+                if e.priority >= PRIORITY["E"] and (
+                        (e.tag == "AndroidRuntime" and e.msg.startswith("FATAL EXCEPTION"))
+                        or (e.tag == "ActivityManager" and e.msg.startswith("ANR in"))):
+                    self._flag_live_crash()
         self._recv_since_tick += len(lines)
         if len(self.pending) > MAX_PENDING:
             self._dropped += len(self.pending) - MAX_PENDING
@@ -1537,4 +1786,7 @@ class MainWindow(QMainWindow):
         self.files_view.shutdown()       # stop transfers + remove staged temp files
         self.appmgr_view.shutdown()      # stop app-mgr workers + remove staged APKs
         self.monitor_view.shutdown()     # stop the CPU/RAM polling thread
+        self.inspector_view.shutdown()  # prefs + crashes shut down inside appmgr_view
+        self.controls_view.shutdown()
+        self.toolbox_view.shutdown()     # stops monkey/perfetto/bugreport workers
         super().closeEvent(event)
