@@ -315,6 +315,7 @@ QProgressBar#DbBusy::chunk {{ background: {ACCENT}; }}
     background: {SURFACE}; color: {TEXT_DIM}; border: none;
     border-bottom: 1px solid {BORDER}; padding: 5px 8px; font-weight: 600;
 }}
+#DbEmpty {{ background: transparent; color: {TEXT_DIM}; padding: 24px; }}
 QTableView#DbTable {{ gridline-color: {GRID}; }}
 QTableView#DbTable QHeaderView::section {{
     background: {SURFACE}; color: {TEXT_DIM}; border: none;

@@ -846,6 +846,23 @@ dbv.set_serial("DEVICE1")
 dbv.set_package(None)
 check(dbv._list_worker is None and dbv.tree.topLevelItemCount() == 0,
       "no app selected -> no listing worker, empty schema tree")
+# empty-state placeholders (isHidden() = the explicit show/hide flag, independent
+# of whether the tab is the current one in headless mode)
+dbv.set_serial(None); dbv._refresh_tree_empty()
+check(not dbv.tree_empty.isHidden() and "No app selected" in dbv.tree_empty.text(),
+      "DB schema tree shows a placeholder when no app is selected")
+dbv._refresh_results_empty()
+check(not dbv.results_empty.isHidden() and "No table selected" in dbv.results_empty.text(),
+      "DB results show a placeholder when nothing is loaded")
+dbv._results_empty = ("📭", "Empty table", "“t” has no rows.")
+dbv._refresh_results_empty()
+check("Empty table" in dbv.results_empty.text(),
+      "DB results placeholder reflects an empty table")
+dbv.model.set_result(["id"], [(1,)], offset=0)
+dbv._refresh_results_empty()
+check(dbv.results_empty.isHidden(), "DB results placeholder hides once rows arrive")
+dbv.model.clear()
+dbv.set_serial("DEVICE1")
 dbv.set_package("com.example.app")
 check("com.example.app" in dbv.app_label.text(), "DB tab reflects the selected app in its header")
 

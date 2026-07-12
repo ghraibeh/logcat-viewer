@@ -29,7 +29,9 @@ import sqlite3
 import subprocess
 import tempfile
 
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QPointF, QRectF, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import (
+    QAbstractTableModel, QEvent, QModelIndex, QPointF, QRectF, Qt, QThread, pyqtSignal,
+)
 from PyQt6.QtGui import (
     QColor, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QPixmap,
 )
@@ -724,6 +726,40 @@ class CellDialog(QDialog):
         self.accept()
 
 
+class EmptyOverlay(QLabel):
+    """A centered empty-state message floated over a scroll-area view. Stays
+    transparent to the mouse so the underlying view keeps working."""
+
+    def __init__(self, view):
+        super().__init__(view.viewport())
+        self.setObjectName("DbEmpty")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setWordWrap(True)
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._view = view
+        view.viewport().installEventFilter(self)
+        self.hide()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize:
+            self.resize(obj.size())
+        return False
+
+    def show_message(self, glyph: str, title: str, sub: str = "") -> None:
+        sub_html = f"<div style='color:{TEXT_DIM};font-size:12px'>{sub}</div>" if sub else ""
+        self.setText(
+            f"<div style='font-size:34px'>{glyph}</div>"
+            f"<div style='color:{TEXT};font-size:14px;font-weight:600;"
+            f"margin-top:10px'>{title}</div>{sub_html}")
+        self.resize(self._view.viewport().size())
+        self.show()
+        self.raise_()
+
+    def hide_message(self) -> None:
+        self.hide()
+
+
 # --- the tab widget -----------------------------------------------------------
 class DatabaseView(QWidget):
     """Schema tree (databases → tables) + a results table with paging and a
@@ -752,6 +788,8 @@ class DatabaseView(QWidget):
         self._rowids = None                       # per-visible-row rowid (None = not editable)
         self._can_edit_device = False             # device has an sqlite3 binary
         self._query_seq = 0                       # latest-wins guard for QueryWorker
+        self._tree_empty = None                   # (glyph, title, sub) override or None
+        self._results_empty = None
         self._workers: set[QThread] = set()       # keep refs alive
         self._list_worker: DbListWorker | None = None
         self._open_worker: DbOpenWorker | None = None
@@ -814,6 +852,7 @@ class DatabaseView(QWidget):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_tree_menu)
         lv.addWidget(self.tree, 1)
+        self.tree_empty = EmptyOverlay(self.tree)
         split.addWidget(left)
 
         # Right: query box + results table + paging bar.
@@ -869,6 +908,7 @@ class DatabaseView(QWidget):
         self._mono.setPointSize(12)
         self.table.setFont(self._mono)
         rv.addWidget(self.table, 1)
+        self.results_empty = EmptyOverlay(self.table)
 
         pbar = QWidget()
         pbar.setObjectName("DbPageBar")
@@ -917,6 +957,32 @@ class DatabaseView(QWidget):
     def _update_tree_busy(self):
         """Show the schema loader while databases are being listed or connected."""
         self.tree_busy.setVisible(self._list_worker is not None or self._open_worker is not None)
+        self._refresh_tree_empty()
+
+    def _refresh_tree_empty(self):
+        """Empty-state placeholder for the schema tree."""
+        if self._list_worker is not None or self._open_worker is not None:
+            self.tree_empty.hide_message()                      # busy bar is showing
+        elif not (self.adb and self._serial and self._package):
+            self.tree_empty.show_message(
+                "🗄", "No app selected",
+                "Pick an app in the App box above to inspect its SQLite databases.")
+        elif self.tree.topLevelItemCount() == 0:
+            self.tree_empty.show_message(*(self._tree_empty or (
+                "🗄", "No databases", "This app hasn't created any SQLite databases yet.")))
+        else:
+            self.tree_empty.hide_message()
+
+    def _refresh_results_empty(self):
+        """Empty-state placeholder for the results table."""
+        if self.results_busy.isVisible():
+            self.results_empty.hide_message()
+        elif self.model.rowCount() == 0:
+            self.results_empty.show_message(*(self._results_empty or (
+                "📋", "No table selected",
+                "Choose a table on the left, or run a query, to see rows here.")))
+        else:
+            self.results_empty.hide_message()
 
     # --- device / app context ---------------------------------------------
     def set_serial(self, serial: str | None):
@@ -989,6 +1055,9 @@ class DatabaseView(QWidget):
         if not ok:
             self._status(message)
             self.failed.emit(message)
+            self._tree_empty = ("⚠️", "Can't read this app's databases",
+                                message or "The app may not be debuggable, and the device "
+                                "isn't rooted.")
             self._update_tree_busy()
             return
         self.tree.clear()
@@ -1001,6 +1070,9 @@ class DatabaseView(QWidget):
             self.tree.addTopLevelItem(item)
             self._db_items[name] = item
         self._status(message)
+        self._tree_empty = None if dbs else (
+            "🗄", "No databases",
+            f"{self._package} hasn't created any SQLite databases yet.")
         self._filter_tree(self.search_edit.text())
         if dbs:                                   # auto-connect the first DB so the tab isn't empty
             self._open_db(dbs[0], auto_select=True)
@@ -1082,6 +1154,8 @@ class DatabaseView(QWidget):
             self.prev_btn.setEnabled(False)
             self.next_btn.setEnabled(False)
             self.page_label.clear()
+            self._results_empty = None
+            self._refresh_results_empty()
         path = self._db_paths.pop(name, None)
         if path:
             for suf in ("",) + SIDECAR_SUFFIXES:
@@ -1251,6 +1325,7 @@ class DatabaseView(QWidget):
         self._workers.add(worker)
         self._status("Running…")
         self.results_busy.show()
+        self._refresh_results_empty()             # hide the placeholder while loading
         worker.start()
 
     def _on_query_done(self, ok, cols, rows, total, truncated, message, rowids):
@@ -1261,6 +1336,9 @@ class DatabaseView(QWidget):
         if not ok:
             self._status(f"✗ {message}")
             self.failed.emit(f"Query failed: {message}")
+            self.model.clear()
+            self._results_empty = ("⚠️", "Query failed", message)
+            self._refresh_results_empty()
             return
         ctx = worker.ctx
         offset = ctx[3] if ctx and ctx[0] == "table" else 0
@@ -1273,12 +1351,17 @@ class DatabaseView(QWidget):
             self._update_paging()
             first = offset + 1 if rows else 0
             self._status(f"{ctx[2]}: rows {first}–{offset + len(rows)} of {total:,}")
+            self._results_empty = None if rows else (
+                "📭", "Empty table", f"“{ctx[2]}” has no rows.")
         else:
             self.prev_btn.setEnabled(False)
             self.next_btn.setEnabled(False)
             tail = " (truncated)" if truncated else ""
             self.page_label.setText(f"{len(rows):,} row(s){tail}")
             self._status(f"Query OK — {len(rows):,} row(s){tail}")
+            self._results_empty = None if rows else (
+                "🔍", "No matching rows", "Your query returned 0 rows.")
+        self._refresh_results_empty()
 
     def _page(self, direction):
         if self._cur_db is None or self._cur_table is None:
@@ -1436,6 +1519,10 @@ class DatabaseView(QWidget):
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
         self.page_label.clear()
+        self._tree_empty = None
+        self._results_empty = None
+        self._refresh_tree_empty()
+        self._refresh_results_empty()
 
     def _status(self, text: str):
         # Paging info lives in page_label; transient status goes to the status bar.
