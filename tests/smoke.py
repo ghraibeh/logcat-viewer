@@ -300,6 +300,14 @@ _PROC = (
 st = mon.parse_cpu_stat(_PROC)
 check(st == (1000, 850), f"parse_cpu_stat sums jiffies, idle=idle+iowait, got {st}")
 check(mon.cpu_core_count(_PROC) == 2, "cpu_core_count counts per-core lines")
+_cores = mon.parse_cpu_cores(_PROC)
+check(len(_cores) == 2 and _cores[0] == (500, 425),
+      f"parse_cpu_cores returns per-core (total, idle) in order, got {_cores}")
+# per-core busy% via delta: cpu0 idle unchanged across samples => 100% busy
+_nxt = _PROC.replace("cpu0 50 0 25 400 25", "cpu0 100 0 50 400 25")
+check(abs(mon.cpu_percent(mon.parse_cpu_cores(_PROC)[0],
+                          mon.parse_cpu_cores(_nxt)[0]) - 100.0) < 0.01,
+      "per-core cpu_percent computes from the cpuN delta")
 mi = mon.parse_meminfo(_PROC)
 check(mi["total"] == 8000000 and mi["available"] == 3000000, "parse_meminfo reads KB values")
 check(mon.mem_used_kb(mi) == (5000000, 8000000), "mem_used_kb = total - available")

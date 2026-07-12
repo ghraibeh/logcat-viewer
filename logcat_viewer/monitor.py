@@ -88,6 +88,21 @@ def cpu_core_count(text: str) -> int:
     return sum(1 for l in text.splitlines() if re.match(r"cpu\d+\b", l))
 
 
+def parse_cpu_cores(text: str) -> list:
+    """Per-core (total, idle) jiffies from the `cpuN` lines, ordered by core."""
+    cores = []
+    for line in text.splitlines():
+        m = re.match(r"cpu(\d+)\b", line)
+        if not m:
+            continue
+        nums = [int(x) for x in line.split()[1:] if x.isdigit()]
+        if len(nums) >= 4:
+            idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
+            cores.append((int(m.group(1)), sum(nums), idle))
+    cores.sort()
+    return [(t, i) for _n, t, i in cores]
+
+
 def parse_meminfo(text: str) -> dict:
     """meminfo keys we care about, in KB."""
     want = {"MemTotal": "total", "MemAvailable": "available", "MemFree": "free",
@@ -152,6 +167,7 @@ class MonitorWorker(QThread):
 
     def run(self):
         prev_cpu = None
+        prev_cores = None
         probe = build_probe(self._package)
         while self._run:
             try:
@@ -177,11 +193,18 @@ class MonitorWorker(QThread):
             pct = cpu_percent(prev_cpu, cur_cpu)
             if cur_cpu:
                 prev_cpu = cur_cpu
+            cur_cores = parse_cpu_cores(text)
+            cores_pct = None
+            if prev_cores and len(prev_cores) == len(cur_cores):
+                cores_pct = [cpu_percent(p, c) for p, c in zip(prev_cores, cur_cores)]
+            if cur_cores:
+                prev_cores = cur_cores
             self.sample.emit({
                 "cpu": pct,
                 "mem": mem_used_kb(parse_meminfo(text)),
                 "load": parse_loadavg(text),
                 "cores": cpu_core_count(text),
+                "cores_pct": cores_pct,
                 "app": app,
             })
             slept = 0
@@ -265,6 +288,70 @@ class SparkGraph(QWidget):
         flush()
 
 
+class CoreBars(QWidget):
+    """A row of vertical bars, one per CPU core, heat-colored by load."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._vals: list = []            # per-core busy % (0..100) or None
+        self.setMinimumHeight(96)
+
+    def set_values(self, vals):
+        self._vals = list(vals or [])
+        self.update()
+
+    def clear(self):
+        self._vals = []
+        self.update()
+
+    @staticmethod
+    def _heat(pct):
+        if pct is None:
+            return QColor(theme.BORDER_2)
+        if pct < 50:
+            return QColor(theme.GREEN)
+        if pct < 80:
+            return QColor(theme.AMBER)
+        return QColor(theme.RED)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QColor(theme.BG))
+        n = len(self._vals)
+        if n == 0:
+            p.setPen(QColor(theme.TEXT_DIM))
+            p.drawText(self.rect(), int(Qt.AlignmentFlag.AlignCenter),
+                       "waiting for per-core data…")
+            return
+        w, h = self.width(), self.height()
+        top_pad, bottom_pad = 16, 16          # room for the % (top) and label (bottom)
+        track_h = h - top_pad - bottom_pad
+        gap = 8
+        bw = (w - gap * (n + 1)) / n
+        base = h - bottom_pad
+        for i, pct in enumerate(self._vals):
+            x = gap + i * (bw + gap)
+            # track
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(theme.SURFACE_2))
+            p.drawRoundedRect(int(x), top_pad, int(bw), track_h, 4, 4)
+            # fill
+            val = 0.0 if pct is None else max(0.0, min(100.0, pct))
+            fh = int(track_h * val / 100.0)
+            if fh > 0:
+                p.setBrush(self._heat(pct))
+                p.drawRoundedRect(int(x), base - fh, int(bw), fh, 4, 4)
+            # labels
+            p.setPen(QColor(theme.TEXT))
+            p.drawText(int(x), 0, int(bw), top_pad,
+                       int(Qt.AlignmentFlag.AlignCenter),
+                       "–" if pct is None else f"{val:.0f}%")
+            p.setPen(QColor(theme.TEXT_DIM))
+            p.drawText(int(x), base + 1, int(bw), bottom_pad,
+                       int(Qt.AlignmentFlag.AlignCenter), f"C{i}")
+
+
 class MonitorView(QWidget):
     """CPU + RAM dashboard. Polls only while visible with a device selected."""
     status = pyqtSignal(str)
@@ -330,6 +417,21 @@ class MonitorView(QWidget):
                                    self.mem_app, self.mem_graph), 0, 1)
         cards.setColumnStretch(0, 1)
         cards.setColumnStretch(1, 1)
+
+        # Per-core CPU meter spans both columns beneath the CPU/Memory cards.
+        core_card = QWidget()
+        core_card.setObjectName("MonCard")
+        cv = QVBoxLayout(core_card)
+        cv.setContentsMargins(16, 12, 16, 12)
+        cv.setSpacing(6)
+        cap = QLabel("PER-CORE CPU")
+        cap.setObjectName("MonCaption")
+        cv.addWidget(cap)
+        self.core_bars = CoreBars()
+        cv.addWidget(self.core_bars, 1)
+        cards.addWidget(core_card, 1, 0, 1, 2)
+        cards.setRowStretch(0, 3)
+        cards.setRowStretch(1, 2)
         root.addLayout(cards, 1)
 
     def _card(self, name, value_lbl, sub_lbl, app_lbl, graph) -> QWidget:
@@ -371,6 +473,7 @@ class MonitorView(QWidget):
         self._package = package
         self.cpu_graph.clear()
         self.mem_graph.clear()
+        self.core_bars.clear()
         self._reset_app_readouts()
         self._update_leak_btn()
         if self._worker is not None:   # restart so the worker watches the new app
@@ -473,6 +576,7 @@ class MonitorView(QWidget):
         self.mem_sub.setText(msg)
         self.cpu_graph.clear()
         self.mem_graph.clear()
+        self.core_bars.clear()
         self._reset_app_readouts()
 
     def _reset_app_readouts(self):
@@ -492,6 +596,8 @@ class MonitorView(QWidget):
         else:
             self.cpu_value.setText(f"{pct:.0f}%")
             self.cpu_graph.push(pct / 100.0, None if acpu is None else acpu / 100.0)
+        if s.get("cores_pct") is not None:
+            self.core_bars.set_values(s["cores_pct"])
         cores = s.get("cores") or 0
         load = s.get("load")
         bits = []
