@@ -8,7 +8,7 @@ of the decompiled project on the left and a read-only code editor (line numbers
 **Self-contained, install-free:** jadx and a Java runtime are *provisioned on
 first use* — an existing jadx / Java on the machine is used if present, otherwise
 jadx (and, if there's no Java, a minimal JRE) is downloaded once into
-``~/Library/Application Support/logcat-viewer/tools`` and cached forever. No
+``~/Library/Application Support/AndroidLab/tools`` and cached forever. No
 manual `brew install` required; everything runs on a ``QThread`` (never blocks
 the UI), consistent with the rest of the app.
 """
@@ -53,7 +53,7 @@ class CancelledError(Exception):
 
 # --- tool provisioning (find on machine → else download & cache) --------------
 def app_support_dir() -> str:
-    d = os.path.expanduser("~/Library/Application Support/logcat-viewer")
+    d = os.path.expanduser("~/Library/Application Support/AndroidLab")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -127,7 +127,7 @@ def cached_jre_java() -> str | None:
 
 
 def _download(url: str, dest: str, progress, is_cancelled, label: str):
-    req = urllib.request.Request(url, headers={"User-Agent": "logcat-viewer"})
+    req = urllib.request.Request(url, headers={"User-Agent": "AndroidLab"})
     with urllib.request.urlopen(req, timeout=60) as resp:
         total = int(resp.headers.get("Content-Length", 0))
         got = 0

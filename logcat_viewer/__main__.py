@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from . import theme
+from .about import APP_NAME
 from .ui import MainWindow
 
 
@@ -18,7 +19,7 @@ def main() -> int:
     # be set before the QApplication is created.
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QApplication(sys.argv)
-    app.setApplicationName("Logcat Viewer")
+    app.setApplicationName(APP_NAME)
     theme.apply(app)
     win = MainWindow()
     win.show()

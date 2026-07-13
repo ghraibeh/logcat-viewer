@@ -5,12 +5,12 @@
 #   ./packaging/build.sh
 #
 # Output:
-#   dist/Logcat Viewer.app
-#   dist/Logcat-Viewer-macOS.zip   (drag-and-drop portable archive)
+#   dist/AndroidLab.app
+#   dist/AndroidLab-macOS.zip   (drag-and-drop portable archive)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-APP_NAME="Logcat Viewer"
+APP_NAME="AndroidLab"
 STAGING="packaging/staging"
 PT_ZIP="$STAGING/platform-tools.zip"
 PT_DIR="$STAGING/platform-tools"
@@ -55,14 +55,14 @@ fi
 
 echo "==> running PyInstaller"
 rm -rf build dist
-"$VENV/bin/pyinstaller" --noconfirm packaging/logcat-viewer.spec
+"$VENV/bin/pyinstaller" --noconfirm packaging/androidlab.spec
 
 APP_PATH="dist/$APP_NAME.app"
 echo "==> ad-hoc signing (so double-click launch works without Gatekeeper drama)"
 xattr -cr "$APP_PATH" 2>/dev/null || true
 codesign --force --deep --sign - "$APP_PATH"
 
-ZIP="dist/Logcat-Viewer-macOS.zip"
+ZIP="dist/AndroidLab-macOS.zip"
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent "dist/$APP_NAME.app" "$ZIP"
 
@@ -71,5 +71,5 @@ echo
 echo "✓ built dist/$APP_NAME.app ($SZ)"
 echo "✓ zip   $ZIP"
 echo
-echo "Install: unzip and double-click Logcat Viewer.app."
+echo "Install: unzip and double-click AndroidLab.app."
 echo "First open: if macOS blocks it, right-click → Open once."

@@ -1,4 +1,4 @@
-# Logcat Viewer
+# AndroidLab
 
 A native-feeling macOS desktop app (Python + PyQt6) that streams **live `adb logcat`**
 and filters it like logcat — by **level, tag, PID, free text, and regex** — with live,
@@ -124,7 +124,7 @@ Pick a device, press **Start**. Existing buffer dumps immediately, then it follo
     right (line numbers + Java/XML syntax highlighting), with a file filter, **Re-decompile**, and
     **Open in Finder**. jadx + a Java runtime are **provisioned on first use** — an existing jadx/Java
     is used if present, otherwise they're downloaded once into
-    `~/Library/Application Support/logcat-viewer/` and cached (no manual install). Results are cached
+    `~/Library/Application Support/AndroidLab/` and cached (no manual install). Results are cached
     per app, so re-opening is instant.
   - **Actions** — **Launch**, **Force-stop**, **Clear cache** (only the cache — tries
     `pm clear --cache-only`, then `run-as`/rooted-`su` `rm`), **Clear data**, **Enable/Disable**

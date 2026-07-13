@@ -5,17 +5,26 @@ canvas that scales them to fit. Clicks/drag map back to device pixels and are
 forwarded via `adb shell input` (tap/swipe); nav keys via keyevent. A "scrcpy"
 button pops out full-quality, low-latency mirroring when scrcpy is installed.
 Screenshot / screen-record buttons capture full-resolution PNG / MP4 to disk.
+
+A display picker (shown only when the device has more than one display, e.g.
+the Controls tab's simulated secondary display) mirrors any display:
+`screencap -d <SurfaceFlinger id>` polls it and `input -d <logical id>` routes
+taps to it. screenrecord rejects virtual display IDs, so secondary displays
+always use the screencap poller and MP4 recording stays main-display-only.
 """
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
 
 from PyQt6.QtCore import QProcess, QRect, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
-from PyQt6.QtWidgets import QDockWidget, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QComboBox, QDockWidget, QHBoxLayout, QPushButton, QVBoxLayout, QWidget,
+)
 
 from . import theme
 
@@ -82,6 +91,79 @@ def escape_input_text(text: str) -> str:
             out.append(ch)
     return "".join(out)
 
+def screencap_args(display_id: int | None = None) -> list[str]:
+    """screencap argv tail; display_id is a SurfaceFlinger ID (None = primary)."""
+    args = ["screencap"]
+    if display_id is not None:
+        args += ["-d", str(display_id)]
+    return args + ["-p"]
+
+
+def build_display_list(sf_text: str, display_text: str) -> list[dict]:
+    """Join `dumpsys SurfaceFlinger --display-id` (capture IDs) with `dumpsys
+    display` viewports (logical IDs for `input -d`). Physical displays first.
+
+    SF lines:   Display <id> (HWC display 0): ... displayName="samsung lcd"
+                Display <id> (Virtual display): displayName="Overlay #1" ...
+    Viewports:  DisplayViewport{..., displayId=14, ..., uniqueId='overlay:1', ...}
+    Physical viewports carry uniqueId='local:<sf-id>'; overlay ones
+    'overlay:<n>' matching the SF displayName "Overlay #<n>".
+    """
+    viewports = {uid: int(did) for did, uid in re.findall(
+        r"DisplayViewport\{[^}]*?displayId=(\d+),[^}]*?uniqueId='([^']+)'",
+        display_text or "")}
+    out = []
+    for line in (sf_text or "").splitlines():
+        m = re.match(r"Display (\d+) \(([^)]*)\)", line.strip())
+        if not m:
+            continue
+        sf_id, kind = int(m.group(1)), m.group(2)
+        nm = re.search(r'displayName="([^"]*)"', line)
+        name = (nm.group(1).strip() if nm else "") or kind
+        virtual = "virtual" in kind.lower()
+        if virtual:
+            onum = re.search(r"#(\d+)", name)
+            logical = viewports.get(f"overlay:{onum.group(1)}") if onum else None
+        else:
+            logical = viewports.get(f"local:{sf_id}")
+        out.append({"sf_id": sf_id, "name": name, "virtual": virtual,
+                    "logical": logical})
+    out.sort(key=lambda d: d["virtual"])   # stable: physical first
+    return out
+
+
+class DisplayListWorker(QThread):
+    """Enumerate the device's displays (two dumpsys reads, off the UI thread)."""
+    done = pyqtSignal(list)
+
+    def __init__(self, adb, serial, parent=None):
+        super().__init__(parent)
+        self._adb, self._serial = adb, serial
+
+    def run(self):
+        try:
+            sf = subprocess.run(
+                [self._adb, "-s", self._serial, "shell",
+                 "dumpsys", "SurfaceFlinger", "--display-id"],
+                capture_output=True, text=True, timeout=10).stdout
+            dp = subprocess.run(
+                [self._adb, "-s", self._serial, "shell", "dumpsys", "display"],
+                capture_output=True, text=True, timeout=10).stdout
+        except (subprocess.SubprocessError, OSError):
+            self.done.emit([])
+            return
+        self.done.emit(build_display_list(sf, dp))
+
+
+class _DisplayCombo(QComboBox):
+    """Combo that asks for a fresh display list every time it opens."""
+    popupRequested = pyqtSignal()
+
+    def showPopup(self):
+        self.popupRequested.emit()
+        super().showPopup()
+
+
 # Number of staggered capture threads. screencap on the device serializes only
 # partially, so overlapping N roundtrips raises the effective frame rate.
 CAPTURE_THREADS = 2
@@ -93,11 +175,13 @@ class MirrorWorker(QThread):
     frame = pyqtSignal(float, QImage)
     failed = pyqtSignal(str)
 
-    def __init__(self, adb: str, serial: str, start_delay_ms: int = 0, parent=None):
+    def __init__(self, adb: str, serial: str, start_delay_ms: int = 0,
+                 display_id: int | None = None, parent=None):
         super().__init__(parent)
         self._adb = adb
         self._serial = serial
         self._delay = start_delay_ms
+        self._display_id = display_id
         self._run = True
 
     def stop(self):
@@ -114,7 +198,8 @@ class MirrorWorker(QThread):
             ts = time.monotonic()
             try:
                 out = subprocess.run(
-                    [self._adb, "-s", self._serial, "exec-out", "screencap", "-p"],
+                    [self._adb, "-s", self._serial, "exec-out",
+                     *screencap_args(self._display_id)],
                     capture_output=True, timeout=10).stdout
             except (subprocess.SubprocessError, OSError) as exc:
                 self.failed.emit(str(exc))
@@ -263,16 +348,19 @@ class ScreenshotWorker(QThread):
     """Grab a full-resolution PNG via `screencap -p` and write it to disk."""
     done = pyqtSignal(bool, str, str)  # ok, message, containing-directory
 
-    def __init__(self, adb, serial, dest_file, parent=None):
+    def __init__(self, adb, serial, dest_file, display_id: int | None = None,
+                 parent=None):
         super().__init__(parent)
         self._adb = adb
         self._serial = serial
         self._dest = dest_file
+        self._display_id = display_id
 
     def run(self):
         try:
             res = subprocess.run(
-                [self._adb, "-s", self._serial, "exec-out", "screencap", "-p"],
+                [self._adb, "-s", self._serial, "exec-out",
+                 *screencap_args(self._display_id)],
                 capture_output=True, timeout=20)
         except (subprocess.SubprocessError, OSError) as exc:
             self.done.emit(False, f"Screenshot failed: {exc}", "")
@@ -521,6 +609,10 @@ class MirrorView(QWidget):
         self._h264_ok = True                        # cleared if the stream fails
         self._recording = False                     # MP4 record in progress
         self._last_ts = 0.0
+        self._display_id: int | None = None         # SF id; None = main display
+        self._display_logical: int | None = None    # logical id for `input -d`
+        self._want_secondary = 0                    # pending auto-switch retries
+        self._dlist_worker: DisplayListWorker | None = None
         self._shot_worker: ScreenshotWorker | None = None
         self._rec_worker: RecordWorker | None = None
         self._dock: QDockWidget | None = None
@@ -533,16 +625,16 @@ class MirrorView(QWidget):
         self._overlay_timer.setSingleShot(True)
         self._overlay_timer.timeout.connect(lambda: self.canvas.clear_overlay())
 
-        root = QVBoxLayout(self)
+        root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         self.canvas = _ScreenCanvas()
         self.canvas.tap.connect(self._tap)
         self.canvas.swipe.connect(self._swipe)
         self.canvas.apksDropped.connect(self.apksDropped)  # relay drops upward
-        root.addWidget(self.canvas, 1)
 
-        bar = QHBoxLayout()
+        # vertical control rail on the right of the canvas
+        bar = QVBoxLayout()
         bar.setContentsMargins(6, 6, 6, 6)
         bar.setSpacing(6)
         self.back_btn = QPushButton("‹")
@@ -553,7 +645,7 @@ class MirrorView(QWidget):
         self.recents_btn.setToolTip("Recents")
         self.shot_btn = QPushButton("📷")
         self.shot_btn.setToolTip("Save a screenshot to ~/Downloads")
-        self.rec_btn = QPushButton("⏺ Rec")
+        self.rec_btn = QPushButton("⏺")
         self.rec_btn.setToolTip("Record the screen to an MP4 in ~/Downloads")
         self.paste_btn = QPushButton("📋")
         self.paste_btn.setToolTip("Type the Mac clipboard into the focused field (⌘V)")
@@ -561,12 +653,21 @@ class MirrorView(QWidget):
         self.type_btn.setToolTip("Type text into the focused field on the device")
         self.fullscreen_btn = QPushButton("⛶")
         self.fullscreen_btn.setToolTip("Full screen mirror (Esc to exit)")
-        self.scrcpy_btn = QPushButton("⤢ scrcpy")
+        self.scrcpy_btn = QPushButton("⤢")
         self.scrcpy_btn.setToolTip("Open full-quality interactive mirror (scrcpy)")
+        self.display_combo = _DisplayCombo()
+        self.display_combo.setToolTip(
+            "Which display to mirror (secondary displays use the screencap preview)")
+        self.display_combo.addItem("Main", (None, None))
+        self.display_combo.setFixedWidth(44)  # keep the side rail slim; popup shows full names
+        self.display_combo.setVisible(False)
+        self.display_combo.popupRequested.connect(self._probe_displays)
+        self.display_combo.activated.connect(self._on_display_pick)
         for b in (self.back_btn, self.home_btn, self.recents_btn,
                   self.shot_btn, self.rec_btn, self.paste_btn, self.type_btn,
                   self.fullscreen_btn, self.scrcpy_btn):
             b.setObjectName("toggle")
+            b.setFixedSize(32, 32)   # compact square icons for the side rail
         self.back_btn.clicked.connect(lambda: self._key(KEY_BACK))
         self.home_btn.clicked.connect(lambda: self._key(KEY_HOME))
         self.recents_btn.clicked.connect(lambda: self._key(KEY_RECENTS))
@@ -577,16 +678,19 @@ class MirrorView(QWidget):
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
         self.scrcpy_btn.clicked.connect(self._launch_scrcpy)
         self.scrcpy_btn.setEnabled(shutil.which("scrcpy") is not None)
-        bar.addWidget(self.back_btn)
-        bar.addWidget(self.home_btn)
-        bar.addWidget(self.recents_btn)
-        bar.addWidget(self.shot_btn)
-        bar.addWidget(self.rec_btn)
-        bar.addWidget(self.paste_btn)
-        bar.addWidget(self.type_btn)
+        center = Qt.AlignmentFlag.AlignHCenter
+        bar.addWidget(self.back_btn, 0, center)
+        bar.addWidget(self.home_btn, 0, center)
+        bar.addWidget(self.recents_btn, 0, center)
+        bar.addWidget(self.shot_btn, 0, center)
+        bar.addWidget(self.rec_btn, 0, center)
+        bar.addWidget(self.paste_btn, 0, center)
+        bar.addWidget(self.type_btn, 0, center)
         bar.addStretch(1)
-        bar.addWidget(self.fullscreen_btn)
-        bar.addWidget(self.scrcpy_btn)
+        bar.addWidget(self.display_combo, 0, center)
+        bar.addWidget(self.fullscreen_btn, 0, center)
+        bar.addWidget(self.scrcpy_btn, 0, center)
+        root.addWidget(self.canvas, 1)
         root.addLayout(bar)
 
     def bind_dock(self, dock: QDockWidget):
@@ -661,8 +765,16 @@ class MirrorView(QWidget):
         self._serial = serial
         self._h264_ok = True        # give the video mirror a fresh chance
         self._recording = False
+        self._want_secondary = 0
+        self._set_display(None, None)   # display ids are per-device
+        self.display_combo.blockSignals(True)
+        self.display_combo.clear()
+        self.display_combo.addItem("Main", (None, None))
+        self.display_combo.blockSignals(False)
+        self.display_combo.setVisible(False)
         self.canvas.set_message("Connecting…")
         self._start_capture()
+        self._probe_displays()
 
     def stop(self):
         if self.is_fullscreen():
@@ -673,14 +785,19 @@ class MirrorView(QWidget):
             self._rec_worker.wait(15000)
         self._recording = False
         self._stop_capture()
+        if self._dlist_worker is not None:
+            self._dlist_worker.wait(1500)
+            self._dlist_worker = None
 
     def _start_capture(self):
         """Start the best available live feed: H.264 video when PyAV is present
         and we're not busy recording (which needs the device's sole encoder),
-        else the screencap poller."""
+        else the screencap poller. Secondary displays always use the poller —
+        screenrecord rejects virtual display IDs."""
         if not self._serial:
             return
-        if have_av() and self._h264_ok and not self._recording:
+        if (have_av() and self._h264_ok and not self._recording
+                and self._display_id is None):
             self._h264 = H264MirrorWorker(self._adb, self._serial)
             self._h264.frame.connect(self._on_h264_frame)
             self._h264.failed.connect(self._on_h264_fail)
@@ -688,11 +805,77 @@ class MirrorView(QWidget):
         else:
             self._last_ts = 0.0
             for i in range(CAPTURE_THREADS):
-                w = MirrorWorker(self._adb, self._serial, start_delay_ms=i * 55)
+                w = MirrorWorker(self._adb, self._serial, start_delay_ms=i * 55,
+                                 display_id=self._display_id)
                 w.frame.connect(self._on_frame)
                 w.failed.connect(self._on_fail)
                 self._workers.append(w)
                 w.start()
+
+    # --- display picker ------------------------------------------------------
+    def _set_display(self, sf_id: int | None, logical: int | None):
+        self._display_id = sf_id
+        self._display_logical = logical
+        # screenrecord can't capture virtual displays.
+        self.rec_btn.setEnabled(sf_id is None or self._rec_worker is not None)
+        self.rec_btn.setToolTip(
+            "Record the screen to an MP4 in ~/Downloads" if sf_id is None
+            else "Recording works on the main display only")
+
+    def _probe_displays(self):
+        if not self._serial or self._dlist_worker is not None:
+            return
+        self._dlist_worker = DisplayListWorker(self._adb, self._serial, self)
+        self._dlist_worker.done.connect(self._on_displays)
+        self._dlist_worker.start()
+
+    def show_secondary(self, attempts: int = 8):
+        """One-click path to the secondary display: keep probing briefly (it
+        may still be coming up if it was just enabled) and switch to the first
+        one found."""
+        self._want_secondary = attempts
+        self._probe_displays()
+
+    def _on_displays(self, displays: list):
+        self._dlist_worker = None
+        current = self._display_id
+        self.display_combo.blockSignals(True)
+        self.display_combo.clear()
+        self.display_combo.addItem("Main", (None, None))
+        for d in displays[1:]:      # everything beyond the primary display
+            self.display_combo.addItem(d["name"], (d["sf_id"], d["logical"]))
+        idx = 0
+        for i in range(self.display_combo.count()):
+            if self.display_combo.itemData(i)[0] == current:
+                idx = i
+                break
+        self.display_combo.setCurrentIndex(idx)
+        self.display_combo.blockSignals(False)
+        self.display_combo.setVisible(self.display_combo.count() > 1)
+        if current is not None and self.display_combo.itemData(idx)[0] != current:
+            # the mirrored display disappeared — fall back to the main one
+            self._set_display(None, None)
+            self.canvas.set_message("Connecting…")
+            self._restart_capture()
+        if self._want_secondary:
+            if self.display_combo.count() > 1:      # found one — switch to it
+                self._want_secondary = 0
+                self.display_combo.setCurrentIndex(1)
+                self._on_display_pick()
+            else:
+                self._want_secondary -= 1
+                if self._want_secondary > 0:        # still booting; probe again
+                    QTimer.singleShot(600, self._probe_displays)
+                else:
+                    self.failed.emit("no secondary display found")
+
+    def _on_display_pick(self):
+        sf_id, logical = self.display_combo.currentData() or (None, None)
+        if sf_id == self._display_id:
+            return
+        self._set_display(sf_id, logical)
+        self.canvas.set_message("Connecting…")
+        self._restart_capture()
 
     def _stop_capture(self):
         if self._h264 is not None:
@@ -731,7 +914,12 @@ class MirrorView(QWidget):
     # --- control -----------------------------------------------------------
     def _input(self, args):
         if self._serial:
-            QProcess.startDetached(self._adb, ["-s", self._serial, "shell", "input", *args])
+            # Route input to the mirrored display (`input -d <logical id>`).
+            dis = (["-d", str(self._display_logical)]
+                   if self._display_id is not None and self._display_logical is not None
+                   else [])
+            QProcess.startDetached(self._adb,
+                                   ["-s", self._serial, "shell", "input", *dis, *args])
 
     def _tap(self, x, y):
         self._input(["tap", str(x), str(y)])
@@ -767,7 +955,10 @@ class MirrorView(QWidget):
     def _launch_scrcpy(self):
         scrcpy = shutil.which("scrcpy")
         if scrcpy and self._serial:
-            QProcess.startDetached(scrcpy, ["-s", self._serial])
+            args = ["-s", self._serial]
+            if self._display_id is not None and self._display_logical is not None:
+                args += ["--display-id", str(self._display_logical)]
+            QProcess.startDetached(scrcpy, args)
 
     # --- capture: screenshot & screen record -------------------------------
     def _flash_error(self, text):
@@ -781,11 +972,14 @@ class MirrorView(QWidget):
             return
         if self._shot_worker is not None:
             return
-        name = f"screenshot-{_safe(self._serial)}-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        tag = "" if self._display_id is None else f"-display{self._display_logical}"
+        name = (f"screenshot-{_safe(self._serial)}{tag}-"
+                f"{time.strftime('%Y%m%d-%H%M%S')}.png")
         dest = os.path.join(_capture_dir(), name)
         self._overlay_timer.stop()
         self.canvas.set_overlay("capturing", "Capturing screenshot…")
-        self._shot_worker = ScreenshotWorker(self._adb, self._serial, dest)
+        self._shot_worker = ScreenshotWorker(self._adb, self._serial, dest,
+                                             display_id=self._display_id)
         self._shot_worker.done.connect(self._on_shot_done)
         self._shot_worker.start()
 
@@ -805,6 +999,9 @@ class MirrorView(QWidget):
         if not self._serial:
             self._flash_error("Mirror not connected")
             return
+        if self._display_id is not None:
+            self._flash_error("Recording works on the main display only")
+            return
         ts = time.strftime("%Y%m%d-%H%M%S")
         remote = f"/sdcard/logcatviewer-{ts}.mp4"
         dest = os.path.join(_capture_dir(), f"screenrecord-{_safe(self._serial)}-{ts}.mp4")
@@ -815,7 +1012,7 @@ class MirrorView(QWidget):
         self._rec_worker = RecordWorker(self._adb, self._serial, remote, dest)
         self._rec_worker.done.connect(self._on_record_done)
         self._rec_worker.start()
-        self.rec_btn.setText("⏹ Stop")
+        self.rec_btn.setText("⏹")
         self.rec_btn.setStyleSheet("background:#e5534b; color:#ffffff;")
         self._overlay_timer.stop()
         self.canvas.set_overlay("recording", "Recording… (tap Stop to finish)")
@@ -823,14 +1020,14 @@ class MirrorView(QWidget):
     def _stop_record(self):
         if self._rec_worker is not None:
             self.rec_btn.setEnabled(False)
-            self.rec_btn.setText("Saving…")
+            self.rec_btn.setText("…")
             self.canvas.set_overlay("capturing", "Finalizing recording…")
             self._rec_worker.stop()
 
     def _on_record_done(self, ok, message, directory):
         self._rec_worker = None
         self.rec_btn.setEnabled(True)
-        self.rec_btn.setText("⏺ Rec")
+        self.rec_btn.setText("⏺")
         self.rec_btn.setStyleSheet("")
         self.canvas.set_overlay("success" if ok else "error", message)
         self._overlay_timer.start(6000)

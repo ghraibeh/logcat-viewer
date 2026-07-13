@@ -10,7 +10,7 @@ def _frameworks_dir() -> Path | None:
     if not getattr(sys, "frozen", False):
         return None
     exe = Path(sys.executable).resolve()
-    # .../Logcat Viewer.app/Contents/MacOS/LogcatViewer
+    # .../AndroidLab.app/Contents/MacOS/AndroidLab
     fw = exe.parent.parent / "Frameworks"
     return fw if fw.is_dir() else None
 

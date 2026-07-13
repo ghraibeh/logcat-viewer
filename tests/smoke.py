@@ -423,9 +423,13 @@ check(not win.log_app_list.item(0).isHidden()          # All apps always shown
       and win.log_app_list.item(3).isHidden(),         # com.bbb filtered out
       "Logs app-list search hides non-matching apps but keeps All apps")
 win._filter_log_app_list("")
-# both the Logs and Monitor tabs embed an app-picker panel, kept in sync
-check(len(win._app_panels) == 2, f"Logs + Monitor each have an app panel, got {len(win._app_panels)}")
-_mon_panel = win._app_panels[1]
+# the Logs, Databases and Monitor tabs each embed an app-picker panel, kept in sync
+check(len(win._app_panels) == 3,
+      f"Logs + Databases + Monitor each have an app panel, got {len(win._app_panels)}")
+_db_panel = win._app_panels[1]
+_mon_panel = win._app_panels[2]
+check(_db_panel.list.count() == 4 and _db_panel.list.item(1).data(_UR) == "clone.app",
+      "Databases app panel is populated from the same picker data")
 check(_mon_panel.list.count() == 4 and _mon_panel.list.item(1).data(_UR) == "clone.app",
       "Monitor app panel is populated from the same picker data")
 win._app_pkg = "com.aaa"
@@ -434,8 +438,9 @@ check(_mon_panel.list.currentItem().data(_UR) == "com.aaa",
       "selecting an app highlights it in the Monitor panel too")
 # picking in the Monitor panel drives the shared selection (→ overlays on Monitor)
 _mon_panel.list.setCurrentRow(3)   # com.bbb
-check(win._app_pkg == "com.bbb" and win.monitor_view._package == "com.bbb",
-      "picking in the Monitor app panel selects that app everywhere")
+check(win._app_pkg == "com.bbb" and win.monitor_view._package == "com.bbb"
+      and win.db_view._package == "com.bbb",
+      "picking in the Monitor app panel selects that app everywhere (incl. Databases)")
 win._filter_log_app_list("")
 win._app_pkg = None
 win._sync_log_app_selection()
@@ -482,20 +487,21 @@ check(get_proxy_args("SER")[-4:] == ["settings", "get", "global", "http_proxy"],
 check(restore_proxy_args("SER", "10.0.2.2:8888")[-4:]
       == ["put", "global", "http_proxy", "10.0.2.2:8888"],
       "restore_proxy_args re-applies the device's original proxy verbatim")
-# …but 'no proxy' states delete the setting (true original), not leave a stale :0
-check(all(restore_proxy_args("SER", v)[-3:] == ["delete", "global", "http_proxy"]
+# …but 'no proxy' states reliably DISABLE via :0 — `settings delete` removes the
+# stored value yet leaves the live proxy applied on some OEM builds (e.g. One UI)
+check(all(restore_proxy_args("SER", v)[-4:] == ["put", "global", "http_proxy", ":0"]
           for v in ("", "null", ":0", "127.0.0.1:8099")),
-      "restore_proxy_args deletes the setting when the device had no real proxy")
+      "restore_proxy_args disables the proxy via :0 when the device had no real proxy")
 # device-side watchdog: restores real proxy on SIGHUP, exits clean on stdin byte
 check(proxy_restore_cmd("10.0.2.2:8888") == "settings put global http_proxy 10.0.2.2:8888"
-      and proxy_restore_cmd("null") == "settings delete global http_proxy",
+      and proxy_restore_cmd("null") == "settings put global http_proxy :0",
       "proxy_restore_cmd builds the device-shell restore command")
 _wd = proxy_watchdog_script("10.0.2.2:8888")
 check("trap 'settings put global http_proxy 10.0.2.2:8888' HUP INT TERM" in _wd
       and "read _" in _wd and "trap - HUP INT TERM" in _wd,
       "proxy_watchdog_script traps SIGHUP to restore but disarms on a stdin byte")
-# injection-proofing: a value with shell metachars is rejected → delete, not exec
-check(proxy_restore_cmd("x; rm -rf /") == "settings delete global http_proxy",
+# injection-proofing: a value with shell metachars is rejected → :0, not exec
+check(proxy_restore_cmd("x; rm -rf /") == "settings put global http_proxy :0",
       "proxy_restore_cmd rejects unsafe proxy values (no shell injection)")
 check(reverse_args("SER", 8099) == ["-s", "SER", "reverse", "tcp:8099", "tcp:8099"],
       "reverse_args tunnels the port both ways")
@@ -1469,6 +1475,12 @@ _state = ctl.interpret_state(ctl.parse_state(
     "@@night@@\nNight mode: yes\n@@font_scale@@\n1.15\n@@density@@\n"
     "Physical density: 440\nOverride density: 500\n@@anim@@\n0\n"
     "@@show_touches@@\n1\n@@pointer@@\n0\n@@layout@@\ntrue\n@@hwui@@\nfalse\n"
+    "@@rtl@@\n1\n@@overdraw@@\nshow\n@@dalt@@\n1\n12\n"
+    "@@wifi@@\nWifi is enabled\nWifi scanning is always available\n"
+    "@@data@@\n1\n@@airplane@@\n0\n@@anr@@\n1\n"
+    "@@rot@@\n0\n1\n@@bright@@\n200\n1\n@@timeout@@\n30000\n@@loc@@\n3\n"
+    "@@bt@@\n1\n@@lowpower@@\n1\n@@datasaver@@\nRestrict background status: enabled\n"
+    "@@overlay@@\n1280x720/213\n"
     "@@finish@@\nnull\n@@stay@@\n7\n@@battery@@\n  level: 73\n  temperature: 285\n"
     "  USB powered: true\n@@doze@@\nIDLE\n"))
 check(_state["night"] and _state["layout"] and _state["anim_off"]
@@ -1479,14 +1491,100 @@ check(_state["font_scale"] == 1.15 and _state["density"] == 500
       "interpret_state reads font scale + override density + stay-awake")
 check(_state["battery_level"] == 73 and _state["battery_powered"]
       and _state["doze_idle"], "interpret_state reads battery + doze")
+check(_state["rtl"] and _state["overdraw"] and _state["dalt"] == 12
+      and _state["wifi"] and _state["data"] and not _state["airplane"] and _state["anr"],
+      "interpret_state reads RTL/overdraw/daltonizer/wifi/data/airplane/ANRs")
+_no_dalt = ctl.interpret_state(ctl.parse_state("@@dalt@@\n0\n12\n@@wifi@@\nWifi is disabled\n"))
+check(_no_dalt["dalt"] == -1 and not _no_dalt["wifi"],
+      "daltonizer disabled reads as -1; wifi-disabled line reads False")
 check(ctl.set_layout_bounds(True)[1] == ctl._SYSPROPS_POKE,
       "layout-bounds setter pokes SYSPROPS so it applies live")
+check(ctl.set_overdraw(True)[0][-1] == "show" and ctl.set_overdraw(True)[1] == ctl._SYSPROPS_POKE
+      and ctl.set_force_rtl(False)[0][-1] == "0" and ctl.set_force_rtl(True)[1] == ctl._SYSPROPS_POKE,
+      "overdraw + force-RTL setters poke SYSPROPS to apply live")
+check(ctl.set_color_space(-1)[0][-2:] == ["accessibility_display_daltonizer_enabled", "0"]
+      and ctl.set_color_space(12)[0][-1] == "12" and ctl.set_color_space(12)[1][-1] == "1",
+      "color-space setter: -1 disables, else sets value then enables")
+check(ctl.set_wifi(False)[0][-1] == "disabled" and ctl.set_mobile_data(True)[0][-1] == "enable"
+      and ctl.set_airplane(True)[0][-1] == "enable" and ctl.set_show_anrs(True)[0][-1] == "1",
+      "wifi/data/airplane/ANR setters build the right argvs")
+check(_state["rotation"] == 1 and _state["brightness"] == 200 and _state["bright_auto"]
+      and _state["timeout_ms"] == 30000 and _state["location"] and _state["bluetooth"]
+      and _state["battery_saver"] and _state["data_saver"]
+      and _state["overlay"] == "1280x720/213",
+      "interpret_state reads rotation/brightness/timeout/loc/bt/saver/datasaver/overlay")
+_auto = ctl.interpret_state(ctl.parse_state("@@rot@@\n1\n3\n@@overlay@@\nnull\n"))
+check(_auto["rotation"] == -1 and _auto["overlay"] == "",
+      "auto-rotate wins over a stale user_rotation; null overlay reads as off")
+check(ctl.set_rotation(-1)[0][-1] == "1" and ctl.set_rotation(2)[0][-1] == "0"
+      and ctl.set_rotation(2)[1][-2:] == ["user_rotation", "2"],
+      "rotation setter: auto restores accelerometer, lock writes the quadrant")
+check(ctl.set_bluetooth(False)[0][-1] == "disable"
+      and ctl.set_location(True)[0][-1] == "true"
+      and ctl.set_data_saver(True)[0][-1] == "true"
+      and ctl.set_battery_saver(True)[0][-2:] == ["low_power", "1"]
+      and ctl.set_screen_timeout(60000)[0][-1] == "60000"
+      and ctl.set_brightness(42)[0][-1] == "42"
+      and ctl.set_overlay_display("1280x720/213")[0][-1] == "1280x720/213",
+      "bt/location/datasaver/saver/timeout/brightness/overlay setters build argvs")
+check(ctl.set_overlay_display("")[0] == ["shell", "settings", "delete", "global",
+                                         "overlay_display_devices"],
+      "overlay Off deletes the setting row — no empty arg for adb to drop")
+check(ctl.set_app_locale("com.x", "fr-FR")[0][-1] == "fr-FR"
+      and ctl.set_app_locale("com.x", "")[0][-1] == ""
+      and ctl.parse_app_locales("Locales for com.x for user 0 are [fr-FR]") == "fr-FR"
+      and ctl.parse_app_locales("Locales for com.x for user 0 are []") == ""
+      and ctl.parse_app_locales("") == "",
+      "app-locale setter + parser round-trip")
 check(len(ctl.set_animations(True)) == 3, "animations setter writes all three scales")
 check(ctl.set_doze(True)[0][-1] == "unplug" and ctl.set_doze(False)[0][-1] == "unforce",
       "doze on unplugs first; doze off unforces")
 check(ctl.set_standby_bucket("com.x", "rare")[0][-2:] == ["com.x", "rare"]
       and "set-standby-bucket" in ctl.set_standby_bucket("com.x", "rare")[0],
       "standby-bucket setter targets the app")
+check(ctl.bucket_name("10") == "active" and ctl.bucket_name("40") == "rare"
+      and ctl.bucket_name("RARE") == "rare" and ctl.bucket_name("working_set") == "working_set"
+      and ctl.bucket_name("") is None and ctl.bucket_name("999") is None,
+      "bucket_name maps get-standby-bucket numbers and names")
+
+# the revamped Controls view: switches/segments reflect state without firing setters
+_cv = ctl.ControlsView("")
+_applied = []
+_cv._apply = lambda argvs, label: _applied.append(label)
+_cv._on_state(True, "", _state | {"battery_powered": False, "bucket": "40"})
+check(_cv.night_cb.isChecked() and _cv.layout_cb.isChecked() and _cv.anim_cb.isChecked()
+      and not _cv.pointer_cb.isChecked(), "controls switches mirror the parsed state")
+check(_cv.rtl_cb.isChecked() and _cv.overdraw_cb.isChecked() and _cv.wifi_cb.isChecked()
+      and _cv.data_cb.isChecked() and not _cv.airplane_cb.isChecked()
+      and _cv.anr_cb.isChecked(), "new dev-option switches mirror the parsed state")
+check(next(b for b in _cv.dalt_group.buttons() if b.isChecked()).text() == "Deutan",
+      "color-space segment highlights the active daltonizer mode")
+check(_cv.bt_cb.isChecked() and _cv.loc_cb.isChecked() and _cv.datasaver_cb.isChecked()
+      and _cv.saver_cb.isChecked() and _cv.bright_auto_cb.isChecked()
+      and _cv.bright_slider.value() == 200,
+      "bt/location/datasaver/saver switches + brightness mirror the parsed state")
+check(next(b for b in _cv.timeout_group.buttons() if b.isChecked()).text() == "30s"
+      and next(b for b in _cv.rot_group.buttons() if b.isChecked()).text() == "90°"
+      and next(b for b in _cv.overlay_group.buttons() if b.isChecked()).text() == "720p",
+      "timeout/rotation/overlay segments highlight the device state")
+check(not _cv.locale_btn.isEnabled(), "app-locale Set disabled until an app is picked")
+check(next(b for b in _cv.font_group.buttons() if b.isChecked()).property("data") == 1.15,
+      "font-scale segment picks the nearest scale")
+check(not _applied, "loading device state never fires a setter")
+check(not any(b.isEnabled() for b in _cv.bucket_group.buttons()),
+      "bucket segments disabled until an app is picked")
+_cv.set_package("com.x")
+check(all(b.isEnabled() for b in _cv.bucket_group.buttons())
+      and "com.x" in _cv.bucket_lbl.text(), "picking an app enables the bucket segments")
+_cv._on_state(True, "", _state | {"bucket": "40"})
+check(next(b for b in _cv.bucket_group.buttons() if b.isChecked()).property("data") == "rare",
+      "current standby bucket highlighted from device state")
+_chip_texts = [_cv.chips.itemAt(i).widget().text() for i in range(_cv.chips.count())]
+check(any("73%" in t for t in _chip_texts) and any("rare" in t for t in _chip_texts),
+      f"state chips show battery + bucket, got {_chip_texts}")
+_cv.set_package(None)
+check(not any(b.isChecked() for b in _cv.bucket_group.buttons()),
+      "clearing the app clears the bucket selection")
 
 # ---------------------------------------------------------------------------
 # Monitor additions: battery + gfxinfo parsing
@@ -1520,10 +1618,63 @@ check(wifi.pair_args("h:1", "123") == ["pair", "h:1", "123"]
 # ---------------------------------------------------------------------------
 # Mirror text injection escaping
 # ---------------------------------------------------------------------------
-from logcat_viewer.mirror import escape_input_text
+from logcat_viewer.mirror import (
+    MirrorView, build_display_list, escape_input_text, screencap_args,
+)
 check(escape_input_text("hi there") == "hi%sthere", "input-text: space -> %s")
 check(escape_input_text('a"b$c') == 'a\\"b\\$c', "input-text escapes shell specials")
 check(escape_input_text("line1\nline2") == "line1%sline2", "input-text folds newlines")
+
+# Mirror: multi-display support (simulated secondary displays)
+check(screencap_args() == ["screencap", "-p"]
+      and screencap_args(115) == ["screencap", "-d", "115", "-p"],
+      "screencap_args targets a display only when one is given")
+_SF = ('Display 4633128672291735939 (HWC display 0): port=131 pnpId=SAM '
+       'displayName="samsung lcd  "\n'
+       'Display 11529215046894381469 (Virtual display): displayName="Overlay #1" '
+       'uniqueId=""\n')
+_DP = ("mViewports=[DisplayViewport{type=INTERNAL, valid=true, isActive=true, "
+       "displayId=0, uniqueId='local:4633128672291735939', physicalPort=131}, "
+       "DisplayViewport{type=VIRTUAL, valid=true, isActive=true, displayId=14, "
+       "uniqueId='overlay:1', physicalPort=null}]")
+_disp = build_display_list(_SF, _DP)
+check(len(_disp) == 2 and not _disp[0]["virtual"] and _disp[0]["logical"] == 0
+      and _disp[1]["virtual"] and _disp[1]["name"] == "Overlay #1"
+      and _disp[1]["sf_id"] == 11529215046894381469 and _disp[1]["logical"] == 14,
+      "build_display_list joins SF capture ids with logical input ids")
+_mv = MirrorView("")
+check(not _mv.display_combo.isVisibleTo(_mv), "display combo hidden with one display")
+_mv._on_displays(_disp)
+check(_mv.display_combo.count() == 2 and _mv.display_combo.isVisibleTo(_mv)
+      and _mv.display_combo.itemText(1) == "Overlay #1",
+      "display combo lists the secondary display once detected")
+_mv.display_combo.setCurrentIndex(1)
+_mv._on_display_pick()
+check(_mv._display_id == 11529215046894381469 and _mv._display_logical == 14,
+      "picking the overlay display selects its capture + input ids")
+check(not _mv.rec_btn.isEnabled(), "recording disabled on a secondary display")
+_mv._on_displays(_disp[:1])   # overlay disappeared (Controls → Off)
+check(_mv._display_id is None and _mv.rec_btn.isEnabled(),
+      "vanished display falls back to the main display and re-enables record")
+_mv._want_secondary = 3        # show_secondary() pending, display just came up
+_mv._on_displays(_disp)
+check(_mv._display_id == _disp[1]["sf_id"] and _mv._want_secondary == 0,
+      "pending show_secondary auto-switches to the overlay when it appears")
+
+# Controls: the 👁 View button creates a 720p display only when none exists
+_cv2 = ctl.ControlsView("")
+_applied2, _viewed = [], []
+_cv2._apply = lambda argvs, label: _applied2.append(argvs)
+_cv2.view_secondary.connect(lambda: _viewed.append(1))
+_cv2._view_secondary()         # overlay off → creates 720p + emits
+check(_applied2 and _applied2[0] == ctl.set_overlay_display("1280x720/213")
+      and _viewed == [1], "View with no overlay creates the 720p display and emits")
+check(next(b for b in _cv2.overlay_group.buttons() if b.isChecked()).text() == "720p",
+      "View reflects the created display in the segments")
+_applied2.clear()
+_cv2._view_secondary()         # overlay already on → just emits
+check(not _applied2 and _viewed == [1, 1],
+      "View with an existing overlay only emits (no re-create)")
 
 # ---------------------------------------------------------------------------
 # SharedPreferences: XML parse/build round-trip + type validation
@@ -1665,11 +1816,11 @@ win.advanced_btn.setChecked(False)
 # About dialog: builds, draws a non-null logo, and credits the author
 # ---------------------------------------------------------------------------
 from PyQt6.QtWidgets import QLabel as _QLabel, QPushButton as _QPushButton
-from logcat_viewer.about import AboutDialog, logo_pixmap, AUTHOR
+from logcat_viewer.about import AboutDialog, logo_pixmap, APP_NAME, AUTHOR
 check(not logo_pixmap(64).isNull(), "about.logo_pixmap() draws a non-null app mark")
 _about = AboutDialog()
 _texts = " ".join(_l.text() for _l in _about.findChildren(_QLabel))
-check("Logcat Viewer" in _texts and AUTHOR in _texts,
+check(APP_NAME in _texts and AUTHOR in _texts,
       "AboutDialog shows the app name and author credit")
 check(_about.findChild(_QPushButton, "AboutClose") is not None,
       "AboutDialog has a Close button")

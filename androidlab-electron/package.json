@@ -1,0 +1,40 @@
+{
+  "name": "androidlab",
+  "version": "0.1.0",
+  "description": "AndroidLab — live adb logcat viewer and device toolkit (Electron)",
+  "author": "Mahmoud Alghraibeh <M.Ghraibeh@penguinin.com>",
+  "license": "MIT",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "predev": "node scripts/patch-dev-name.js",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test": "vitest run",
+    "smoke": "npm run build && ANDROIDLAB_SMOKE=1 electron .",
+    "dist": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "^3.10.9",
+    "fast-xml-parser": "^4.5.7",
+    "sql.js": "^1.14.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/sql.js": "^1.4.11",
+    "@vitejs/plugin-react": "^4.3.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.5"
+  }
+}

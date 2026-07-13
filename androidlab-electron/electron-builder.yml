@@ -1,0 +1,23 @@
+appId: com.androidlab.app
+productName: AndroidLab
+copyright: Copyright © 2026 Mahmoud Alghraibeh
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+# Phase 4 will stage platform-tools/adb here and add it to extraResources so the
+# packaged .app is self-contained (no external adb needed), mirroring the
+# PyInstaller spec's `datas` bundling of platform-tools.
+extraResources: []
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  darkModeSupport: true
+  minimumSystemVersion: "12.0"
+  identity: null
+dmg:
+  title: AndroidLab

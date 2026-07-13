@@ -202,7 +202,7 @@ class AppPickerPanel(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Logcat Viewer")
+        self.setWindowTitle(ABOUT_APP_NAME)
         self.resize(1180, 720)
 
         self.adb = adblib.find_adb()
@@ -223,7 +223,7 @@ class MainWindow(QMainWindow):
         self._installing = ""           # names of APK(s) currently installing
         self._clone_hosts = {}          # clone package -> VA host (for pulling clone APKs)
         self._pull_worker = None        # running PullWorker, if any
-        self._app_panels = []           # click-to-pick app lists (Logs + Monitor tabs)
+        self._app_panels = []           # click-to-pick app lists (Logs/Databases/Monitor)
         self._crash_badged = False      # "Crashes ●" tab badge is showing
 
         self._build_ui()
@@ -288,7 +288,7 @@ class MainWindow(QMainWindow):
         self.mirror_btn.setToolTip("Mirror the selected device's screen")
         self.about_btn = QPushButton("ⓘ")
         self.about_btn.setObjectName("toggle")
-        self.about_btn.setToolTip("About Logcat Viewer")
+        self.about_btn.setToolTip(f"About {ABOUT_APP_NAME}")
         self.autoscroll_cb = QCheckBox("Auto-scroll")
         self.autoscroll_cb.setChecked(False)
         row1.addWidget(QLabel("Device"))
@@ -509,9 +509,17 @@ class MainWindow(QMainWindow):
         self.intercept_view = InterceptView(self.adb or "")
         self.tabs.addTab(self.intercept_view, "Network HTTP")
 
-        # Databases tab: inspect the selected app's SQLite databases.
+        # Databases tab: inspect the selected app's SQLite databases, with the
+        # same click-to-pick app list as the Logs tab down the left.
         self.db_view = DatabaseView(self.adb or "")
-        self.tabs.addTab(self.db_view, "Databases")
+        db_split = QSplitter(Qt.Orientation.Horizontal)
+        db_split.addWidget(self._make_app_panel())
+        db_split.addWidget(self.db_view)
+        db_split.setStretchFactor(0, 0)
+        db_split.setStretchFactor(1, 1)
+        db_split.setSizes([240, 900])
+        self._db_tab = db_split
+        self.tabs.addTab(db_split, "Databases")
 
         # Files tab: browse the device filesystem + two-way transfer + drag/drop.
         self.files_view = FilesView(self.adb or "")
@@ -573,7 +581,7 @@ class MainWindow(QMainWindow):
     def _build_menu(self):
         """Native menu bar. On macOS the About action (tagged AboutRole) is
         auto-relocated by Qt into the application menu, where users expect
-        “About Logcat Viewer”."""
+        “About AndroidLab”."""
         file_menu = self.menuBar().addMenu("File")
         open_act = QAction("Open Log File…", self)
         open_act.setShortcut(QKeySequence.StandardKey.Open)
@@ -848,6 +856,8 @@ class MainWindow(QMainWindow):
                 lambda *_, v=view: v.set_serial(self.device_combo.currentData()))
             view.status.connect(lambda m: self.statusBar().showMessage(m, 5000))
             view.failed.connect(self._on_tool_failed)
+        # Controls → 👁 View: open the mirror straight on the secondary display.
+        self.controls_view.view_secondary.connect(self._view_secondary_display)
         # The crash viewer lives inside the Apps tab; its saves keep their own title.
         self.appmgr_view.crash_view.saved.connect(
             lambda ok, m, d: self._notify_saved("Crash record", ok, m, d))
@@ -948,7 +958,7 @@ class MainWindow(QMainWindow):
                      self.inspector_view, self.controls_view, self.toolbox_view):
             view.set_serial(serial)
 
-    # --- click-to-pick app lists (Logs + Monitor tabs) ---------------------
+    # --- click-to-pick app lists (Logs / Databases / Monitor tabs) ----------
     def _make_app_panel(self):
         """Create an AppPickerPanel, register it so reload/select keep it in
         sync, and wire its pick back into the shared App picker."""
@@ -1188,6 +1198,16 @@ class MainWindow(QMainWindow):
         self.mirror_btn.setChecked(True)
         self.mirror_btn.blockSignals(False)
 
+    def _view_secondary_display(self):
+        """One-click 'view the secondary screen': show the mirror dock (which
+        starts the mirror) and auto-switch it to the secondary display."""
+        serial = self.device_combo.currentData()
+        if not self.adb or not serial:
+            self.statusBar().showMessage("Connect a device first", 5000)
+            return
+        self.mirror_dock.setVisible(True)   # _on_mirror_visibility starts the mirror
+        self.mirror_view.show_secondary()
+
     def _mirror_device_changed(self):
         if self.mirror_dock.isVisible():
             serial = self.device_combo.currentData()
@@ -1201,7 +1221,7 @@ class MainWindow(QMainWindow):
             self.mock_view.set_serial(self.device_combo.currentData())
         elif w is self.intercept_view:
             self.intercept_view.set_serial(self.device_combo.currentData())
-        elif w is self.db_view:
+        elif w is self._db_tab:
             self.db_view.set_serial(self.device_combo.currentData())
             self.db_view.set_package(self._current_app_pkg() or None)
         elif w is self.files_view:

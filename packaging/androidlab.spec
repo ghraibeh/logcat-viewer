@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for Logcat Viewer (macOS .app bundle)."""
+"""PyInstaller spec for AndroidLab (macOS .app bundle)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -70,7 +70,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="LogcatViewer",
+    name="AndroidLab",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -90,18 +90,18 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="LogcatViewer",
+    name="AndroidLab",
 )
 
 app = BUNDLE(
     coll,
-    name="Logcat Viewer.app",
+    name="AndroidLab.app",
     icon=None,
-    bundle_identifier="com.logcatviewer.app",
+    bundle_identifier="com.androidlab.app",
     info_plist={
-        "CFBundleName": "Logcat Viewer",
-        "CFBundleDisplayName": "Logcat Viewer",
-        "CFBundleExecutable": "LogcatViewer",
+        "CFBundleName": "AndroidLab",
+        "CFBundleDisplayName": "AndroidLab",
+        "CFBundleExecutable": "AndroidLab",
         "CFBundleShortVersionString": "0.1.0",
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "12.0",

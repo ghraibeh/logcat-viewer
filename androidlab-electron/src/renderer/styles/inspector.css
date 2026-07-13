@@ -1,0 +1,114 @@
+/* Layout Inspector tab. */
+.insp-view {
+  flex: 1;
+  min-width: 0;
+  /* min-height:0 lets this flex item honor its allocated height instead of
+   * growing to fit content (props table); overflow clamps the rest. */
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.insp-bar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.insp-hint {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.insp-status {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  margin-left: auto;
+}
+.insp-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.insp-canvas-wrap {
+  flex: 1.1;
+  min-width: 220px;
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  position: relative;
+  overflow: hidden;
+}
+/* Absolute → out of flow, so the canvas can never feed its own size back into
+ * the flex layout (the "sliding / zoom on click" bug). */
+.insp-canvas-wrap canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  cursor: crosshair;
+}
+.insp-right {
+  flex: 1;
+  min-width: 260px;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.insp-tree {
+  flex: 3;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.insp-node {
+  display: flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 2px 0;
+  white-space: nowrap;
+  cursor: default;
+  color: var(--text);
+}
+.insp-node:hover {
+  background: var(--surface-2);
+}
+.insp-node.selected {
+  background: var(--select);
+}
+.insp-twisty {
+  width: 14px;
+  text-align: center;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+.insp-props {
+  flex: 2;
+  min-height: 0;
+  overflow: auto;
+}
+.insp-props table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.insp-props td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  user-select: text;
+}
+.insp-props td.k {
+  color: var(--text-dim);
+  white-space: nowrap;
+  width: 1%;
+}
+.insp-props td.v {
+  color: var(--text);
+  word-break: break-word;
+}

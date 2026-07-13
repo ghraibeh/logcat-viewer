@@ -7,6 +7,8 @@ __pycache__/
 build/
 dist/
 packaging/staging/
+# ...but the Electron app's build/ holds committed icon assets, not build output.
+!androidlab-electron/build/
 
 # Android helper build artifacts (the signed APK is committed under
 # logcat_viewer/assets/, but the intermediate build/ and keystore are not).

@@ -55,9 +55,13 @@ def phase_traffic():
     print(f"[wired] reverse --list:\n  " + rev.replace("\n", "\n  "))
     ok_wired = f"127.0.0.1:{PORT}" in proxy and f"tcp:{PORT}" in rev
     print(f"[wired] proxy + tunnel present: {ok_wired}")
-    print("\n[traffic] opening http://neverssl.com on the device…")
+    # clients3.google.com/generate_204 is the Android connectivity-check URL:
+    # fast, tiny (204, no body), and always reachable — unlike neverssl.com,
+    # which randomly redirects to slow subdomains and can miss the capture window.
+    print("\n[traffic] opening http://clients3.google.com/generate_204 on the device…")
     subprocess.run([adb, "-s", serial, "shell", "am", "start", "-a",
-                    "android.intent.action.VIEW", "-d", "http://neverssl.com"],
+                    "android.intent.action.VIEW", "-d",
+                    "http://clients3.google.com/generate_204"],
                    capture_output=True, timeout=10)
     QTimer.singleShot(8000, phase_check)
 

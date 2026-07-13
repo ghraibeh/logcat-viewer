@@ -1,0 +1,423 @@
+/**
+ * MainWindow shell — the QMainWindow of ui.py rebuilt in React: device toolbar,
+ * tab bar, the Logs tab (app panel | filter bar + log table + detail pane),
+ * status bar, and the About / message / prompt / context-menu surfaces. Phase 2
+ * implements the Logs tab in full; the remaining tabs are migrated in Phase 3.
+ */
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Toolbar } from './components/Toolbar'
+import { TabBar, type TabDef } from './components/TabBar'
+import { FilterBar } from './components/FilterBar'
+import { AppPickerPanel } from './components/AppPickerPanel'
+import { LogTable } from './components/LogTable'
+import { MonitorView } from './components/MonitorView'
+import { InspectorView } from './components/InspectorView'
+import { ControlsView } from './components/ControlsView'
+import { ToolboxView } from './components/ToolboxView'
+import { DatabaseView } from './components/DatabaseView'
+import { FilesView } from './components/FilesView'
+import { AppManagerView } from './components/AppManagerView'
+import { StatusBar } from './components/StatusBar'
+import { AboutDialog } from './components/AboutDialog'
+import { MessageBox, PromptDialog, Toast, type MessageBoxSpec } from './components/dialogs'
+import { useAppController } from './state/useAppController'
+
+const TABS: TabDef[] = [
+  { id: 'logs', label: 'Logs' },
+  { id: 'location', label: 'Location' },
+  { id: 'network', label: 'Network HTTP' },
+  { id: 'databases', label: 'Databases' },
+  { id: 'files', label: 'Files' },
+  { id: 'apps', label: 'Apps' },
+  { id: 'monitor', label: 'Monitor' },
+  { id: 'inspector', label: 'Inspector' },
+  { id: 'controls', label: 'Controls' },
+  { id: 'toolbox', label: 'Toolbox' }
+]
+
+interface ContextMenuState {
+  x: number
+  y: number
+  row: number
+}
+
+export default function App() {
+  const c = useAppController()
+
+  const [tab, setTab] = useState('logs')
+  const [selectedRows, setSelectedRows] = useState<ReadonlySet<number>>(new Set())
+  const [detailText, setDetailText] = useState('')
+  const [anchor, setAnchor] = useState<number | null>(null)
+  const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
+  const [about, setAbout] = useState(false)
+  const [promptOpen, setPromptOpen] = useState(false)
+  const [msgBox, setMsgBox] = useState<MessageBoxSpec | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
+  const [panelWidth, setPanelWidth] = useState(240)
+  const [appsBadge, setAppsBadge] = useState(false)
+
+  const searchRef = useRef<HTMLInputElement>(null)
+  const selectionRef = useRef<ReadonlySet<number>>(selectedRows)
+  selectionRef.current = selectedRows
+
+  const showToast = useCallback((message: string) => {
+    setToast(message)
+  }, [])
+  useEffect(() => {
+    if (toast === null) return
+    const id = setTimeout(() => setToast(null), 3500)
+    return () => clearTimeout(id)
+  }, [toast])
+
+  // Outer "Apps ●" badge: set on a live crash when the Apps tab isn't showing,
+  // cleared on switching to it (mirrors ui.py _flag_live_crash + the reset).
+  useEffect(() => {
+    if (c.liveCrashSeq === 0) return
+    if (tab !== 'apps') setAppsBadge(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [c.liveCrashSeq])
+  useEffect(() => {
+    if (tab === 'apps') setAppsBadge(false)
+  }, [tab])
+
+  // Selection resets when the filtered view is rebuilt (filter/app change),
+  // mirroring beginResetModel clearing the QTableView selection.
+  useEffect(() => {
+    setSelectedRows(new Set())
+    setAnchor(null)
+    setDetailText('')
+  }, [c.filter, c.appPkg])
+
+  // --- selection ---------------------------------------------------------
+  const setDetailForRow = useCallback(
+    (row: number) => {
+      const e = c.store.entryAt(row)
+      setDetailText(e ? e.raw : '')
+    },
+    [c.store]
+  )
+
+  const onRowMouseDown = useCallback(
+    (row: number, ev: React.MouseEvent) => {
+      if (ev.button === 2) {
+        if (!selectionRef.current.has(row)) {
+          setSelectedRows(new Set([row]))
+          setAnchor(row)
+          setDetailForRow(row)
+        }
+        return
+      }
+      if (ev.shiftKey && anchor !== null) {
+        const lo = Math.min(anchor, row)
+        const hi = Math.max(anchor, row)
+        const next = new Set<number>()
+        for (let i = lo; i <= hi; i++) next.add(i)
+        setSelectedRows(next)
+      } else if (ev.metaKey || ev.ctrlKey) {
+        const next = new Set(selectionRef.current)
+        if (next.has(row)) next.delete(row)
+        else next.add(row)
+        setSelectedRows(next)
+        setAnchor(row)
+      } else {
+        setSelectedRows(new Set([row]))
+        setAnchor(row)
+      }
+      setDetailForRow(row)
+    },
+    [anchor, setDetailForRow]
+  )
+
+  const onRowContextMenu = useCallback((row: number, ev: React.MouseEvent) => {
+    ev.preventDefault()
+    setCtxMenu({ x: ev.clientX, y: ev.clientY, row })
+  }, [])
+
+  const copySelection = useCallback(() => {
+    const rows = [...selectionRef.current].sort((a, b) => a - b)
+    if (rows.length === 0) return
+    const out = rows
+      .map((r) => {
+        const e = c.store.entryAt(r)
+        return e ? e.raw || `${e.time} ${e.pid} ${e.tid} ${e.level} ${e.tag}: ${e.msg}` : ''
+      })
+      .join('\n')
+    void navigator.clipboard.writeText(out)
+    showToast(`Copied ${rows.length} line${rows.length !== 1 ? 's' : ''}`)
+  }, [c.store, showToast])
+
+  // Route Cmd+C / Edit▸Copy through the DOM copy event when rows are selected
+  // and focus isn't in a text field (mirrors LogTable.copy_selection).
+  useEffect(() => {
+    const handler = (ev: ClipboardEvent) => {
+      const ae = document.activeElement
+      const inField = ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement
+      if (inField || selectionRef.current.size === 0) return
+      const rows = [...selectionRef.current].sort((a, b) => a - b)
+      const out = rows
+        .map((r) => {
+          const e = c.store.entryAt(r)
+          return e ? e.raw || `${e.time} ${e.pid} ${e.tid} ${e.level} ${e.tag}: ${e.msg}` : ''
+        })
+        .join('\n')
+      ev.clipboardData?.setData('text/plain', out)
+      ev.preventDefault()
+    }
+    document.addEventListener('copy', handler)
+    return () => document.removeEventListener('copy', handler)
+  }, [c.store])
+
+  // --- force-crash (context menu) ----------------------------------------
+  const doForceCrash = useCallback(
+    async (pkg: string, pids: number[]) => {
+      const notes = await c.forceCrash(pkg, pids)
+      const who = pkg || (pids.length ? `pid ${Math.min(...pids)}` : 'app')
+      showToast(
+        notes.length
+          ? `Force-crashed ${who}: ${notes.join(', ')}`
+          : `Force-crash ${who}: nothing ran (needs root for clones, or not running)`
+      )
+    },
+    [c, showToast]
+  )
+
+  // --- file IO / install -------------------------------------------------
+  const doOpenLog = useCallback(async () => {
+    const msg = await c.openLogFile()
+    if (msg) showToast(msg)
+  }, [c, showToast])
+
+  const doExport = useCallback(
+    async (filtered: boolean) => {
+      const r = await c.exportLog(filtered)
+      if (r === null) {
+        showToast('Nothing to export')
+        return
+      }
+      if (r.ok) setMsgBox({ title: 'Log exported', body: `✓  ${r.message}`, dir: r.dir })
+      else if (r.message !== 'cancelled') showToast(`✗ ${r.message}`)
+    },
+    [c, showToast]
+  )
+
+  const doInstall = useCallback(async () => {
+    const paths = await window.androidlab.apk.choose()
+    if (paths.length === 0) return
+    const r = await c.install(paths)
+    if (!r) return
+    if (r.ok) setMsgBox({ title: 'APK installed', body: `✓  ${r.message}` })
+    else setMsgBox({ title: 'Install failed', body: r.output ? `${r.message}\n\n${r.output}` : r.message })
+  }, [c])
+
+  const doSavePreset = useCallback(() => setPromptOpen(true), [])
+
+  // --- native menu actions ----------------------------------------------
+  useEffect(() => {
+    return window.androidlab.menu.onAction((action) => {
+      switch (action) {
+        case 'open-log':
+          void doOpenLog()
+          break
+        case 'export-filtered':
+          void doExport(true)
+          break
+        case 'export-entire':
+          void doExport(false)
+          break
+        case 'about':
+          setAbout(true)
+          break
+        case 'clear-log':
+          c.clearLog()
+          break
+        case 'find':
+          setTab('logs')
+          searchRef.current?.focus()
+          break
+      }
+    })
+  }, [doOpenLog, doExport, c])
+
+  // --- font zoom shortcuts (Cmd+= / Cmd++ / Cmd+-) -----------------------
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (!(ev.metaKey || ev.ctrlKey)) return
+      if (ev.key === '=' || ev.key === '+') {
+        c.bumpFont(+1)
+        ev.preventDefault()
+      } else if (ev.key === '-') {
+        c.bumpFont(-1)
+        ev.preventDefault()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [c])
+
+  // --- app-panel splitter drag ------------------------------------------
+  const onSplitterDown = useCallback((ev: React.MouseEvent) => {
+    ev.preventDefault()
+    const startX = ev.clientX
+    const startW = panelWidthRef.current
+    const move = (e: MouseEvent) => {
+      const w = Math.max(150, Math.min(500, startW + (e.clientX - startX)))
+      setPanelWidth(w)
+    }
+    const up = () => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }, [])
+  const panelWidthRef = useRef(panelWidth)
+  panelWidthRef.current = panelWidth
+
+  // Context-menu target computation (mirrors _show_table_menu).
+  const ctxTarget = (() => {
+    if (!ctxMenu) return null
+    const pkg = c.appPkg ?? ''
+    const pids = c.appPids ? [...c.appPids] : []
+    const rowEntry = c.store.entryAt(ctxMenu.row)
+    const rowPid = rowEntry?.pid ?? 0
+    if (pkg) {
+      return {
+        label: `Force-crash  ${pkg}${pids.length ? `  (${pids.length} pid)` : '  (not running)'}`,
+        run: () => void doForceCrash(pkg, pids)
+      }
+    }
+    if (rowPid) {
+      return { label: `Force-crash  pid ${rowPid}`, run: () => void doForceCrash('', [rowPid]) }
+    }
+    return null
+  })()
+
+  return (
+    <div className="app">
+      <Toolbar c={c} onInstall={() => void doInstall()} onAbout={() => setAbout(true)} />
+      <TabBar
+        tabs={TABS.map((t) => (t.id === 'apps' ? { ...t, badge: appsBadge } : t))}
+        current={tab}
+        onSelect={setTab}
+      />
+
+      {tab === 'logs' ? (
+        <div className="logs-tab">
+          <AppPickerPanel c={c} width={panelWidth} />
+          <div className="splitter" onMouseDown={onSplitterDown} />
+          <div className="logs-right">
+            <FilterBar c={c} searchRef={searchRef} onSavePreset={doSavePreset} />
+            <LogTable
+              c={c}
+              selectedRows={selectedRows}
+              onRowMouseDown={onRowMouseDown}
+              onRowContextMenu={onRowContextMenu}
+            />
+            <div className="detail">{detailText}</div>
+          </div>
+        </div>
+      ) : tab === 'monitor' ? (
+        <div className="logs-tab">
+          <AppPickerPanel c={c} width={panelWidth} />
+          <div className="splitter" onMouseDown={onSplitterDown} />
+          <MonitorView c={c} />
+        </div>
+      ) : tab === 'databases' ? (
+        <div className="logs-tab">
+          <AppPickerPanel c={c} width={panelWidth} />
+          <div className="splitter" onMouseDown={onSplitterDown} />
+          <DatabaseView c={c} />
+        </div>
+      ) : tab === 'files' ? (
+        <div className="logs-tab">
+          <AppPickerPanel c={c} width={panelWidth} />
+          <div className="splitter" onMouseDown={onSplitterDown} />
+          <FilesView c={c} />
+        </div>
+      ) : tab === 'apps' ? (
+        <AppManagerView
+          c={c}
+          onStatus={showToast}
+          onFailed={(m) => setMsgBox({ title: 'App Manager', body: m })}
+          onMessage={setMsgBox}
+        />
+      ) : tab === 'inspector' ? (
+        <InspectorView c={c} />
+      ) : tab === 'controls' ? (
+        <ControlsView c={c} />
+      ) : tab === 'toolbox' ? (
+        <ToolboxView c={c} />
+      ) : (
+        <div className="tab-placeholder">
+          <div className="big">{TABS.find((t) => t.id === tab)?.label}</div>
+          <div>This tool is migrated in Phase 3 of the AndroidLab → Electron port.</div>
+        </div>
+      )}
+
+      <StatusBar c={c} />
+
+      {ctxMenu ? (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 999 }}
+            onMouseDown={() => setCtxMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setCtxMenu(null)
+            }}
+          />
+          <div className="context-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+            <div
+              className={`item${selectedRows.size === 0 ? ' disabled' : ''}`}
+              onClick={() => {
+                if (selectedRows.size > 0) copySelection()
+                setCtxMenu(null)
+              }}
+            >
+              {selectedRows.size > 0
+                ? `Copy ${selectedRows.size} line${selectedRows.size !== 1 ? 's' : ''}`
+                : 'Copy'}
+            </div>
+            <div
+              className="item"
+              onClick={() => {
+                c.clearLog()
+                setCtxMenu(null)
+              }}
+            >
+              Clear log
+            </div>
+            <div className="sep" />
+            <div
+              className={`item${ctxTarget ? '' : ' disabled'}`}
+              onClick={() => {
+                if (ctxTarget) ctxTarget.run()
+                setCtxMenu(null)
+              }}
+            >
+              {ctxTarget ? ctxTarget.label : 'Force-crash app'}
+            </div>
+          </div>
+        </>
+      ) : null}
+
+      {about ? <AboutDialog onClose={() => setAbout(false)} /> : null}
+      {msgBox ? <MessageBox spec={msgBox} onClose={() => setMsgBox(null)} /> : null}
+      {promptOpen ? (
+        <PromptDialog
+          title="Save filter preset"
+          label="Preset name:"
+          initial={c.currentPreset}
+          onCancel={() => setPromptOpen(false)}
+          onSubmit={(name) => {
+            setPromptOpen(false)
+            void c.savePreset(name).then((ok) =>
+              showToast(ok ? `✓ Preset saved: ${name}` : "✗ Couldn't write the presets file")
+            )
+          }}
+        />
+      ) : null}
+      {toast ? <Toast message={toast} /> : null}
+    </div>
+  )
+}

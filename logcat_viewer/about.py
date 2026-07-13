@@ -1,7 +1,7 @@
 """About dialog: app identity, version, feature summary, and author credit.
 
 A self-contained, dark-themed ``QDialog`` with a drawn app logo (no external
-image asset). Reached from the menu (App menu → *About Logcat Viewer* on macOS)
+image asset). Reached from the menu (App menu → *About AndroidLab* on macOS)
 and the toolbar's info button. Styling lives under the ``#About*`` selectors in
 ``theme.py``; the logo colors reuse the theme palette constants.
 """
@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 from . import __version__
 from . import theme
 
-APP_NAME = "Logcat Viewer"
+APP_NAME = "AndroidLab"
 TAGLINE = "Live Android logcat, powerful filtering, and a full device toolkit."
 AUTHOR = "Mahmoud Alghraibeh"
 CONTACT = "M.Ghraibeh@penguinin.com"

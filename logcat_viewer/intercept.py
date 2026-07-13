@@ -17,7 +17,8 @@ The proxy engine lives in a ``QThread`` (its own asyncio loop) and only ever
 ``settings put global http_proxy``) is applied on enable — after snapshotting the
 device's *original* proxy — and, critically, restored synchronously on *every*
 exit path (disable / device switch / app close): the device is put back exactly
-as it was (original proxy re-applied, or the setting deleted if it had none), so
+as it was (original proxy re-applied, or the proxy reliably disabled with ``:0``
+if it had none — see ``clear_proxy_args`` for why not ``settings delete``), so
 a proxy left pointing at a dead reverse tunnel never strands the device offline.
 
 For the case the host *can't* clean up — the device is unplugged / reboots / adb
@@ -123,7 +124,12 @@ def set_proxy_args(serial: str, port: int) -> list[str]:
 
 
 def clear_proxy_args(serial: str) -> list[str]:
-    """adb args to clear the global HTTP proxy (``:0`` = disabled, no reboot)."""
+    """adb args to disable the global HTTP proxy (``:0`` = disabled, no reboot).
+
+    Preferred over ``settings delete`` for clearing: on many OEM builds (notably
+    Samsung One UI) *deleting* the row removes the stored value but leaves the
+    live proxy applied — apps keep routing through the (now dead) tunnel until
+    Wi-Fi toggles or the device reboots. Writing ``:0`` disables it immediately."""
     return ["-s", serial, "shell", "settings", "put", "global", "http_proxy", ":0"]
 
 
@@ -150,19 +156,23 @@ def _real_proxy(original: str) -> str:
 
 
 def restore_proxy_args(serial: str, original: str) -> list[str]:
-    """adb args to put the proxy back exactly as it was before we touched it —
-    the prior proxy verbatim, or delete the setting if the device had none."""
+    """adb args to put the proxy back as it was before we touched it — the prior
+    proxy verbatim, or reliably disable it (``:0``) if the device had none.
+
+    Uses ``:0`` rather than ``settings delete`` for the no-proxy case because
+    delete doesn't take effect on some OEM builds (see ``clear_proxy_args``)."""
     val = _real_proxy(original)
     if val:
         return ["-s", serial, "shell", "settings", "put", "global", "http_proxy", val]
-    return ["-s", serial, "shell", "settings", "delete", "global", "http_proxy"]
+    return clear_proxy_args(serial)
 
 
 def proxy_restore_cmd(original: str) -> str:
-    """The device-shell command that restores the original proxy (or deletes it)."""
+    """The device-shell command that restores the original proxy (or disables it
+    with ``:0`` if the device had none — never ``settings delete``, which can
+    leave the live proxy applied on some OEM builds)."""
     val = _real_proxy(original)
-    return (f"settings put global http_proxy {val}" if val
-            else "settings delete global http_proxy")
+    return f"settings put global http_proxy {val if val else ':0'}"
 
 
 def proxy_watchdog_script(original: str) -> str:
@@ -645,7 +655,11 @@ class MitmdumpWorker(QThread):
         except (subprocess.SubprocessError, OSError):
             pass
         cmd = [mitm, "-q", "-p", str(self._port), "-s", str(MITM_ADDON),
-               "--set", "flow_detail=0", "--set", f"confdir={MITM_CONFDIR}"]
+               "--set", "flow_detail=0", "--set", f"confdir={MITM_CONFDIR}",
+               # lazy connection strategy lets the addon tunnel a connection
+               # through before server-side TLS — needed for TLS passthrough,
+               # which keeps cert-pinned / untrusting apps online.
+               "--set", "connection_strategy=lazy"]
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -1222,7 +1236,8 @@ def teardown_proxy(adb: str, serial: str, port: int, original: str = "") -> None
     """Synchronously restore the device's original proxy + drop the reverse
     tunnel. Best-effort but must run on every exit path — a dangling proxy kills
     the device's internet. ``original`` is the value captured at enable time; the
-    device is put back exactly as it was (or the proxy is deleted if it had none)."""
+    device is put back exactly as it was (or the proxy disabled with ``:0`` if it
+    had none — ``settings delete`` can leave a stale live proxy on some builds)."""
     if not adb or not serial:
         return
     for args in (restore_proxy_args(serial, original), reverse_remove_args(serial, port)):

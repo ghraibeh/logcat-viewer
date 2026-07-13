@@ -446,6 +446,42 @@ QTableView#ExplorerTable QHeaderView::section {{
     font-family: Menlo, monospace; font-size: 12px; padding: 8px;
 }}
 
+/* Device Controls tab */
+QLabel#CtrlTitle {{ color: {TEXT}; font-size: 13px; font-weight: 600; }}
+QLabel#CtrlDesc {{ color: {TEXT_DIM}; font-size: 11px; }}
+#CtrlSep {{ background: {BORDER}; }}
+QLabel#CtrlChip {{
+    background: {SURFACE_2}; color: {TEXT_DIM};
+    border: 1px solid {BORDER}; border-radius: 10px;
+    padding: 3px 10px; font-family: Menlo, monospace; font-size: 11px;
+}}
+QLabel#CtrlChip[tone="accent"] {{
+    background: {SELECT_SOFT}; color: {ACCENT_H}; border-color: {ACCENT};
+}}
+QLabel#CtrlChip[tone="warn"] {{
+    background: rgba(227, 168, 18, 0.12); color: {AMBER}; border-color: {AMBER};
+}}
+
+/* Segmented pill (font scale, standby bucket) */
+#SegWrap {{ background: {WELL}; border: 1px solid {BORDER}; border-radius: 9px; }}
+QPushButton#seg {{
+    background: transparent; border: none; border-radius: 7px;
+    padding: 4px 10px; color: {TEXT_DIM}; font-size: 12px; min-width: 0;
+}}
+QPushButton#seg:hover {{ color: {TEXT}; background: {SURFACE_2}; }}
+QPushButton#seg:checked {{
+    background: {SELECT_SOFT}; color: {ACCENT_H}; font-weight: 600;
+}}
+QPushButton#seg:disabled {{ color: {BORDER_2}; background: transparent; }}
+
+/* Sliders (mock battery) — thin accent groove, round thumb */
+QSlider::groove:horizontal {{ height: 4px; background: {SURFACE_2}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
+QSlider::handle:horizontal {{
+    width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; background: #ffffff;
+}}
+QSlider::handle:horizontal:hover {{ background: {ACCENT_H}; }}
+
 /* Decompiled source viewer window */
 #SrcViewer {{ background: {BG}; }}
 #SrcBar {{ background: {SURFACE}; border-bottom: 1px solid {BORDER}; }}

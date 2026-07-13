@@ -9,7 +9,7 @@ Shark ships only thin jars on Maven (its CLI drags in neo4j for an interactive
 mode we don't use), so we provision just the jars the ``analyze`` path needs and
 invoke ``shark.MainKt`` directly. The Java runtime + downloads reuse the same
 machinery as the jadx decompiler (`decompile.py`), cached under
-``~/Library/Application Support/logcat-viewer/tools``.
+``~/Library/Application Support/AndroidLab/tools``.
 """
 from __future__ import annotations
 

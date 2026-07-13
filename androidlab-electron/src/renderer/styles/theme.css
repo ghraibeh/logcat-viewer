@@ -1,0 +1,661 @@
+/*
+ * Sleek dev-tool dark theme (Linear/Raycast-style) — a faithful CSS port of
+ * logcat_viewer/theme.py's palette + stylesheet. Palette constants become CSS
+ * custom properties; the QSS object-name selectors map to component classes.
+ */
+:root {
+  --bg: #16171c;
+  --surface: #1c1e24;
+  --surface-2: #252831;
+  --surface-3: #2f3340;
+  --border: #272a34;
+  --border-2: #3a3f4d;
+  --text: #e9ebf3;
+  --text-dim: #7e8595;
+  --accent: #6e7bff;
+  --accent-h: #8b96ff;
+  --green: #31c96e;
+  --green-h: #43dd80;
+  --red: #f25a52;
+  --amber: #e3a812;
+
+  --well: #121318;
+  --select: rgba(110, 123, 255, 0.22);
+  --select-soft: rgba(110, 123, 255, 0.13);
+  --grid: #0b0c10;
+
+  --grad-accent: linear-gradient(180deg, #7f8bff 0%, #5f6cf5 100%);
+  --grad-accent-h: linear-gradient(180deg, #99a2ff 0%, #707cff 100%);
+  --grad-red: linear-gradient(180deg, #ff6b60 0%, #e4463e 100%);
+
+  --font-ui: -apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'SF Mono', Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+  outline: none;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* Canvases must be block — as inline (default) their baseline descender makes
+ * the parent a few px taller than the canvas, and a size-observing redraw then
+ * grows the canvas every frame (the "sliding down" bug). */
+canvas {
+  display: block;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+/* ---- App shell ---------------------------------------------------------- */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* Toolbar (device row) */
+.toolbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+  -webkit-app-region: drag;
+}
+.toolbar .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toolbar input,
+.toolbar select,
+.toolbar button {
+  -webkit-app-region: no-drag;
+}
+.toolbar-pad-left {
+  padding-left: 78px; /* clear the macOS traffic-light buttons (hiddenInset) */
+}
+
+.label {
+  color: var(--text-dim);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* ---- Inputs — sunken wells with a luminous focus ring ------------------- */
+input[type='text'],
+.line-edit {
+  background: var(--well);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  user-select: text;
+}
+input[type='text']:hover,
+.line-edit:hover {
+  border-color: var(--border-2);
+}
+input[type='text']:focus,
+.line-edit:focus {
+  border: 1px solid var(--accent);
+}
+input.error {
+  border: 1px solid #e2554e;
+}
+::placeholder {
+  color: var(--text-dim);
+}
+
+select {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  min-width: 84px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%237e8595' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 26px;
+}
+select:hover {
+  background-color: var(--surface-3);
+  border-color: var(--border-2);
+}
+select:focus {
+  border-color: var(--accent);
+}
+
+/* ---- Buttons — quiet chips; primary actions carry the gradient ---------- */
+button {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 14px;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  cursor: default;
+  white-space: nowrap;
+}
+button:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--border-2);
+}
+button:active:not(:disabled) {
+  background: var(--border-2);
+}
+button:disabled {
+  color: var(--text-dim);
+  background: var(--surface);
+  border-color: var(--border);
+  cursor: default;
+}
+
+button.start {
+  background: var(--grad-accent);
+  border: none;
+  color: #fff;
+  font-weight: 600;
+  padding: 7px 16px;
+}
+button.start:hover:not(:disabled) {
+  background: var(--grad-accent-h);
+}
+button.start:disabled {
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+button.start.running {
+  background: var(--grad-red);
+  color: #fff;
+}
+
+button.toggle {
+  padding: 6px 9px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  border-radius: 8px;
+}
+button.toggle.checked {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+button.pause.checked {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #17130a;
+  font-weight: 600;
+}
+
+button.adv-toggle.checked {
+  background: var(--select-soft);
+  border-color: var(--accent);
+  color: var(--accent-h);
+  font-weight: 600;
+}
+
+/* ---- Checkboxes --------------------------------------------------------- */
+.checkbox {
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+.checkbox input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  border: 1px solid var(--border-2);
+  background: var(--well);
+  position: relative;
+}
+.checkbox input:hover {
+  border-color: var(--accent);
+}
+.checkbox input:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.checkbox input:checked::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* ---- Tabs — floating pill segments -------------------------------------- */
+.tabbar {
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  gap: 3px;
+  border-bottom: 1px solid var(--border);
+  /* Pinned height + no shrink: the tab bar must never resize on reflow, or the
+   * flex:1 content area (and any canvas in it) shifts/grows. */
+  flex: 0 0 40px;
+  height: 40px;
+  box-sizing: border-box;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.tab {
+  background: transparent;
+  color: var(--text-dim);
+  padding: 6px 16px;
+  border: none;
+  border-radius: 8px;
+  margin: 0;
+  cursor: default;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.tab:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+.tab.selected {
+  color: var(--accent-h);
+  background: var(--select-soft);
+  font-weight: 600;
+}
+.tab .dot {
+  color: var(--accent);
+  margin-left: 5px;
+}
+
+/* ---- Filter bar (Logs tab) ---------------------------------------------- */
+.filter-bar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.filter-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border-2);
+  margin: 0 6px;
+}
+.field-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.field-group input {
+  flex: 1;
+  min-width: 0;
+}
+.font-label {
+  color: var(--text);
+  min-width: 22px;
+  text-align: center;
+  font-family: var(--font-mono);
+}
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- Logs layout: app panel | log view ---------------------------------- */
+.logs-tab {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.logs-right {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Left app-picker list */
+.app-panel {
+  background: var(--bg);
+  width: 240px;
+  min-width: 150px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+.app-panel-bar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+}
+.app-panel-bar input {
+  width: 100%;
+}
+.app-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.app-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 4px 8px;
+  margin: 1px 5px;
+  cursor: default;
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.app-item:hover {
+  background: var(--surface-2);
+}
+.app-item.selected {
+  background: var(--select);
+}
+.app-item .icon {
+  flex: 0 0 auto;
+}
+.app-item .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.app-item .badge-clone {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+/* Resizer handle between panel and log view */
+.splitter {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  flex: 0 0 auto;
+}
+.splitter:hover {
+  background: var(--border-2);
+}
+
+/* ---- Log table ---------------------------------------------------------- */
+.log-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.log-header {
+  display: flex;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  flex: 0 0 auto;
+}
+.log-header .col {
+  padding: 6px 8px;
+  border-right: 1px solid var(--bg);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.log-scroll {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+.log-rows {
+  position: relative;
+  width: 100%;
+}
+.log-row {
+  display: flex;
+  position: absolute;
+  left: 0;
+  width: 100%;
+  font-family: var(--font-mono);
+  align-items: flex-start;
+}
+.log-row.selected {
+  background: var(--select);
+}
+.log-row .cell {
+  padding: 1px 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.log-row .cell.msg {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  flex: 1 1 auto;
+}
+.log-row .cell.msg.nowrap {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.log-row .cell.num {
+  text-align: right;
+}
+.log-row .cell.meta {
+  color: var(--meta, #767c88);
+}
+.level-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 16px;
+  border-radius: 5px;
+  color: #eef2f8;
+  font-weight: 700;
+  font-size: 10px;
+  font-family: var(--font-ui);
+}
+
+/* ---- Detail pane -------------------------------------------------------- */
+.detail {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 6px 10px;
+  height: 72px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 0 0 auto;
+  user-select: text;
+}
+.detail:empty::before {
+  content: 'Select a row to see the full line…';
+  color: var(--text-dim);
+}
+
+/* ---- Status bar --------------------------------------------------------- */
+.status-bar {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 12px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Scrollbars — thin, rounded, quiet ---------------------------------- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-2);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4b5262;
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ---- Context menu ------------------------------------------------------- */
+.context-menu {
+  position: fixed;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  padding: 6px;
+  z-index: 1000;
+  min-width: 180px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+.context-menu .item {
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: default;
+}
+.context-menu .item:hover:not(.disabled) {
+  background: var(--accent);
+  color: #fff;
+}
+.context-menu .item.disabled {
+  color: var(--text-dim);
+}
+.context-menu .sep {
+  height: 1px;
+  background: var(--border);
+  margin: 5px 8px;
+}
+
+/* ---- Placeholder for not-yet-migrated tabs (Phase 3) -------------------- */
+.tab-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--text-dim);
+  text-align: center;
+}
+.tab-placeholder .big {
+  font-size: 15px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---- Toast (transient copied/status feedback) --------------------------- */
+.toast {
+  position: fixed;
+  bottom: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  padding: 9px 18px;
+  font-weight: 600;
+  z-index: 2000;
+  pointer-events: none;
+}
+
+/* ---- Dialog scrim + non-modal message box ------------------------------- */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+}
+.msgbox {
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 14px;
+  padding: 20px 22px;
+  max-width: 520px;
+  min-width: 340px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+}
+.msgbox .title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.msgbox .body {
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  max-height: 300px;
+  overflow: auto;
+}
+.msgbox .buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
