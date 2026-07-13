@@ -1,5 +1,10 @@
 # AndroidLab
 
+> **⚠️ The Python + PyQt6 app documented below is deprecated.** Active development has moved to the
+> Electron app in [`androidlab-electron/`](androidlab-electron/) (React + TypeScript). The Python
+> version still runs and is kept as a reference, but new features — such as the interactive **Shell**
+> tab — land in the Electron app only. To run the maintained app: `cd androidlab-electron && npm install && npm run dev`.
+
 A native-feeling macOS desktop app (Python + PyQt6) that streams **live `adb logcat`**
 and filters it like logcat — by **level, tag, PID, free text, and regex** — with live,
 as-you-type filtering over a large in-memory buffer, plus a set of device tools (install/pull APK,

@@ -13,10 +13,13 @@ import { LogTable } from './components/LogTable'
 import { MonitorView } from './components/MonitorView'
 import { InspectorView } from './components/InspectorView'
 import { ControlsView } from './components/ControlsView'
+import { LocationView } from './components/LocationView'
 import { ToolboxView } from './components/ToolboxView'
+import { ShellView } from './components/ShellView'
 import { DatabaseView } from './components/DatabaseView'
 import { FilesView } from './components/FilesView'
 import { AppManagerView } from './components/AppManagerView'
+import { MirrorDock } from './components/MirrorDock'
 import { StatusBar } from './components/StatusBar'
 import { AboutDialog } from './components/AboutDialog'
 import { MessageBox, PromptDialog, Toast, type MessageBoxSpec } from './components/dialogs'
@@ -32,7 +35,8 @@ const TABS: TabDef[] = [
   { id: 'monitor', label: 'Monitor' },
   { id: 'inspector', label: 'Inspector' },
   { id: 'controls', label: 'Controls' },
-  { id: 'toolbox', label: 'Toolbox' }
+  { id: 'toolbox', label: 'Toolbox' },
+  { id: 'shell', label: 'Shell' }
 ]
 
 interface ContextMenuState {
@@ -55,6 +59,8 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [panelWidth, setPanelWidth] = useState(240)
   const [appsBadge, setAppsBadge] = useState(false)
+  const [mirrorOpen, setMirrorOpen] = useState(false)
+  const [mirrorWidth, setMirrorWidth] = useState(360)
 
   const searchRef = useRef<HTMLInputElement>(null)
   const selectionRef = useRef<ReadonlySet<number>>(selectedRows)
@@ -273,6 +279,25 @@ export default function App() {
   const panelWidthRef = useRef(panelWidth)
   panelWidthRef.current = panelWidth
 
+  // --- mirror dock splitter drag (left edge; drag left grows the dock) ----
+  const mirrorWidthRef = useRef(mirrorWidth)
+  mirrorWidthRef.current = mirrorWidth
+  const onMirrorSplitterDown = useCallback((ev: React.MouseEvent) => {
+    ev.preventDefault()
+    const startX = ev.clientX
+    const startW = mirrorWidthRef.current
+    const move = (e: MouseEvent) => {
+      const w = Math.max(240, Math.min(900, startW - (e.clientX - startX)))
+      setMirrorWidth(w)
+    }
+    const up = () => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }, [])
+
   // Context-menu target computation (mirrors _show_table_menu).
   const ctxTarget = (() => {
     if (!ctxMenu) return null
@@ -294,13 +319,21 @@ export default function App() {
 
   return (
     <div className="app">
-      <Toolbar c={c} onInstall={() => void doInstall()} onAbout={() => setAbout(true)} />
+      <Toolbar
+        c={c}
+        onInstall={() => void doInstall()}
+        onAbout={() => setAbout(true)}
+        onMirror={() => setMirrorOpen((v) => !v)}
+        mirrorOpen={mirrorOpen}
+      />
       <TabBar
         tabs={TABS.map((t) => (t.id === 'apps' ? { ...t, badge: appsBadge } : t))}
         current={tab}
         onSelect={setTab}
       />
 
+      <div className="main-row">
+      <div className="main-content">
       {tab === 'logs' ? (
         <div className="logs-tab">
           <AppPickerPanel c={c} width={panelWidth} />
@@ -345,14 +378,38 @@ export default function App() {
         <InspectorView c={c} />
       ) : tab === 'controls' ? (
         <ControlsView c={c} />
+      ) : tab === 'location' ? (
+        <LocationView c={c} />
       ) : tab === 'toolbox' ? (
         <ToolboxView c={c} />
+      ) : tab === 'shell' ? (
+        <ShellView c={c} />
       ) : (
         <div className="tab-placeholder">
           <div className="big">{TABS.find((t) => t.id === tab)?.label}</div>
           <div>This tool is migrated in Phase 3 of the AndroidLab → Electron port.</div>
         </div>
       )}
+      </div>
+      {mirrorOpen ? (
+        <>
+          <div className="mirror-splitter" onMouseDown={onMirrorSplitterDown} />
+          <div className="mirror-dock-holder" style={{ width: mirrorWidth, display: 'flex' }}>
+            <MirrorDock
+              c={c}
+              onClose={() => setMirrorOpen(false)}
+              onCaptured={(r) =>
+                r.ok
+                  ? setMsgBox({ title: 'Capture saved', body: `✓  ${r.message}`, dir: r.dir })
+                  : r.message !== 'cancelled'
+                    ? showToast(`✗ ${r.message}`)
+                    : undefined
+              }
+            />
+          </div>
+        </>
+      ) : null}
+      </div>
 
       <StatusBar c={c} />
 

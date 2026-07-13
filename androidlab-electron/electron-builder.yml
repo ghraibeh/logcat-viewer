@@ -7,10 +7,19 @@ directories:
 files:
   - out/**/*
   - package.json
-# Phase 4 will stage platform-tools/adb here and add it to extraResources so the
-# packaged .app is self-contained (no external adb needed), mirroring the
-# PyInstaller spec's `datas` bundling of platform-tools.
-extraResources: []
+  # node-pty is a native module used by the Shell tab — bundle it (vite can't
+  # inline a .node binary) and unpack it from the asar so it can be dlopen'd.
+  - node_modules/node-pty/**/*
+asarUnpack:
+  - node_modules/node-pty/**/*
+# Bundled into the packaged .app's resources root (process.resourcesPath).
+# The mock-location helper APK ships here (auto-installed on first Location use),
+# mirroring the PyInstaller spec's `datas` bundling of assets/mocklocation.apk.
+# Phase 4 will stage platform-tools/adb here the same way so the packaged .app is
+# self-contained (no external adb needed).
+extraResources:
+  - from: resources/mocklocation.apk
+    to: mocklocation.apk
 mac:
   category: public.app-category.developer-tools
   target:

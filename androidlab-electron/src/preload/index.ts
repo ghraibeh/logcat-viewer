@@ -10,9 +10,11 @@ import type {
   BugreportDone,
   LogcatState,
   MenuAction,
+  MirrorFailed,
   MonkeyDone,
   PerfettoDone,
-  PresetMap
+  PresetMap,
+  SaveResult
 } from '@shared/types'
 import type { Sample } from '@core/monitor'
 import type { IntentSpec } from '@core/toolbox'
@@ -42,6 +44,15 @@ const api: AndroidLabApi = {
     onState: (cb) => subscribe<[LogcatState]>(IPC.logcatState, cb),
     onError: (cb) => subscribe<[string]>(IPC.logcatError, cb)
   },
+  shell: {
+    start: (kind, serial, cols, rows) => ipcRenderer.invoke(IPC.shellStart, kind, serial, cols, rows),
+    write: (data) => ipcRenderer.invoke(IPC.shellWrite, data),
+    resize: (cols, rows) => ipcRenderer.invoke(IPC.shellResize, cols, rows),
+    stop: () => ipcRenderer.invoke(IPC.shellStop),
+    running: () => ipcRenderer.invoke(IPC.shellRunning),
+    onData: (cb) => subscribe<[string]>(IPC.shellData, cb),
+    onState: (cb) => subscribe<[LogcatState]>(IPC.shellState, cb)
+  },
   monitor: {
     start: (serial, pkg, intervalMs) => ipcRenderer.invoke(IPC.monitorStart, serial, pkg, intervalMs),
     stop: () => ipcRenderer.invoke(IPC.monitorStop),
@@ -51,9 +62,32 @@ const api: AndroidLabApi = {
   inspect: {
     capture: (serial) => ipcRenderer.invoke(IPC.inspectCapture, serial)
   },
+  mirror: {
+    startH264: (serial) => ipcRenderer.invoke(IPC.mirrorStartH264, serial),
+    startPoller: (serial, displayId) => ipcRenderer.invoke(IPC.mirrorStartPoller, serial, displayId),
+    stop: () => ipcRenderer.invoke(IPC.mirrorStop),
+    input: (serial, logicalId, args) => ipcRenderer.invoke(IPC.mirrorInput, serial, logicalId, args),
+    screenshot: (serial, displayId, logicalId) =>
+      ipcRenderer.invoke(IPC.mirrorScreenshot, serial, displayId, logicalId),
+    recordStart: (serial) => ipcRenderer.invoke(IPC.mirrorRecordStart, serial),
+    recordStop: () => ipcRenderer.invoke(IPC.mirrorRecordStop),
+    listDisplays: (serial) => ipcRenderer.invoke(IPC.mirrorListDisplays, serial),
+    isEmulator: (serial) => ipcRenderer.invoke(IPC.mirrorIsEmulator, serial),
+    scrcpyAvailable: () => ipcRenderer.invoke(IPC.mirrorScrcpyAvailable),
+    launchScrcpy: (serial, logicalId) => ipcRenderer.invoke(IPC.mirrorLaunchScrcpy, serial, logicalId),
+    onFrame: (cb) => subscribe<[string]>(IPC.mirrorFrame, cb),
+    onH264: (cb) => subscribe<[Uint8Array]>(IPC.mirrorH264, cb),
+    onFailed: (cb) => subscribe<[MirrorFailed]>(IPC.mirrorFailed, cb),
+    onRecordDone: (cb) => subscribe<[SaveResult]>(IPC.mirrorRecordDone, cb)
+  },
   controls: {
     read: (serial, pkg) => ipcRenderer.invoke(IPC.controlsRead, serial, pkg),
     apply: (serial, argvs, label) => ipcRenderer.invoke(IPC.controlsApply, serial, argvs, label)
+  },
+  mockloc: {
+    setup: (serial) => ipcRenderer.invoke(IPC.mocklocSetup, serial),
+    set: (serial, lat, lng, acc, alt) => ipcRenderer.invoke(IPC.mocklocSet, serial, lat, lng, acc, alt),
+    stop: (serial) => ipcRenderer.invoke(IPC.mocklocStop, serial)
   },
   db: {
     list: (serial, pkg) => ipcRenderer.invoke(IPC.dbList, serial, pkg),

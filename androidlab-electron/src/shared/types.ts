@@ -59,6 +59,12 @@ export interface InspectResult {
   xml: string
 }
 
+/** A mirror feed failed; `kind` lets the renderer fall back (h264 → poller). */
+export interface MirrorFailed {
+  kind: 'h264' | 'poller'
+  message: string
+}
+
 // --- Database Inspector payloads (mirror dbinspect.py's worker signals) -------
 /** Result of listing an app's `databases/` dir (DbListWorker.done). */
 export interface DbListResult {
@@ -185,6 +191,13 @@ export interface BugreportDone {
   message: string
   /** local directory of the saved zip ('' on failure). */
   dir: string
+}
+
+// --- Mock GPS location payload (mirrors mocklocation.py's worker signals) -----
+/** Result of a helper setup / set / stop op (MockSetupWorker.done shape). */
+export interface MockResult {
+  ok: boolean
+  message: string
 }
 
 export type LogcatState = 'started' | 'stopped' | 'error'

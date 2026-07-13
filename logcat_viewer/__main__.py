@@ -11,7 +11,18 @@ from .about import APP_NAME
 from .ui import MainWindow
 
 
+_DEPRECATION_NOTICE = (
+    "\n"
+    "  ┌───────────────────────────────────────────────────────────────────┐\n"
+    "  │  DEPRECATED: the Python (PyQt6) AndroidLab is no longer maintained. │\n"
+    "  │  Active development has moved to the Electron app in                │\n"
+    "  │  androidlab-electron/  (cd androidlab-electron && npm run dev).     │\n"
+    "  └───────────────────────────────────────────────────────────────────┘\n"
+)
+
+
 def main() -> int:
+    print(_DEPRECATION_NOTICE, file=sys.stderr)
     if getattr(sys, "frozen", False):
         import multiprocessing
         multiprocessing.freeze_support()

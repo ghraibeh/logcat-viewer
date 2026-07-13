@@ -18,7 +18,7 @@ text output — which ports cleanly to Node/TypeScript.
 |---|---|---|
 | PyQt6 widgets/layouts | React + TypeScript + CSS | ✅ Phase 2 (shell + Logs) |
 | Custom `QPainter` (badges, switches, spark graphs, tiles) | HTML/CSS; `<canvas>` only for spark graphs / mirror frame / inspector overlay | badges/switches/pills are CSS |
-| `QWebEngineView` (MapLibre map) | renderer `<iframe>`/`<webview>` | Phase 3 (Location) |
+| `QWebEngineView` (MapLibre map) | isolated renderer `<webview>` (own CSP; maplibre vendored locally) | ✅ Phase 3 (Location) |
 | `QProcess` `LogcatReader` | `child_process.spawn` + byte-buffered batches → IPC | ✅ `main/services/logcat.ts` |
 | `QThread` workers | `async` in main process → IPC | pattern established |
 | `QProcess.startDetached` one-shots | `execFile` / detached `spawn` | Phase 3 |
@@ -52,6 +52,9 @@ text output — which ports cleanly to Node/TypeScript.
 | `crash.py` (Crashes/ANR + R8 retrace) | `src/core/crash.ts` + `src/main/services/crash.ts` + `components/CrashView.tsx` |
 | `appmgr.py` (App Manager) | `src/core/appmgr.ts` + `src/main/services/appmgr.ts` + `components/AppManagerView.tsx` |
 | `pull.py` `PullWorker` (extract APK) | folded into `appmgr` service `extractApk()` (`pm path` → `adb pull` → ~/Downloads/<pkg>) |
+| `mocklocation.py` (mock GPS + map) | `src/core/mocklocation.ts` + `src/main/services/mocklocation.ts` + `components/LocationView.tsx` + `styles/location.css` |
+| `assets/map.html` (MapLibre picker) | `src/renderer/public/map.html` + `map.js` + locally-vendored `maplibre-gl.{js,css}` (loaded into an isolated `<webview>`) |
+| `assets/mocklocation.apk` (+ `android-helper/`) | committed at `resources/mocklocation.apk`; bundled via electron-builder `extraResources`; auto-installed on first Location use |
 
 ## IPC contract
 
@@ -237,9 +240,87 @@ Pending live: the Prefs run-as/su read + write and destructive app actions need 
 debuggable app / a device with `unzip` + `sqlite3` (the emulator has neither a
 debuggable app nor a user app).
 
-**Still pending** (each shows a "migrated in Phase 3" placeholder): Location
-(mock GPS + map), Network HTTP (intercept), memory-leak detection, plus screen
-mirror, Wi-Fi adb, and Pull APK.
+**Location tab — COMPLETE** (`mocklocation.py` + `assets/map.html` + the helper
+APK). A full-width, device-serial-driven view (does NOT follow the App picker —
+mock GPS is device-wide). Two Electron-specific decisions:
+
+- **MapLibre map → isolated `<webview>`.** The map guest (`public/map.html` +
+  `map.js`) is a separate document with its OWN CSP (`<meta>`), so the strict
+  main-window CSP in `index.html` is **unchanged**. `webviewTag: true` is the one
+  key added to `webPreferences` (contextIsolation/sandbox/nodeIntegration:false
+  untouched). Bridge = the faithful analogue of the Qt `document.title` trick:
+  guest→host via the webview's `page-title-updated` (`MOCKLOC:lat,lng|seq` picks +
+  `MAPLOADED:ok|err`), host→guest via `webview.executeJavaScript('setLocation…')`.
+  The webview `src` resolves as `new URL('map.html', location.href)` — dev
+  (`${ELECTRON_RENDERER_URL}/map.html`) and packaged (`file://…/out/renderer/`)
+  both, no main-process branch. Created on first tab-show (lazy); its load failing
+  is non-fatal (guest console is separate from the host, so the smoke stays clean).
+- **MapLibre vendored locally** (`public/maplibre-gl.{js,css}`, no unpkg at
+  runtime); OSM tiles + Nominatim still hit the network at runtime (inherent to a
+  map, matches the original). Helper APK bundled at `resources/mocklocation.apk`
+  and shipped via electron-builder `extraResources`; resolved at runtime as
+  packaged→`process.resourcesPath` / dev→project `resources/`.
+
+Cleanup (CLAUDE.md rule #3): the main service tracks the serial with a live mock
+and `shutdown()` (wired into `win.on('closed')`) stops it so no mock outlives the
+app; switching the selected device stops the old serial first.
+
+| Feature | Status |
+|---|---|
+| `setArgs`/`stopArgs` builders (string `--es` extras, 7-dp precision) | ✅ 🧪 + live |
+| Coordinate validators (±90/±180) + `float()`-style field parse | ✅ 🧪 |
+| Auto-install helper APK (if absent) + `appops … mock_location allow` | ✅ 🧪 + live |
+| `am start-foreground-service` set/stop over adb | ✅ 🧪 + live |
+| MapLibre pick (click/drag/search) → set coords; Go / presets / Enter | ✅ 🧪(mount) |
+| Enable/Disable toggle + install-then-mock flow + mocking-state readout | ✅ 🧪 + live |
+| Stop on device-switch (old serial) + on app close (no orphaned mock) | ✅ 🧪 + live(teardown) |
+| Isolated `<webview>` map (own CSP; main CSP untouched); maplibre vendored | ✅ 🧪 |
+
+Verified: `npm run typecheck` clean, `npm test` **153 passed** (11 files; +15
+mocklocation), `npm run build` clean (`out/renderer/{map.html,map.js,maplibre-gl.js,
+maplibre-gl.css}` present), offline smoke PASS (`location=1 … errors=0`), and a
+**full live e2e** on the emulator (`127.0.0.1:6555`, Android 14): install → appops
+allow → set 37.7749/-122.4194 → `dumpsys location` showed fused/gps/network
+`[mock]` at that coordinate (`identity=…/com.logcatviewer.mocklocation`) → stop →
+all mock overrides removed (0 active mock providers). No minimum-version-gated
+paths. Known minor difference from Qt: the tab is conditionally rendered (unmounts
+on tab-switch like the other full-width tabs), so the Enable toggle resets on
+re-entry while a device-wide mock keeps running — the service remains the source of
+truth (re-enabling replaces it; app-close stops it).
+
+**Screen mirror — COMPLETE** (`mirror.py`). A toggleable right-side dock (toolbar
+**Mirror** button) that lives alongside any tab, like the Qt `QDockWidget`. The
+"hardest item" — PyAV/ffmpeg H.264 decode — is replaced by **WebCodecs in the
+renderer, with zero new dependencies**: the main-process `MirrorService` streams
+raw `screenrecord --output-format=h264` bytes over IPC; `core/mirror.ts`'s
+`AnnexBDemuxer` splits the Annex-B stream into access units (deriving the
+`avc1.PPCCLL` codec from the SPS); the renderer feeds them to a `VideoDecoder`
+(`optimizeForLatency`, Annex-B / no description) and paints `VideoFrame`s to a
+canvas. Falls back to the `screencap` PNG poller if WebCodecs decode fails or for
+secondary displays (matching mirror.py's H264-with-fallback design).
+
+| Feature | Status |
+|---|---|
+| H.264 low-latency feed (screenrecord → IPC → WebCodecs decode → canvas) | ✅ 🧪 + live |
+| screencap PNG poller fallback (2 staggered loops) + H.264 prime frame | ✅ 🧪 + live |
+| Tap / swipe / nav keys mapped to device pixels via `input` (`-d` on secondary) | ✅ + live |
+| Screenshot (PNG → ~/Downloads) + MP4 record (start/stop via `pkill -INT`, pull) | ✅ ⏳(live record) |
+| Clipboard paste / type-into-field (`input text` + `escapeInputText`) | ✅ 🧪 |
+| Display picker (SF capture id ↔ logical viewport id; 64-bit ids kept as text) | ✅ 🧪 + live |
+| Fullscreen (viewport overlay + Esc), scrcpy hand-off, APK drop-to-install | ✅ |
+| Always clears on-device `screenrecord` before/after (single encoder) | ✅ + live |
+
+Verified: `npm run typecheck` clean, `npm test` **164 passed** (+11 mirror core),
+`npm run build` clean, offline smoke PASS (unchanged; dock is lazy). Live against
+the attached emulator via an esbuild-bundled harness driving the **real**
+`MirrorService` + `AnnexBDemuxer`: screencap PNG (483 KB), one display parsed with
+its 64-bit SF id, a 443 KB H.264 stream demuxed to 19 access units / codec
+`avc1.42c029`, and the renderer decoded **28 frames** through WebCodecs and painted
+the live screen to the canvas (screenshotted). Pending live: MP4 record finalize
+and a real >1-display device.
+
+**Still pending** (each shows a "migrated in Phase 3" placeholder): Network HTTP
+(intercept), memory-leak detection, plus Wi-Fi adb and Pull APK.
 
 ### Phase 4 — QA, packaging, docs (PENDING)
 

@@ -2,6 +2,15 @@
 
 Guidance for Claude Code when working in this repo.
 
+> ## ⚠️ The Python app (`logcat_viewer/`) is DEPRECATED
+>
+> **Active development happens in the Electron app under [`androidlab-electron/`](androidlab-electron/).**
+> The Python + PyQt6 implementation (`logcat_viewer/`, `run.sh`, `tests/`) is kept only as the
+> reference the Electron port was built from — **do not add features to it**. New features (like the
+> Shell tab) go in `androidlab-electron/` only. See that folder's own conventions (React + TypeScript,
+> `main`/`preload`/`renderer`/`shared`/`core` layers, one `QThread`-style worker/service per device
+> op). The Python architecture notes below remain useful as a spec/porting map, not as a build target.
+
 ## What this is
 
 **AndroidLab** — a standalone native-feeling **macOS desktop app** (Python + PyQt6) that streams

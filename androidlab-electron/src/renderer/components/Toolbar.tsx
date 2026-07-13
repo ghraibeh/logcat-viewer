@@ -10,11 +10,15 @@ const PHASE3 = 'Available in a later migration phase'
 export function Toolbar({
   c,
   onInstall,
-  onAbout
+  onAbout,
+  onMirror,
+  mirrorOpen
 }: {
   c: Controller
   onInstall: () => void
   onAbout: () => void
+  onMirror: () => void
+  mirrorOpen: boolean
 }) {
   const noAdb = c.adbReady && !c.adbPath
   const hasDevice = !!c.serial
@@ -86,7 +90,12 @@ export function Toolbar({
         </button>
 
         <div style={{ width: 6 }} />
-        <button title={`Mirror the device's screen — ${PHASE3}`} disabled>
+        <button
+          className={mirrorOpen ? 'active' : undefined}
+          title="Mirror the device's screen"
+          disabled={!hasDevice}
+          onClick={onMirror}
+        >
           Mirror
         </button>
         <button className="toggle" title="About AndroidLab" onClick={onAbout}>

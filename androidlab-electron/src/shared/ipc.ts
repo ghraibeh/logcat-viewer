@@ -16,6 +16,15 @@ export const IPC = {
   logcatState: 'logcat:state',
   logcatError: 'logcat:error',
 
+  // interactive adb shell over a PTY (control invoke/handle + event streams)
+  shellStart: 'shell:start',
+  shellWrite: 'shell:write',
+  shellResize: 'shell:resize',
+  shellStop: 'shell:stop',
+  shellRunning: 'shell:running',
+  shellData: 'shell:data',
+  shellState: 'shell:state',
+
   // performance monitor (invoke/handle + events)
   monitorStart: 'monitor:start',
   monitorStop: 'monitor:stop',
@@ -25,9 +34,32 @@ export const IPC = {
   // layout inspector (invoke/handle)
   inspectCapture: 'inspect:capture',
 
+  // screen mirror (invoke/handle + event streams)
+  mirrorStartH264: 'mirror:start-h264',
+  mirrorStartPoller: 'mirror:start-poller',
+  mirrorStop: 'mirror:stop',
+  mirrorInput: 'mirror:input',
+  mirrorScreenshot: 'mirror:screenshot',
+  mirrorRecordStart: 'mirror:record-start',
+  mirrorRecordStop: 'mirror:record-stop',
+  mirrorListDisplays: 'mirror:list-displays',
+  mirrorIsEmulator: 'mirror:is-emulator',
+  mirrorScrcpyAvailable: 'mirror:scrcpy-available',
+  mirrorLaunchScrcpy: 'mirror:launch-scrcpy',
+  // mirror events (main -> renderer)
+  mirrorFrame: 'mirror:frame',
+  mirrorH264: 'mirror:h264',
+  mirrorFailed: 'mirror:failed',
+  mirrorRecordDone: 'mirror:record-done',
+
   // device controls (invoke/handle)
   controlsRead: 'controls:read',
   controlsApply: 'controls:apply',
+
+  // mock GPS location (invoke/handle)
+  mocklocSetup: 'mockloc:setup',
+  mocklocSet: 'mockloc:set',
+  mocklocStop: 'mockloc:stop',
 
   // database inspector (invoke/handle)
   dbList: 'db:list',

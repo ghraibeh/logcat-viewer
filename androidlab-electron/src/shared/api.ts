@@ -25,6 +25,8 @@ import type {
   LogcatState,
   MappingLoadResult,
   MenuAction,
+  MirrorFailed,
+  MockResult,
   MonkeyDone,
   NotifsResult,
   OpenedLog,
@@ -38,6 +40,7 @@ import type {
 import type { FileKind } from '@core/files'
 import type { IntentSpec } from '@core/toolbox'
 import type { Pref } from '@core/prefs'
+import type { DisplayInfo } from '@core/mirror'
 
 export type Unsubscribe = () => void
 
@@ -57,6 +60,20 @@ export interface AndroidLabApi {
     onState(cb: (state: LogcatState) => void): Unsubscribe
     onError(cb: (message: string) => void): Unsubscribe
   }
+  shell: {
+    /** Open an interactive PTY sized to the terminal: the device's `adb shell`
+     *  ('device') or this Mac's login shell ('local'). serial is ignored for local. */
+    start(kind: 'device' | 'local', serial: string, cols: number, rows: number): Promise<boolean>
+    /** Forward raw keystrokes (incl. Ctrl-C, arrows) to the shell's pty. */
+    write(data: string): Promise<boolean>
+    /** Resize the remote pty when the terminal is resized. */
+    resize(cols: number, rows: number): Promise<boolean>
+    stop(): Promise<boolean>
+    running(): Promise<boolean>
+    /** Raw pty output (ANSI included) from the shell. */
+    onData(cb: (data: string) => void): Unsubscribe
+    onState(cb: (state: LogcatState) => void): Unsubscribe
+  }
   monitor: {
     start(serial: string, pkg: string | null, intervalMs: number): Promise<boolean>
     stop(): Promise<boolean>
@@ -66,9 +83,40 @@ export interface AndroidLabApi {
   inspect: {
     capture(serial: string): Promise<InspectResult>
   }
+  mirror: {
+    /** Start the low-latency H.264 feed (raw bytes arrive via onH264). */
+    startH264(serial: string): Promise<boolean>
+    /** Start the screencap PNG poller (fallback / secondary displays). */
+    startPoller(serial: string, displayId: string | null): Promise<boolean>
+    /** Stop the live feed (a running MP4 recording keeps going). */
+    stop(): Promise<boolean>
+    /** One-shot `input` (tap/swipe/keyevent/text), routed to `logicalId` if set. */
+    input(serial: string, logicalId: number | null, args: string[]): Promise<void>
+    /** Save a full-res PNG to ~/Downloads. */
+    screenshot(serial: string, displayId: string | null, logicalId: number | null): Promise<SaveResult>
+    recordStart(serial: string): Promise<boolean>
+    recordStop(): Promise<boolean>
+    listDisplays(serial: string): Promise<DisplayInfo[]>
+    /** True if the device is an emulator (slow screenrecord → default to preview). */
+    isEmulator(serial: string): Promise<boolean>
+    scrcpyAvailable(): Promise<boolean>
+    launchScrcpy(serial: string, logicalId: number | null): Promise<void>
+    onFrame(cb: (base64: string) => void): Unsubscribe
+    onH264(cb: (chunk: Uint8Array) => void): Unsubscribe
+    onFailed(cb: (failed: MirrorFailed) => void): Unsubscribe
+    onRecordDone(cb: (result: SaveResult) => void): Unsubscribe
+  }
   controls: {
     read(serial: string, pkg: string | null): Promise<{ ok: boolean; message: string; state: ControlsState | null }>
     apply(serial: string, argvs: string[][], label: string): Promise<{ ok: boolean; message: string }>
+  }
+  mockloc: {
+    /** Install the helper APK if absent + grant the mock-location app-op. */
+    setup(serial: string): Promise<MockResult>
+    /** Start/update the mock at lat,lng (acc metres, optional altitude). */
+    set(serial: string, lat: number, lng: number, acc?: number, alt?: number): Promise<MockResult>
+    /** Stop mocking + tear down the providers (device reacquires a real fix). */
+    stop(serial: string): Promise<MockResult>
   }
   db: {
     list(serial: string, pkg: string): Promise<DbListResult>

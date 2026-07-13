@@ -10,9 +10,12 @@ import { IPC } from '@shared/ipc'
 import type { PresetMap } from '@shared/types'
 import { findAdb, listDevices, listApps, resolvePids, forceCrash } from './services/adb'
 import { LogcatReader } from './services/logcat'
+import { ShellSession } from './services/shell'
 import { MonitorService } from './services/monitor'
 import { captureInspect } from './services/inspector'
+import { MirrorService } from './services/mirror'
 import { readControlsState, applyControls } from './services/controls'
+import { MockLocationService } from './services/mocklocation'
 import { DbService } from './services/db'
 import { FilesService } from './services/files'
 import { ToolboxService } from './services/toolbox'
@@ -38,6 +41,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   let prefs: PrefsService | null = null
   let crash: CrashService | null = null
   let appmgr: AppMgrService | null = null
+  let mockloc: MockLocationService | null = null
+  let mirrorSvc: MirrorService | null = null
+  let shellSvc: ShellSession | null = null
 
   const send = (channel: string, ...args: unknown[]): void => {
     const win = getWindow()
@@ -94,6 +100,45 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   ipcMain.handle(IPC.logcatRunning, () => reader?.running ?? false)
 
+  // --- interactive adb shell ----------------------------------------------
+  const ensureShell = (adb: string): ShellSession => {
+    if (!shellSvc) {
+      shellSvc = new ShellSession(adb, {
+        onData: (text) => send(IPC.shellData, text),
+        onState: (state) => send(IPC.shellState, state)
+      })
+    }
+    return shellSvc
+  }
+
+  ipcMain.handle(
+    IPC.shellStart,
+    (_e, kind: 'device' | 'local', serial: string, cols: number, rows: number) => {
+      const adb = findAdb()
+      // Local shell needs no adb/device; device shell needs both.
+      if (kind === 'device' && (!adb || !serial)) return false
+      ensureShell(adb ?? '').start(kind, serial, cols, rows)
+      return true
+    }
+  )
+
+  ipcMain.handle(IPC.shellWrite, (_e, data: string) => {
+    shellSvc?.write(data)
+    return true
+  })
+
+  ipcMain.handle(IPC.shellResize, (_e, cols: number, rows: number) => {
+    shellSvc?.resize(cols, rows)
+    return true
+  })
+
+  ipcMain.handle(IPC.shellStop, () => {
+    shellSvc?.stop()
+    return true
+  })
+
+  ipcMain.handle(IPC.shellRunning, () => shellSvc?.running ?? false)
+
   const ensureMonitor = (adb: string): MonitorService => {
     if (!monitor) {
       monitor = new MonitorService(adb, {
@@ -127,6 +172,82 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return await captureInspect(adb, serial)
   })
 
+  // --- screen mirror ------------------------------------------------------
+  const ensureMirror = (adb: string): MirrorService => {
+    if (!mirrorSvc) {
+      mirrorSvc = new MirrorService(adb, {
+        onFrame: (base64) => send(IPC.mirrorFrame, base64),
+        onH264: (chunk) => send(IPC.mirrorH264, chunk),
+        onFailed: (kind, message) => send(IPC.mirrorFailed, { kind, message })
+      })
+      mirrorSvc.onRecordDone((result) => send(IPC.mirrorRecordDone, result))
+    }
+    return mirrorSvc
+  }
+
+  ipcMain.handle(IPC.mirrorStartH264, (_e, serial: string) => {
+    const adb = findAdb()
+    if (!adb || !serial) return false
+    ensureMirror(adb).startH264(serial)
+    return true
+  })
+
+  ipcMain.handle(IPC.mirrorStartPoller, (_e, serial: string, displayId: string | null) => {
+    const adb = findAdb()
+    if (!adb || !serial) return false
+    ensureMirror(adb).startPoller(serial, displayId)
+    return true
+  })
+
+  ipcMain.handle(IPC.mirrorStop, () => {
+    mirrorSvc?.stopFeed()
+    return true
+  })
+
+  ipcMain.handle(IPC.mirrorInput, (_e, serial: string, logicalId: number | null, args: string[]) => {
+    const adb = findAdb()
+    if (adb && serial) ensureMirror(adb).input(serial, logicalId, args)
+  })
+
+  ipcMain.handle(
+    IPC.mirrorScreenshot,
+    async (_e, serial: string, displayId: string | null, logicalId: number | null) => {
+      const adb = findAdb()
+      if (!adb || !serial) return { ok: false, message: 'Mirror not connected', dir: '' }
+      return await ensureMirror(adb).screenshot(serial, displayId, logicalId)
+    }
+  )
+
+  ipcMain.handle(IPC.mirrorRecordStart, (_e, serial: string) => {
+    const adb = findAdb()
+    if (!adb || !serial) return false
+    return ensureMirror(adb).startRecord(serial)
+  })
+
+  ipcMain.handle(IPC.mirrorRecordStop, () => mirrorSvc?.stopRecord() ?? false)
+
+  ipcMain.handle(IPC.mirrorListDisplays, async (_e, serial: string) => {
+    const adb = findAdb()
+    if (!adb || !serial) return []
+    return await ensureMirror(adb).listDisplays(serial)
+  })
+
+  ipcMain.handle(IPC.mirrorIsEmulator, async (_e, serial: string) => {
+    const adb = findAdb()
+    if (!adb || !serial) return false
+    return await ensureMirror(adb).isEmulator(serial)
+  })
+
+  ipcMain.handle(IPC.mirrorScrcpyAvailable, () => {
+    const adb = findAdb()
+    return adb ? ensureMirror(adb).scrcpyPath() !== null : false
+  })
+
+  ipcMain.handle(IPC.mirrorLaunchScrcpy, (_e, serial: string, logicalId: number | null) => {
+    const adb = findAdb()
+    if (adb && serial) ensureMirror(adb).launchScrcpy(serial, logicalId)
+  })
+
   ipcMain.handle(IPC.controlsRead, async (_e, serial: string, pkg: string | null) => {
     const adb = findAdb()
     if (!adb || !serial) return { ok: false, message: 'no device selected', state: null }
@@ -141,6 +262,33 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       return await applyControls(adb, serial, argvs, label)
     }
   )
+
+  // --- mock GPS location --------------------------------------------------
+  const ensureMockloc = (adb: string): MockLocationService => {
+    if (!mockloc) mockloc = new MockLocationService(adb)
+    return mockloc
+  }
+
+  ipcMain.handle(IPC.mocklocSetup, async (_e, serial: string) => {
+    const adb = findAdb()
+    if (!adb || !serial) return { ok: false, message: 'No device selected' }
+    return await ensureMockloc(adb).setup(serial)
+  })
+
+  ipcMain.handle(
+    IPC.mocklocSet,
+    async (_e, serial: string, lat: number, lng: number, acc?: number, alt?: number) => {
+      const adb = findAdb()
+      if (!adb || !serial) return { ok: false, message: 'No device selected' }
+      return await ensureMockloc(adb).set(serial, lat, lng, acc ?? null, alt ?? null)
+    }
+  )
+
+  ipcMain.handle(IPC.mocklocStop, async (_e, serial: string) => {
+    const adb = findAdb()
+    if (!adb || !serial) return { ok: false, message: 'No device selected' }
+    return await ensureMockloc(adb).stop(serial)
+  })
 
   // --- database inspector -------------------------------------------------
   const ensureDb = (adb: string): DbService => {
@@ -600,9 +748,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   const win = getWindow()
   win?.on('closed', () => {
     reader?.stop()
+    shellSvc?.shutdown()
     monitor?.stop()
     db?.shutdown()
     files?.shutdown()
     toolbox?.shutdown()
+    mockloc?.shutdown()
+    mirrorSvc?.shutdown()
   })
 }

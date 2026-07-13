@@ -42,7 +42,10 @@ function createWindow(): void {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
-      spellcheck: false
+      spellcheck: false,
+      // Location tab hosts the MapLibre map in an isolated <webview> guest with
+      // its OWN CSP (set in map.html), so the strict main-window CSP stays intact.
+      webviewTag: true
     }
   })
 
@@ -286,8 +289,29 @@ function runSmoke(win: BrowserWindow): void {
           `document.querySelectorAll('.crash-view').length`
         )) as number
 
+        // Switch to Location; verify the mock-GPS chrome (coordinate controls)
+        // mounts. The map <webview> is NOT required to load — this only asserts
+        // the view + its two Lat/Lng inputs render with no HOST console errors.
+        await win.webContents.executeJavaScript(
+          `[...document.querySelectorAll('.tab')].find(t=>t.textContent.trim()==='Location')?.click()`
+        )
+        await new Promise((r) => setTimeout(r, 300))
+        const locReady = (await win.webContents.executeJavaScript(
+          `document.querySelectorAll('.loc-view .loc-bar').length && document.querySelectorAll('.loc-view .loc-input').length>=2 ? 1 : 0`
+        )) as number
+
+        // Switch to Shell; verify the xterm terminal mounts (no device in smoke,
+        // so it never spawns adb/node-pty — this only asserts the view renders).
+        await win.webContents.executeJavaScript(
+          `[...document.querySelectorAll('.tab')].find(t=>t.textContent.trim()==='Shell')?.click()`
+        )
+        await new Promise((r) => setTimeout(r, 300))
+        const shellReady = (await win.webContents.executeJavaScript(
+          `document.querySelectorAll('.shell-view .shell-term .xterm').length`
+        )) as number
+
         console.log(
-          `SMOKE rows=${rows} first=${JSON.stringify(first)} monCpu=${JSON.stringify(monCpu)} sparks=${hasSpark} insp=${inspReady} stable=${inspStable} ctrl=${ctrlSwitches} db=${dbReady} files=${filesReady} toolbox=${toolboxReady} apps=${appsReady} prefs=${prefsReady} crash=${crashReady} errors=${errors.length}`
+          `SMOKE rows=${rows} first=${JSON.stringify(first)} monCpu=${JSON.stringify(monCpu)} sparks=${hasSpark} insp=${inspReady} stable=${inspStable} ctrl=${ctrlSwitches} db=${dbReady} files=${filesReady} toolbox=${toolboxReady} apps=${appsReady} prefs=${prefsReady} crash=${crashReady} location=${locReady} shell=${shellReady} errors=${errors.length}`
         )
         if (errors.length) console.log('SMOKE ERRORS:\n' + errors.join('\n'))
         const ok =
@@ -304,6 +328,7 @@ function runSmoke(win: BrowserWindow): void {
           appsReady >= 1 &&
           prefsReady >= 1 &&
           crashReady >= 1 &&
+          shellReady >= 1 &&
           errors.length === 0
         console.log(ok ? 'SMOKE PASS' : 'SMOKE FAIL')
         app.exit(ok ? 0 : 1)

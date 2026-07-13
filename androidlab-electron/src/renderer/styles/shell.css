@@ -1,0 +1,87 @@
+/* Shell tab — a real xterm.js terminal over a PTY-backed adb shell. Reuses the
+ * shared theme custom props; the bar buttons reuse the .toggle look. */
+.shell-view {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.shell-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.shell-bar .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Device | PC segmented toggle. */
+.shell-seg {
+  display: inline-flex;
+  background: var(--well);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.shell-seg button {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.shell-seg button:hover {
+  color: var(--text);
+}
+.shell-seg button.on {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.shell-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex: 0 0 auto;
+}
+.shell-dot.on {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+}
+.shell-target {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Terminal host — xterm fills it; give it the sunken well look. */
+.shell-term {
+  flex: 1;
+  min-height: 0;
+  margin: 10px 12px 12px;
+  padding: 6px 8px;
+  background: #121318;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.shell-term .xterm {
+  height: 100%;
+}
+.shell-term .xterm .xterm-viewport {
+  background: transparent !important;
+}
