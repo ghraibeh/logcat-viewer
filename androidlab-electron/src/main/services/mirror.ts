@@ -9,6 +9,7 @@
  * at a time; MP4 recording needs the device's sole display encoder, so the live
  * feed drops to the poller while recording.
  */
+import { app } from 'electron'
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
 import { existsSync, writeFileSync, statSync } from 'node:fs'
 import { createServer, type Server, type Socket } from 'node:net'
@@ -40,6 +41,18 @@ import {
   type DisplayInfo
 } from '@core/mirror'
 import type { SaveResult } from '@shared/types'
+
+// Version of the bundled `scrcpy-server` jar (resources/scrcpy-server). The server
+// refuses to start unless launched with its exact version, and our control-message
+// wire format is coded for it — so we pin it rather than trust the host's scrcpy.
+const SCRCPY_BUNDLED_VERSION = '4.0'
+
+/** A resolved scrcpy server jar + the version to launch it with (null = derive from
+ *  a system `scrcpy --version`, used only when falling back off the bundled jar). */
+interface ScrcpyServer {
+  path: string
+  version: string | null
+}
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47]
 
@@ -107,9 +120,9 @@ export class MirrorService {
     this.stopFeed()
     this.serial = serial
     const token = ++this.runToken
-    const jar = scrcpyServerPath()
-    if (jar) void this.scrcpyLoop(token, jar)
-    else void this.h264Loop(token)
+    const server = resolveScrcpyServer()
+    if (server) void this.scrcpyLoop(token, server)
+    else void this.h264Loop(token) // no jar at all → screenrecord fallback
   }
 
   startPoller(serial: string, displayId: string | null): void {
@@ -205,7 +218,7 @@ export class MirrorService {
   }
 
   // --- scrcpy feed --------------------------------------------------------
-  private async scrcpyLoop(token: number, jar: string): Promise<void> {
+  private async scrcpyLoop(token: number, server: ScrcpyServer): Promise<void> {
     // Free the sole encoder (a stale screenrecord or old server) before starting,
     // then paint one screencap so the canvas isn't blank while the server boots.
     await run(this.adb, this.serial, pkillScreenrecordArgs(this.serial).slice(2), 6000)
@@ -214,8 +227,8 @@ export class MirrorService {
     await this.prime(token)
     if (token !== this.runToken) return
 
-    const version = await this.scrcpyVersion()
-    const push = await run(this.adb, null, scrcpyPushArgs(this.serial, jar), 30000)
+    const version = server.version ?? (await this.scrcpyVersion())
+    const push = await run(this.adb, null, scrcpyPushArgs(this.serial, server.path), 30000)
     if (token !== this.runToken) return
     if (push.code !== 0) {
       this.cb.onFailed('h264', `could not push scrcpy-server: ${push.stderr.trim() || 'push failed'}`)
@@ -229,7 +242,7 @@ export class MirrorService {
     // reverse tunnel the server dials us only once it is fully up, and in a fixed
     // order (video socket first, then control) — no connect race, no poller fallback,
     // and a deterministic way to tell the two sockets apart.
-    const server = createServer((sock) => {
+    const listener = createServer((sock) => {
       sock.on('error', () => {
         /* ignore per-socket errors */
       })
@@ -246,11 +259,11 @@ export class MirrorService {
         sock.destroy()
       }
     })
-    this.scrcpyServer = server
+    this.scrcpyServer = listener
     const port = await new Promise<number>((resolve) => {
-      server.once('error', () => resolve(0))
-      server.listen(0, '127.0.0.1', () => {
-        const addr = server.address()
+      listener.once('error', () => resolve(0))
+      listener.listen(0, '127.0.0.1', () => {
+        const addr = listener.address()
         resolve(typeof addr === 'object' && addr ? addr.port : 0)
       })
     })
@@ -486,7 +499,8 @@ export class MirrorService {
 
   // --- scrcpy -------------------------------------------------------------
   scrcpyPath(): string | null {
-    return whichIn('scrcpy')
+    // Optional: only the "open full-quality window" hand-off uses the native binary.
+    return whichIn(process.platform === 'win32' ? 'scrcpy.exe' : 'scrcpy')
   }
 
   launchScrcpy(serial: string, logicalId: number | null): void {
@@ -534,10 +548,28 @@ function whichIn(bin: string): string | null {
   return null
 }
 
-/** Locate scrcpy's server jar (ships alongside the binary under share/scrcpy). */
-function scrcpyServerPath(): string | null {
+/** The jar we ship in the app (resources/scrcpy-server). It runs on the device, so
+ *  the one file is platform-independent; bundling it means no host scrcpy install.
+ *  Packaged → process.resourcesPath; dev → the project's resources/ dir. */
+function bundledServerPath(): string | null {
+  const cands = app.isPackaged
+    ? [join(process.resourcesPath, 'scrcpy-server')]
+    : [join(app.getAppPath(), 'resources', 'scrcpy-server'), join(process.cwd(), 'resources', 'scrcpy-server')]
+  for (const c of cands) if (existsSync(c)) return c
+  return null
+}
+
+/**
+ * Resolve the scrcpy server jar to launch + the version to launch it with. Order:
+ * an explicit SCRCPY_SERVER_PATH override, then our bundled jar (the normal path),
+ * then a system scrcpy install as a last resort. Only the bundled jar has a known
+ * version; the others derive it from `scrcpy --version`.
+ */
+function resolveScrcpyServer(): ScrcpyServer | null {
   const env = process.env.SCRCPY_SERVER_PATH
-  if (env && existsSync(env)) return env
+  if (env && existsSync(env)) return { path: env, version: null }
+  const bundled = bundledServerPath()
+  if (bundled) return { path: bundled, version: SCRCPY_BUNDLED_VERSION }
   const cands: string[] = []
   const bin = whichIn('scrcpy')
   if (bin) cands.push(join(dirname(bin), '..', 'share', 'scrcpy', 'scrcpy-server'))
@@ -546,7 +578,7 @@ function scrcpyServerPath(): string | null {
     '/usr/local/share/scrcpy/scrcpy-server',
     '/usr/share/scrcpy/scrcpy-server'
   )
-  for (const c of cands) if (existsSync(c)) return c
+  for (const c of cands) if (existsSync(c)) return { path: c, version: null }
   return null
 }
 

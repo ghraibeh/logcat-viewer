@@ -20,6 +20,11 @@ asarUnpack:
 extraResources:
   - from: resources/mocklocation.apk
     to: mocklocation.apk
+  # scrcpy's device server (Apache-2.0). It runs ON the device via app_process, so
+  # the one jar is platform-independent — bundling it makes the embedded screen
+  # mirror (video + control) self-contained with no scrcpy install on the host.
+  - from: resources/scrcpy-server
+    to: scrcpy-server
 mac:
   category: public.app-category.developer-tools
   target:
