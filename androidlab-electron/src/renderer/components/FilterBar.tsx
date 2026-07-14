@@ -5,6 +5,7 @@
  */
 import type { RefObject } from 'react'
 import { LEVEL_OPTIONS, type Controller, type FilterFields } from '../state/useAppController'
+import { Icon } from './Icon'
 
 const OR_HINT = 'Use | for OR — e.g. error|success matches either. Or enable .* for regex.'
 
@@ -51,16 +52,39 @@ export function FilterBar({
           disabled={!c.serial}
           onClick={() => void c.toggleStream()}
         >
-          {c.streaming ? '■  Stop' : '▶  Start'}
+          {c.streaming ? (
+            <>
+              <Icon name="stop" size={15} />
+              Stop
+            </>
+          ) : (
+            <>
+              <Icon name="play" size={15} />
+              Start
+            </>
+          )}
         </button>
         <button
           className={`pause${c.paused ? ' checked' : ''}`}
           disabled={!c.streaming}
           onClick={() => c.setPaused(!c.paused)}
         >
-          {c.paused ? '▶  Resume' : '⏸  Pause'}
+          {c.paused ? (
+            <>
+              <Icon name="play" size={15} />
+              Resume
+            </>
+          ) : (
+            <>
+              <Icon name="pause" size={15} />
+              Pause
+            </>
+          )}
         </button>
-        <button onClick={c.clearLog}>✕  Clear</button>
+        <button onClick={c.clearLog}>
+          <Icon name="close" size={15} />
+          Clear
+        </button>
 
         <div className="filter-sep" />
 
@@ -110,14 +134,14 @@ export function FilterBar({
             ))}
         </select>
         <button className="toggle" title="Save the current filters as a named preset" onClick={onSavePreset}>
-          ＋
+          <Icon name="plus" size={16} />
         </button>
         <button
           className="toggle"
           title="Delete the selected preset"
           onClick={() => void c.deletePreset(c.currentPreset)}
         >
-          −
+          <Icon name="minus" size={16} />
         </button>
 
         <button

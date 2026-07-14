@@ -24,6 +24,7 @@ import {
 import type { FileEntry, Place } from '@core/files'
 import type { Controller } from '../state/useAppController'
 import { PromptDialog } from './dialogs'
+import { Icon } from './Icon'
 
 type SortKey = 'name' | 'date' | 'type' | 'size'
 type ViewMode = 'details' | 'icons'
@@ -611,25 +612,31 @@ export function FilesView({ c }: { c: Controller }) {
       {/* command bar */}
       <div className="files-cmdbar" onClick={(e) => e.stopPropagation()}>
         <button className="files-cmd" onClick={openNewFolder} disabled={!c.serial}>
-          🗀 New folder
+          <Icon name="folderPlus" size={15} />
+          New folder
         </button>
         <button className="files-cmd" onClick={() => void upload()} disabled={!c.serial} title="Push file(s) from this Mac into the current folder">
-          ↑ Upload
+          <Icon name="upload" size={15} />
+          Upload
         </button>
         <button className="files-cmd" onClick={downloadSelected} disabled={selCount === 0} title="Pull the selected item(s) to this Mac">
-          ↓ Download
+          <Icon name="download" size={15} />
+          Download
         </button>
         <span className="files-cmd-sep" />
         <button className="files-cmd" onClick={() => { const s = selectedEntries(); if (s.length === 1) openRename(s[0]) }} disabled={selCount !== 1}>
-          ✎ Rename
+          <Icon name="edit" size={15} />
+          Rename
         </button>
         <button className="files-cmd" onClick={() => { const s = selectedEntries(); if (s.length) setConfirmDel(s) }} disabled={selCount === 0}>
-          🗑 Delete
+          <Icon name="trash" size={15} />
+          Delete
         </button>
         <span className="grow" />
         <div className="files-dropdown">
           <button className="files-cmd" onClick={(e) => { e.stopPropagation(); setMenu(null); setOpenMenu(openMenu === 'sort' ? null : 'sort') }}>
-            Sort ▾
+            Sort
+            <Icon name="chevronDown" size={13} />
           </button>
           {openMenu === 'sort' ? (
             <div className="files-menu" onClick={(e) => e.stopPropagation()}>
@@ -658,7 +665,8 @@ export function FilesView({ c }: { c: Controller }) {
         </div>
         <div className="files-dropdown">
           <button className="files-cmd" onClick={(e) => { e.stopPropagation(); setMenu(null); setOpenMenu(openMenu === 'view' ? null : 'view') }}>
-            View ▾
+            View
+            <Icon name="chevronDown" size={13} />
           </button>
           {openMenu === 'view' ? (
             <div className="files-menu" onClick={(e) => e.stopPropagation()}>
@@ -680,16 +688,16 @@ export function FilesView({ c }: { c: Controller }) {
       {/* navigation / address bar */}
       <div className="files-navbar" onClick={(e) => e.stopPropagation()}>
         <button className="files-navbtn" onClick={goBack} disabled={!canBack} title="Back">
-          ‹
+          <Icon name="chevronLeft" size={16} />
         </button>
         <button className="files-navbtn" onClick={goForward} disabled={!canFwd} title="Forward">
-          ›
+          <Icon name="chevronRight" size={16} />
         </button>
         <button className="files-navbtn" onClick={() => navigate(parentPath(path))} disabled={!canUp} title="Up">
-          ↑
+          <Icon name="arrowUp" size={16} />
         </button>
         <button className="files-navbtn" onClick={refresh} title="Refresh">
-          ⟳
+          <Icon name="refresh" size={16} />
         </button>
         <div className="files-address" onClick={() => { if (!editing) beginEditPath() }}>
           {editing ? (

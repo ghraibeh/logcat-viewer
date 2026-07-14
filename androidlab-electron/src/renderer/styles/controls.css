@@ -181,10 +181,33 @@
   cursor: default;
 }
 
+/* Destructive action button (power off) in the SYSTEM card */
+.ctrl-card button.danger {
+  border-color: var(--red);
+  color: var(--red);
+}
+.ctrl-card button.danger:hover:not(:disabled) {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
+.ctrl-note code {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 .ctrl-range {
   width: 120px;
   accent-color: var(--accent);
 }
 .ctrl-input {
   width: 84px;
+}
+.ctrl-input.wide {
+  width: 140px;
 }

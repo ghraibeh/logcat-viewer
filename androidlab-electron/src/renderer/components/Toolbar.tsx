@@ -4,6 +4,8 @@
  * Stream controls (Start/Pause/Clear) live in the filter bar, exactly as in ui.py.
  */
 import type { Controller } from '../state/useAppController'
+import { Icon } from './Icon'
+import type { ThemeMode } from '../theme'
 
 const PHASE3 = 'Available in a later migration phase'
 
@@ -12,13 +14,17 @@ export function Toolbar({
   onInstall,
   onAbout,
   onMirror,
-  mirrorOpen
+  mirrorOpen,
+  theme,
+  onToggleTheme
 }: {
   c: Controller
   onInstall: () => void
   onAbout: () => void
   onMirror: () => void
   mirrorOpen: boolean
+  theme: ThemeMode
+  onToggleTheme: () => void
 }) {
   const noAdb = c.adbReady && !c.adbPath
   const hasDevice = !!c.serial
@@ -49,10 +55,10 @@ export function Toolbar({
           </select>
         )}
         <button className="toggle" title="Refresh device list" onClick={() => void c.refreshDevices()}>
-          ⟳
+          <Icon name="refresh" size={16} />
         </button>
         <button className="toggle" title={`Connect over Wi-Fi — ${PHASE3}`} disabled>
-          📶
+          <Icon name="wifi" size={16} />
         </button>
         <button
           title="Install APK(s) to the selected device"
@@ -83,7 +89,7 @@ export function Toolbar({
           disabled={!hasDevice}
           onClick={() => void c.reloadApps()}
         >
-          ⟳
+          <Icon name="refresh" size={16} />
         </button>
         <button title={`Pull the selected app's APK(s) — ${PHASE3}`} disabled>
           Pull
@@ -98,8 +104,15 @@ export function Toolbar({
         >
           Mirror
         </button>
-        <button className="toggle" title="About AndroidLab" onClick={onAbout}>
-          ⓘ
+        <button
+          className="toggle"
+          title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          onClick={onToggleTheme}
+        >
+          <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
+        </button>
+        <button className="toggle" title="About AndroidLabKit" onClick={onAbout}>
+          <Icon name="info" size={16} />
         </button>
       </div>
     </div>

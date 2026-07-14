@@ -12,6 +12,9 @@
 export const KEY_BACK = 4
 export const KEY_HOME = 3
 export const KEY_RECENTS = 187
+export const KEY_VOLUME_UP = 24
+export const KEY_VOLUME_DOWN = 25
+export const KEY_POWER = 26
 
 // H.264 stream bitrate (device-side encoder). 8 Mbit is crisp at 1080p while
 // staying small enough to transfer with little latency.
@@ -344,4 +347,156 @@ function concatAll(parts: Uint8Array[]): Uint8Array {
     off += p.length
   }
   return out
+}
+
+// --- scrcpy server protocol ---------------------------------------------------
+//
+// The embedded mirror's low-latency source. Unlike `screenrecord` (which starves
+// the stream when the screen is static — max ~1.8s gaps, measured on an A55), scrcpy
+// configures the encoder with KEY_REPEAT_PREVIOUS_FRAME_AFTER, so the stream stays
+// warm even on a still screen (~247ms max gap, measured) — that's why scrcpy stays
+// responsive. We push its server jar and run it video-only (taps still go via
+// `adb shell input`) with `raw_stream=true`, which disables ALL of scrcpy's own
+// framing (dummy byte / device+codec+frame meta) and emits a plain Annex-B H.264
+// elementary stream — byte-for-byte like `screenrecord --output-format=h264`, so the
+// renderer reuses the same AnnexBDemuxer. Only the pure command builders live here.
+
+/** On-device path scrcpy's server is pushed to (matches scrcpy's own default). */
+export const SCRCPY_DEVICE_SERVER_PATH = '/data/local/tmp/scrcpy-server.jar'
+
+/** `scrcpy --version` → the version token the server jar must be launched with
+ *  (the server refuses to start unless it matches the jar's own version). */
+export function parseScrcpyVersion(text: string): string | null {
+  const m = /scrcpy\s+([0-9][0-9.]*[0-9]|[0-9])/i.exec(text || '')
+  return m ? m[1] : null
+}
+
+export function scrcpyPushArgs(serial: string, localJar: string): string[] {
+  return ['-s', serial, 'push', localJar, SCRCPY_DEVICE_SERVER_PATH]
+}
+
+/** Kill a straggler server (holds the sole encoder, like screenrecord). */
+export function scrcpyKillArgs(serial: string): string[] {
+  return ['-s', serial, 'shell', 'pkill', '-f', 'com.genymobile.scrcpy']
+}
+
+/**
+ * Launch args for scrcpy's device server (v2.0+ `key=value` form). Video + control
+ * (no audio); `raw_stream=true` gives a bare Annex-B video stream while the control
+ * socket carries injected touch / key / text.
+ *
+ * `max_fps` is the critical knob: uncapped, scrcpy streams at the panel's native
+ * refresh (~97fps measured on a 120Hz A55), which floods the IPC → JS-demux →
+ * WebCodecs → canvas pipeline past what a 60Hz display can present — frames pile up
+ * as latency and eventually trip a decode-queue reset that stalls on scrcpy's sparse
+ * keyframe. Capping at the display rate keeps the pipeline real-time. Codec/bitrate
+ * stay at scrcpy's defaults (h264, 8 Mbps) — a bad/renamed option name aborts the
+ * whole server, so we only send options verified on scrcpy 4.0.
+ */
+export const SCRCPY_MAX_FPS = 60
+
+/** `adb reverse` maps the device's abstract socket back to a host port we listen on;
+ *  the server then connects to us (video socket first, then control) only once it is
+ *  fully up — deterministic ordering with no connect race (unlike tunnel_forward). */
+export function scrcpyReverseArgs(serial: string, scid: string, port: number): string[] {
+  return ['-s', serial, 'reverse', `localabstract:scrcpy_${scid}`, `tcp:${port}`]
+}
+
+export function scrcpyReverseRemoveArgs(serial: string, scid: string): string[] {
+  return ['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${scid}`]
+}
+
+export function scrcpyServerArgs(serial: string, scid: string, version: string): string[] {
+  const kv: Record<string, string> = {
+    scid,
+    log_level: 'error',
+    video: 'true',
+    audio: 'false',
+    control: 'true', // second socket for injecting touch / key / text
+    max_fps: String(SCRCPY_MAX_FPS),
+    raw_stream: 'true', // bare Annex-B video (reverse tunnel = default, no tunnel_forward)
+    cleanup: 'true'
+  }
+  return [
+    '-s',
+    serial,
+    'shell',
+    `CLASSPATH=${SCRCPY_DEVICE_SERVER_PATH}`,
+    'app_process',
+    '/',
+    'com.genymobile.scrcpy.Server',
+    version,
+    ...Object.entries(kv).map(([k, v]) => `${k}=${v}`)
+  ]
+}
+
+// --- scrcpy control messages (client → device over the control socket) --------
+//
+// Binary wire format for scrcpy's INJECT_* messages, verified against scrcpy 4.0
+// (keycode 14 bytes, touch 32 bytes, big-endian). Injecting touch DOWN/MOVE/UP is
+// what enables interactive dragging, and keycode/text give real keyboard input —
+// neither is possible with one-shot `adb shell input`.
+
+export const SC_MSG_KEYCODE = 0
+export const SC_MSG_TEXT = 1
+export const SC_MSG_TOUCH = 2
+
+/** Android MotionEvent / KeyEvent actions (also used as our touch phase). */
+export const SC_ACTION_DOWN = 0
+export const SC_ACTION_UP = 1
+export const SC_ACTION_MOVE = 2
+
+/** Default pointer id for a single touch point (scrcpy maps arbitrary ids to slots,
+ *  so a two-finger pinch is just two touches with distinct ids, e.g. 0 and 1). */
+export const SC_POINTER_ID = -1
+
+/** INJECT_KEYCODE: type, action, keycode, repeat, metastate. */
+export function scrcpyKeycodeMsg(action: number, keycode: number, metastate = 0, repeat = 0): Uint8Array {
+  const b = new Uint8Array(14)
+  const dv = new DataView(b.buffer)
+  dv.setUint8(0, SC_MSG_KEYCODE)
+  dv.setUint8(1, action)
+  dv.setInt32(2, keycode) // big-endian (DataView default)
+  dv.setInt32(6, repeat)
+  dv.setInt32(10, metastate)
+  return b
+}
+
+/** INJECT_TEXT: type, length (u32), UTF-8 bytes. */
+export function scrcpyTextMsg(text: string): Uint8Array {
+  const utf8 = new TextEncoder().encode(text)
+  const b = new Uint8Array(5 + utf8.length)
+  const dv = new DataView(b.buffer)
+  dv.setUint8(0, SC_MSG_TEXT)
+  dv.setUint32(1, utf8.length)
+  b.set(utf8, 5)
+  return b
+}
+
+/**
+ * INJECT_TOUCH_EVENT: type, action, pointerId (i64), x (i32), y (i32),
+ * screenW (u16), screenH (u16), pressure (u16 fixed-point, 0xffff = 1.0),
+ * actionButton (i32), buttons (i32). x/y are device pixels in the (w,h) space.
+ */
+export function scrcpyTouchMsg(
+  action: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  pointerId: number = SC_POINTER_ID
+): Uint8Array {
+  const b = new Uint8Array(32)
+  const dv = new DataView(b.buffer)
+  dv.setUint8(0, SC_MSG_TOUCH)
+  dv.setUint8(1, action)
+  dv.setBigInt64(2, BigInt(pointerId))
+  dv.setInt32(10, Math.round(x))
+  dv.setInt32(14, Math.round(y))
+  dv.setUint16(18, w)
+  dv.setUint16(20, h)
+  dv.setUint16(22, action === SC_ACTION_UP ? 0 : 0xffff) // pressure
+  dv.setInt32(24, 0) // action button
+  dv.setInt32(28, action === SC_ACTION_UP ? 0 : 1) // buttons: primary while pressed
+  return b
 }

@@ -4,6 +4,7 @@
  * custom properties; the QSS object-name selectors map to component classes.
  */
 :root {
+  color-scheme: dark;
   --bg: #16171c;
   --surface: #1c1e24;
   --surface-2: #252831;
@@ -30,6 +31,38 @@
 
   --font-ui: -apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'SF Mono', Menlo, monospace;
+}
+
+/* ---- Light theme -------------------------------------------------------- *
+ * Same token structure as the dark default (styles resolve through var()), so
+ * flipping [data-theme] on <html> re-themes the whole app. Only color tokens
+ * change; fonts + the mirror's dark video surface stay put. The JS PALETTE +
+ * log colors are refreshed from these values on switch (see theme.ts). */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #eceef2;
+  --surface: #ffffff;
+  --surface-2: #f1f3f6;
+  --surface-3: #e4e7ec;
+  --border: #d8dce3;
+  --border-2: #c2c8d2;
+  --text: #1b1d23;
+  --text-dim: #697080;
+  --accent: #5560ea;
+  --accent-h: #3f49cf;
+  --green: #12a150;
+  --green-h: #0e8a44;
+  --red: #e04a44;
+  --amber: #9a6800;
+
+  --well: #f6f7f9;
+  --select: rgba(85, 96, 234, 0.16);
+  --select-soft: rgba(85, 96, 234, 0.1);
+  --grid: #e7e9ee;
+
+  --grad-accent: linear-gradient(180deg, #6b74f5 0%, #5560ea 100%);
+  --grad-accent-h: linear-gradient(180deg, #7a83ff 0%, #626df5 100%);
+  --grad-red: linear-gradient(180deg, #ef5d57 0%, #e0453d 100%);
 }
 
 * {
@@ -151,6 +184,10 @@ select:focus {
 
 /* ---- Buttons — quiet chips; primary actions carry the gradient ---------- */
 button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -160,6 +197,11 @@ button {
   font-size: 13px;
   cursor: default;
   white-space: nowrap;
+}
+/* Line-icon inside any button inherits the button's text color + hover/active
+   states (see components/Icon.tsx). Keeps the whole app's icons one system. */
+button svg {
+  flex: 0 0 auto;
 }
 button:hover:not(:disabled) {
   background: var(--surface-3);

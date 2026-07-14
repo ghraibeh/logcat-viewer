@@ -8,11 +8,11 @@ import { registerIpc } from './ipc'
 import { buildAppMenu } from './menu'
 import { IPC } from '@shared/ipc'
 
-// Match the Python app's app-support dir (~/Library/Application Support/AndroidLab)
-// so filter_presets.json is shared/compatible.
-app.setName('AndroidLab')
+// app.name drives the app-support dir (~/Library/Application Support/AndroidLabKit)
+// and the menu-bar / dock name on macOS.
+app.setName('AndroidLabKit')
 app.setAboutPanelOptions({
-  applicationName: 'AndroidLab',
+  applicationName: 'AndroidLabKit',
   applicationVersion: app.getVersion(),
   copyright: 'Copyright © 2026 Mahmoud Alghraibeh'
 })
@@ -34,7 +34,7 @@ function createWindow(): void {
     minHeight: 560,
     show: false,
     backgroundColor: '#16171c',
-    title: 'AndroidLab',
+    title: 'AndroidLabKit',
     icon: iconPath,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
@@ -309,9 +309,50 @@ function runSmoke(win: BrowserWindow): void {
         const shellReady = (await win.webContents.executeJavaScript(
           `document.querySelectorAll('.shell-view .shell-term .xterm').length`
         )) as number
+        // Open a second shell session and verify both panes/tabs mount (the
+        // multi-tab feature): each pane keeps its own xterm + pty.
+        await win.webContents.executeJavaScript(`document.querySelector('.shell-tab-add')?.click()`)
+        await new Promise((r) => setTimeout(r, 300))
+        const shellPanes = (await win.webContents.executeJavaScript(
+          `document.querySelectorAll('.shell-view .shell-panes .shell-pane .xterm').length`
+        )) as number
+        const shellTabs = (await win.webContents.executeJavaScript(
+          `document.querySelectorAll('.shell-view .shell-tabs .shell-tab').length`
+        )) as number
+        // Rename the first tab: double-click → type → Enter, then verify the label.
+        await win.webContents.executeJavaScript(
+          `document.querySelector('.shell-view .shell-tab')?.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))`
+        )
+        await new Promise((r) => setTimeout(r, 150))
+        await win.webContents.executeJavaScript(`
+          (() => {
+            const inp = document.querySelector('.shell-view .shell-tab .rename');
+            if (!inp) return;
+            const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+            set.call(inp, 'Renamed');
+            inp.dispatchEvent(new Event('input',{bubbles:true}));
+            inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+          })()
+        `)
+        await new Promise((r) => setTimeout(r, 150))
+        const shellRenamed = (await win.webContents.executeJavaScript(
+          `(document.querySelector('.shell-view .shell-tab .label')||{}).textContent === 'Renamed' ? 1 : 0`
+        )) as number
+
+        // Switch to Network HTTP; verify the intercept chrome (filter bar +
+        // flow table + Enable button) mounts. No device in smoke, so the proxy
+        // never binds a port / generates a CA / hits the network — this only
+        // asserts the view renders with no HOST renderer errors.
+        await win.webContents.executeJavaScript(
+          `[...document.querySelectorAll('.tab')].find(t=>t.textContent.trim()==='Network HTTP')?.click()`
+        )
+        await new Promise((r) => setTimeout(r, 300))
+        const networkReady = (await win.webContents.executeJavaScript(
+          `document.querySelectorAll('.net-view .net-filter').length && document.querySelectorAll('.net-view .net-table').length && document.querySelectorAll('.net-view .net-enable').length ? 1 : 0`
+        )) as number
 
         console.log(
-          `SMOKE rows=${rows} first=${JSON.stringify(first)} monCpu=${JSON.stringify(monCpu)} sparks=${hasSpark} insp=${inspReady} stable=${inspStable} ctrl=${ctrlSwitches} db=${dbReady} files=${filesReady} toolbox=${toolboxReady} apps=${appsReady} prefs=${prefsReady} crash=${crashReady} location=${locReady} shell=${shellReady} errors=${errors.length}`
+          `SMOKE rows=${rows} first=${JSON.stringify(first)} monCpu=${JSON.stringify(monCpu)} sparks=${hasSpark} insp=${inspReady} stable=${inspStable} ctrl=${ctrlSwitches} db=${dbReady} files=${filesReady} toolbox=${toolboxReady} apps=${appsReady} prefs=${prefsReady} crash=${crashReady} location=${locReady} shell=${shellReady} shellPanes=${shellPanes} shellTabs=${shellTabs} shellRenamed=${shellRenamed} network=${networkReady} errors=${errors.length}`
         )
         if (errors.length) console.log('SMOKE ERRORS:\n' + errors.join('\n'))
         const ok =
@@ -329,6 +370,10 @@ function runSmoke(win: BrowserWindow): void {
           prefsReady >= 1 &&
           crashReady >= 1 &&
           shellReady >= 1 &&
+          shellPanes >= 2 &&
+          shellTabs >= 2 &&
+          shellRenamed === 1 &&
+          networkReady >= 1 &&
           errors.length === 0
         console.log(ok ? 'SMOKE PASS' : 'SMOKE FAIL')
         app.exit(ok ? 0 : 1)

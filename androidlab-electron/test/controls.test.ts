@@ -29,6 +29,7 @@ const SECTIONS: Record<string, string> = {
   bt: '1',
   lowpower: '0',
   datasaver: 'Restrict background status: enabled',
+  proxy: '192.168.1.5:8888',
   overlay: '1280x720/213',
   finish: '1',
   stay: '7',
@@ -84,6 +85,7 @@ describe('interpretState', () => {
     expect(st.bluetooth).toBe(true)
     expect(st.batterySaver).toBe(false)
     expect(st.dataSaver).toBe(true)
+    expect(st.proxy).toBe('192.168.1.5:8888')
     expect(st.overlay).toBe('1280x720/213')
     expect(st.finish).toBe(true)
     expect(st.stay).toBe(true)
@@ -98,6 +100,30 @@ describe('interpretState', () => {
   it('reports auto-rotate as -1', () => {
     const auto = C.interpretState(C.parseState(buildRaw({ ...SECTIONS, rot: '1\n0' })))
     expect(auto.rotation).toBe(-1)
+  })
+  it('treats null / :0 / empty proxy as unset', () => {
+    for (const raw of ['null', ':0', '']) {
+      const s = C.interpretState(C.parseState(buildRaw({ ...SECTIONS, proxy: raw })))
+      expect(s.proxy).toBe('')
+    }
+  })
+})
+
+describe('http proxy', () => {
+  it('validates host:port', () => {
+    expect(C.isValidProxy('192.168.1.5:8888')).toBe(true)
+    expect(C.isValidProxy('proxy.local:80')).toBe(true)
+    expect(C.isValidProxy('  10.0.0.1:1 ')).toBe(true)
+    expect(C.isValidProxy('192.168.1.5')).toBe(false)
+    expect(C.isValidProxy('nope')).toBe(false)
+    expect(C.isValidProxy('host:port')).toBe(false)
+  })
+  it('builds set/clear argvs (clear disables with :0, never settings delete)', () => {
+    expect(C.setProxy('192.168.1.5:8888')).toEqual([
+      ['shell', 'settings', 'put', 'global', 'http_proxy', '192.168.1.5:8888']
+    ])
+    expect(C.setProxy('  10.0.0.1:80 ')[0][5]).toBe('10.0.0.1:80')
+    expect(C.clearProxy()).toEqual([['shell', 'settings', 'put', 'global', 'http_proxy', ':0']])
   })
 })
 
@@ -135,5 +161,54 @@ describe('setter builders', () => {
       ['shell', 'settings', 'put', 'system', 'accelerometer_rotation', '1']
     ])
     expect(C.setRotation(2)).toHaveLength(2)
+  })
+})
+
+describe('power actions', () => {
+  it('build the expected adb argvs (reboots are adb-level, power-off is shell)', () => {
+    expect(C.reboot()).toEqual([['reboot']])
+    expect(C.rebootRecovery()).toEqual([['reboot', 'recovery']])
+    expect(C.rebootBootloader()).toEqual([['reboot', 'bootloader']])
+    expect(C.rebootFastboot()).toEqual([['reboot', 'fastboot']])
+    expect(C.powerOff()).toEqual([['shell', 'reboot', '-p']])
+  })
+  it('exposes a matching POWER_ACTIONS menu with power-off flagged destructive', () => {
+    const keys = C.POWER_ACTIONS.map((a) => a.key)
+    expect(keys).toEqual(['reboot', 'recovery', 'bootloader', 'fastbootd', 'poweroff'])
+    expect(C.POWER_ACTIONS.find((a) => a.key === 'bootloader')?.argvs).toEqual([['reboot', 'bootloader']])
+    expect(C.POWER_ACTIONS.find((a) => a.key === 'poweroff')?.danger).toBe(true)
+    expect(C.POWER_ACTIONS.filter((a) => a.danger)).toHaveLength(1)
+  })
+})
+
+describe('reset actions', () => {
+  it('builds direct-adb reset argvs', () => {
+    expect(C.factoryReset()).toEqual([
+      [
+        'shell',
+        'am',
+        'broadcast',
+        '-a',
+        'android.intent.action.FACTORY_RESET',
+        '-n',
+        'android/com.android.server.MasterClearReceiver'
+      ]
+    ])
+    expect(C.resetAppPrefs()).toEqual([['shell', 'pm', 'reset-permissions']])
+    // network reset opens the device's own screen; single-quoted so the on-device
+    // shell keeps the `$` in the component name instead of expanding it.
+    expect(C.resetNetwork()[0][1]).toContain(
+      "'com.android.settings/.Settings$ResetMobileNetworkSettingsActivity'"
+    )
+    expect(C.resetAllSettings()[0][1]).toContain('settings reset global trusted_defaults')
+  })
+  it('orders resets least-to-most destructive and flags factory as disconnecting', () => {
+    const keys = C.RESET_ACTIONS.map((a) => a.key)
+    expect(keys).toEqual(['network', 'appprefs', 'allsettings', 'factory'])
+    expect(C.RESET_ACTIONS.filter((a) => a.disconnects).map((a) => a.key)).toEqual(['factory'])
+    for (const a of C.RESET_ACTIONS) {
+      expect(a.confirmTitle).toBeTruthy()
+      expect(a.confirmBody).toBeTruthy()
+    }
   })
 })

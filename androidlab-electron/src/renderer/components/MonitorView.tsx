@@ -10,6 +10,7 @@ import type { Controller } from '../state/useAppController'
 import { PALETTE } from '../theme'
 import { SparkGraph, SPARK_MAXLEN } from './SparkGraph'
 import { CoreBars } from './CoreBars'
+import { Icon } from './Icon'
 
 const INTERVALS: Array<[string, number]> = [
   ['0.5 s', 500],
@@ -194,7 +195,8 @@ export function MonitorView({ c }: { c: Controller }) {
           disabled
           title="Memory-leak detection (LeakCanary/Shark) is migrated with the leakdetect module later in Phase 3"
         >
-          🔎  Detect leaks
+          <Icon name="search" size={15} />
+          Detect leaks
         </button>
         <span className="label">Refresh</span>
         <select value={interval} onChange={(e) => setIntervalMs(Number(e.target.value))}>

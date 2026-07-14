@@ -19,11 +19,13 @@ import { ShellView } from './components/ShellView'
 import { DatabaseView } from './components/DatabaseView'
 import { FilesView } from './components/FilesView'
 import { AppManagerView } from './components/AppManagerView'
+import { NetworkView } from './components/NetworkView'
 import { MirrorDock } from './components/MirrorDock'
 import { StatusBar } from './components/StatusBar'
 import { AboutDialog } from './components/AboutDialog'
 import { MessageBox, PromptDialog, Toast, type MessageBoxSpec } from './components/dialogs'
 import { useAppController } from './state/useAppController'
+import { useTheme } from './state/useTheme'
 
 const TABS: TabDef[] = [
   { id: 'logs', label: 'Logs' },
@@ -47,6 +49,7 @@ interface ContextMenuState {
 
 export default function App() {
   const c = useAppController()
+  const { theme, toggleTheme } = useTheme()
 
   const [tab, setTab] = useState('logs')
   const [selectedRows, setSelectedRows] = useState<ReadonlySet<number>>(new Set())
@@ -61,6 +64,7 @@ export default function App() {
   const [appsBadge, setAppsBadge] = useState(false)
   const [mirrorOpen, setMirrorOpen] = useState(false)
   const [mirrorWidth, setMirrorWidth] = useState(360)
+  const [secondaryReq, setSecondaryReq] = useState(0)
 
   const searchRef = useRef<HTMLInputElement>(null)
   const selectionRef = useRef<ReadonlySet<number>>(selectedRows)
@@ -325,6 +329,8 @@ export default function App() {
         onAbout={() => setAbout(true)}
         onMirror={() => setMirrorOpen((v) => !v)}
         mirrorOpen={mirrorOpen}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
       <TabBar
         tabs={TABS.map((t) => (t.id === 'apps' ? { ...t, badge: appsBadge } : t))}
@@ -377,13 +383,21 @@ export default function App() {
       ) : tab === 'inspector' ? (
         <InspectorView c={c} />
       ) : tab === 'controls' ? (
-        <ControlsView c={c} />
+        <ControlsView
+          c={c}
+          onViewSecondary={() => {
+            setMirrorOpen(true)
+            setSecondaryReq((n) => n + 1)
+          }}
+        />
       ) : tab === 'location' ? (
         <LocationView c={c} />
       ) : tab === 'toolbox' ? (
         <ToolboxView c={c} />
       ) : tab === 'shell' ? (
         <ShellView c={c} />
+      ) : tab === 'network' ? (
+        <NetworkView c={c} />
       ) : (
         <div className="tab-placeholder">
           <div className="big">{TABS.find((t) => t.id === tab)?.label}</div>
@@ -397,6 +411,7 @@ export default function App() {
           <div className="mirror-dock-holder" style={{ width: mirrorWidth, display: 'flex' }}>
             <MirrorDock
               c={c}
+              secondaryReq={secondaryReq}
               onClose={() => setMirrorOpen(false)}
               onCaptured={(r) =>
                 r.ok

@@ -7,13 +7,63 @@
  * a display picker, and scrcpy hand-off.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AnnexBDemuxer, KEY_BACK, KEY_HOME, KEY_RECENTS, escapeInputText, isApkPath } from '@core/mirror'
+import {
+  AnnexBDemuxer,
+  KEY_BACK,
+  KEY_HOME,
+  KEY_RECENTS,
+  KEY_VOLUME_UP,
+  KEY_VOLUME_DOWN,
+  KEY_POWER,
+  SC_ACTION_DOWN,
+  SC_ACTION_MOVE,
+  SC_ACTION_UP,
+  scrcpyKeycodeMsg,
+  scrcpyTextMsg,
+  scrcpyTouchMsg,
+  escapeInputText,
+  isApkPath
+} from '@core/mirror'
 import type { DisplayInfo } from '@core/mirror'
 import type { SaveResult } from '@shared/types'
 import type { Controller } from '../state/useAppController'
 import { PALETTE } from '../theme'
+import { Icon, type IconName } from './Icon'
 
 const HAS_WEBCODECS = typeof (globalThis as { VideoDecoder?: unknown }).VideoDecoder !== 'undefined'
+
+// Max frames allowed to sit in the WebCodecs decode queue before we treat the
+// decoder as "behind" and resync at the next keyframe. This only guards against
+// the *decoder* falling behind; the rAF present loop already drops intermediate
+// frames at paint time (scrcpy/Studio style), so it can stay forgiving. A resync
+// is costly on the scrcpy feed (its keyframes are ~10s apart, so a reset freezes
+// until the next IDR), and hardware decode keeps the queue near zero anyway — so
+// trip this only on sustained real backlog, never on a one-frame hiccup.
+const MAX_DECODE_QUEUE = 6
+
+// Touch pointer ids for the two-finger gestures. scrcpy maps arbitrary ids to
+// MotionEvent slots, so distinct ids = distinct fingers. Primary = the cursor
+// finger (drag + pinch); Second = the mirrored/virtual finger (pinch + rotate).
+const PTR_PRIMARY = 0
+const PTR_SECOND = 1
+
+// Non-printable keys → Android keycodes, injected via scrcpy's control channel.
+// Printable characters go through INJECT_TEXT instead (handles unicode + layouts).
+const ANDROID_KEYS: Record<string, number> = {
+  Enter: 66,
+  Backspace: 67,
+  Tab: 61,
+  Escape: 111,
+  ArrowUp: 19,
+  ArrowDown: 20,
+  ArrowLeft: 21,
+  ArrowRight: 22,
+  Delete: 112,
+  Home: 122,
+  End: 123,
+  PageUp: 92,
+  PageDown: 93
+}
 
 type Fit = { x: number; y: number; w: number; h: number }
 type OverlayKind = 'installing' | 'success' | 'error' | 'recording' | 'capturing'
@@ -33,6 +83,13 @@ const OVERLAY_COLOR: Record<OverlayKind, string> = {
   capturing: PALETTE.ACCENT
 }
 
+// The control rail uses the shared monochrome line-icon set (components/Icon.tsx)
+// at rail scale (24px) so it stays in lock-step with the icons used everywhere
+// else in the app. Icons inherit the rail button's color / hover / active states.
+function RailIcon({ name }: { name: IconName }) {
+  return <Icon name={name} size={24} />
+}
+
 /**
  * Owns the canvas drawing + the WebCodecs decoder. Kept outside React so frames
  * (30-60fps) never trigger re-renders; the component just forwards IPC payloads.
@@ -45,6 +102,10 @@ class MirrorEngine {
   private ts = 0
   private flushTimer: ReturnType<typeof setTimeout> | null = null
   private lastImage: HTMLImageElement | null = null
+  /** Newest frame awaiting the rAF present loop; VideoFrames are freed once painted. */
+  private pending: { src: CanvasImageSource; w: number; h: number; isFrame: boolean } | null = null
+  private rafId = 0
+  private running = false
   /** Device-pixel size of the current frame + the letterbox rect it's drawn in. */
   srcW = 0
   srcH = 0
@@ -53,6 +114,64 @@ class MirrorEngine {
 
   attach(canvas: HTMLCanvasElement | null): void {
     this.canvas = canvas
+    this.startLoop()
+  }
+
+  // --- rAF present loop ---------------------------------------------------
+  // Decode and paint are decoupled: the decoder / PNG callbacks stash the freshest
+  // frame in `pending`, and this self-scheduling rAF loop draws the latest one every
+  // vsync. Painting inside rAF (instead of straight from the decode callback) is what
+  // keeps Chromium presenting at full cadence when the pointer is idle — without it the
+  // compositor throttles canvas updates until an input event wakes it, which is why the
+  // mirror looked smooth only while you were touching it. It also drops intermediate
+  // frames at the present stage, so a burst of decodes never queues up as latency.
+  private startLoop(): void {
+    if (this.running) return
+    this.running = true
+    const tick = (): void => {
+      if (!this.running) return
+      this.paintPending()
+      this.rafId = requestAnimationFrame(tick)
+    }
+    this.rafId = requestAnimationFrame(tick)
+  }
+
+  private stopLoop(): void {
+    this.running = false
+    if (this.rafId) cancelAnimationFrame(this.rafId)
+    this.rafId = 0
+  }
+
+  /** Stash the newest frame for the loop; a superseded VideoFrame is freed now. */
+  private setPending(src: CanvasImageSource, w: number, h: number, isFrame: boolean): void {
+    this.dropPending()
+    this.pending = { src, w, h, isFrame }
+  }
+
+  /** Release a pending VideoFrame without painting it (superseded / teardown). */
+  private dropPending(): void {
+    if (this.pending?.isFrame) {
+      try {
+        (this.pending.src as VideoFrame).close()
+      } catch {
+        /* already closed */
+      }
+    }
+    this.pending = null
+  }
+
+  private paintPending(): void {
+    const p = this.pending
+    if (!p) return
+    this.pending = null
+    this.drawSource(p.src, p.w, p.h)
+    if (p.isFrame) {
+      try {
+        (p.src as VideoFrame).close()
+      } catch {
+        /* already closed */
+      }
+    }
   }
 
   /** New stream / display switch: forget decoder + pending bytes. */
@@ -61,6 +180,7 @@ class MirrorEngine {
     this.configured = false
     this.ts = 0
     this.lastImage = null
+    this.dropPending()
     if (this.decoder) {
       try {
         this.decoder.close()
@@ -76,7 +196,7 @@ class MirrorEngine {
     const img = new Image()
     img.onload = () => {
       this.lastImage = img
-      this.drawSource(img, img.naturalWidth, img.naturalHeight)
+      this.setPending(img, img.naturalWidth, img.naturalHeight, false)
     }
     img.src = `data:image/png;base64,${base64}`
   }
@@ -101,8 +221,8 @@ class MirrorEngine {
     try {
       this.decoder = new VideoDecoder({
         output: (frame) => {
-          this.drawSource(frame, frame.displayWidth, frame.displayHeight)
-          frame.close()
+          // Hand the frame to the present loop; it draws the freshest and frees the rest.
+          this.setPending(frame, frame.displayWidth, frame.displayHeight, true)
         },
         error: (e) => this.fail(e.message || 'decode error')
       })
@@ -116,14 +236,32 @@ class MirrorEngine {
   private feed(data: Uint8Array, key: boolean): void {
     const dec = this.ensureDecoder()
     if (!dec || dec.state === 'closed') return
+    // Backpressure — the real low-latency knob. If the decoder can't drain as
+    // fast as frames arrive, its queue (and therefore latency) grows until the
+    // pipeline stalls, which reads as "smooth, then lagging, then frozen".
+    // Instead, drop the backlog and resync at the next keyframe so latency stays
+    // bounded — how scrcpy / Studio stay live under load.
+    if (this.configured && dec.decodeQueueSize > MAX_DECODE_QUEUE) {
+      try {
+        dec.reset() // clears the queued backlog; must reconfigure before decoding
+      } catch {
+        /* ignore */
+      }
+      this.configured = false // wait for the next keyframe to reconfigure
+      return
+    }
     if (!this.configured) {
       const codec = this.demuxer.codecString()
       if (!key || !codec) return // wait for a keyframe (+ its SPS) to configure
       try {
-        // No hardwareAcceleration hint: at phone resolutions the software H.264
-        // decoder honors optimizeForLatency better — HW paths (VideoToolbox on
-        // macOS) buffer several frames in the GPU pipeline, adding latency.
-        dec.configure({ codec, optimizeForLatency: true })
+        // Prefer hardware decode (VideoToolbox on macOS): software-decoding
+        // 1080p/8Mbit can't sustain realtime and falls progressively behind,
+        // which is what causes the lag-then-freeze. optimizeForLatency keeps HW
+        // frame-reordering minimal and the backpressure above caps the queue, so
+        // HW latency stays low while never falling behind. prefer-hardware
+        // silently uses software when no HW decoder exists; onFail drops to the
+        // screencap poller if it errors outright.
+        dec.configure({ codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' })
         this.configured = true
       } catch (e) {
         this.fail(e instanceof Error ? e.message : String(e))
@@ -182,6 +320,7 @@ class MirrorEngine {
 
   close(): void {
     if (this.flushTimer) clearTimeout(this.flushTimer)
+    this.stopLoop()
     this.reset()
     this.canvas = null
   }
@@ -190,11 +329,14 @@ class MirrorEngine {
 export function MirrorDock({
   c,
   onClose,
-  onCaptured
+  onCaptured,
+  secondaryReq = 0
 }: {
   c: Controller
   onClose: () => void
   onCaptured: (result: SaveResult) => void
+  /** Bumped by the Controls "👁 View" button to auto-switch to the secondary display. */
+  secondaryReq?: number
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engineRef = useRef<MirrorEngine>(new MirrorEngine())
@@ -224,6 +366,12 @@ export function MirrorDock({
   const recordingRef = useRef(false)
   const overlayTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pressRef = useRef<{ x: number; y: number; t: number } | null>(null)
+  // scrcpy control channel: when up, mouse/keyboard inject live touch/key events
+  // (interactive drag + typing); when down, we fall back to one-shot `adb input`.
+  const controlReadyRef = useRef(false)
+  // Active mouse gesture: single-finger 'drag', or 'pinch' (Ctrl/⌘+drag → a second
+  // finger mirrored about the screen centre, giving pinch-zoom AND rotation).
+  const gestureRef = useRef<'drag' | 'pinch' | null>(null)
   const serial = c.serial
 
   const flashOverlay = useCallback((kind: OverlayKind, text: string, ms = 4000) => {
@@ -237,11 +385,15 @@ export function MirrorDock({
     if (!serial) return
     const eng = engineRef.current
     eng.reset()
+    controlReadyRef.current = false // a fresh feed re-establishes (or drops) control
+    gestureRef.current = null
     setHasFrame(false)
     setMessage('Connecting…')
     const { sf } = displayRef.current
     if (HAS_WEBCODECS && h264OkRef.current && !recordingRef.current && !previewRef.current && sf === null) {
-      void window.androidlab.mirror.startH264(serial)
+      // scrcpy's server keeps the stream warm (screenrecord stalls on a static
+      // screen); main falls back to the screenrecord H.264 loop if the jar is absent.
+      void window.androidlab.mirror.startScrcpy(serial)
     } else {
       void window.androidlab.mirror.startPoller(serial, sf)
     }
@@ -253,6 +405,25 @@ export function MirrorDock({
     setPreview(next)
     startFeed()
   }, [startFeed])
+
+  // One-click "view the secondary display": probe briefly (the display may still
+  // be booting after it was just enabled) and switch to the first one found —
+  // port of mirror.py's show_secondary + _on_displays retry loop.
+  const showSecondary = useCallback(async () => {
+    if (!serial) return
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const list = await window.androidlab.mirror.listDisplays(serial)
+      setDisplays(list)
+      const sec = list.find((d) => d.virtual) ?? (list.length > 1 ? list[1] : undefined)
+      if (sec) {
+        displayRef.current = { sf: sec.sfId, logical: sec.logical }
+        startFeed()
+        return
+      }
+      await new Promise((r) => setTimeout(r, 600))
+    }
+    flashOverlay('error', 'no secondary display found')
+  }, [serial, startFeed, flashOverlay])
 
   const probeDisplays = useCallback(async () => {
     if (!serial) return
@@ -266,12 +437,25 @@ export function MirrorDock({
     }
   }, [serial, startFeed])
 
+  // Attach the canvas + run the present loop for the component's lifetime; tearing
+  // it down here (not in the per-serial effect) keeps the loop alive across device
+  // switches and stops it exactly once, on unmount.
+  useEffect(() => {
+    const eng = engineRef.current
+    eng.attach(canvasRef.current)
+    return () => eng.close()
+  }, [])
+
   // (Re)start whenever the device changes; stop on unmount.
   useEffect(() => {
-    engineRef.current.attach(canvasRef.current)
     engineRef.current.onFail = () => {
-      // H.264 failed → drop to the screencap preview for this device.
+      // The decoder errored (bad stream, or it fell too far behind) — drop to
+      // the screencap poller for this device instead of freezing on the last
+      // frame. Bytes keep streaming from the main process, so without this the
+      // mirror would silently die (the renderer never reached the main-process
+      // h264 fallback path).
       h264OkRef.current = false
+      startFeed()
     }
     if (!serial) {
       setMessage('No device selected')
@@ -313,6 +497,10 @@ export function MirrorDock({
       eng.pushH264(chunk)
       setHasFrame(true)
     })
+    const unCtrl = window.androidlab.mirror.onControlReady((ready) => {
+      controlReadyRef.current = ready
+      if (!ready) gestureRef.current = null
+    })
     const unFail = window.androidlab.mirror.onFailed((f) => {
       if (f.kind === 'h264') {
         h264OkRef.current = false
@@ -333,10 +521,21 @@ export function MirrorDock({
     return () => {
       unFrame()
       unH264()
+      unCtrl()
       unFail()
       unRec()
     }
   }, [startFeed, flashOverlay, onCaptured])
+
+  // Controls "👁 View" handoff: each bump of secondaryReq auto-switches to the
+  // secondary display (skip the initial 0 and duplicate values).
+  const lastSecondaryReq = useRef(0)
+  useEffect(() => {
+    if (secondaryReq > 0 && secondaryReq !== lastSecondaryReq.current) {
+      lastSecondaryReq.current = secondaryReq
+      void showSecondary()
+    }
+  }, [secondaryReq, showSecondary])
 
   // Redraw the last PNG frame when the dock is resized.
   useEffect(() => {
@@ -373,11 +572,114 @@ export function MirrorDock({
     return { x: Math.round((px * eng.srcW) / eng.fit.w), y: Math.round((py * eng.srcH) / eng.fit.h) }
   }, [])
 
+  // Like toDevice but clamps to the screen edge instead of returning null, so a drag
+  // that runs past the canvas (edge swipes, fast flings) keeps tracking.
+  const toDeviceClamped = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
+    const eng = engineRef.current
+    const canvas = canvasRef.current
+    if (!eng.fit || !canvas || eng.srcW === 0) return null
+    const rect = canvas.getBoundingClientRect()
+    const px = Math.max(0, Math.min(eng.fit.w - 1, clientX - rect.left - eng.fit.x))
+    const py = Math.max(0, Math.min(eng.fit.h - 1, clientY - rect.top - eng.fit.y))
+    return { x: Math.round((px * eng.srcW) / eng.fit.w), y: Math.round((py * eng.srcH) / eng.fit.h) }
+  }, [])
+
+  const sendControl = useCallback((data: Uint8Array) => {
+    void window.androidlab.mirror.control(data)
+  }, [])
+
+  const sendTouch = useCallback(
+    (action: number, x: number, y: number, pointerId = -1) => {
+      const eng = engineRef.current
+      if (eng.srcW && eng.srcH) sendControl(scrcpyTouchMsg(action, x, y, eng.srcW, eng.srcH, pointerId))
+    },
+    [sendControl]
+  )
+
+  const clampDev = useCallback((x: number, y: number): { x: number; y: number } => {
+    const eng = engineRef.current
+    return {
+      x: Math.max(0, Math.min(eng.srcW - 1, Math.round(x))),
+      y: Math.max(0, Math.min(eng.srcH - 1, Math.round(y)))
+    }
+  }, [])
+
+  // Point-symmetric to `d` about the screen centre — the "second finger" for the
+  // Ctrl/⌘+drag gesture. Dragging radially pinches; dragging tangentially rotates.
+  const mirrorAboutCenter = useCallback(
+    (d: { x: number; y: number }): { x: number; y: number } => {
+      const eng = engineRef.current
+      return clampDev(eng.srcW - 1 - d.x, eng.srcH - 1 - d.y)
+    },
+    [clampDev]
+  )
+
+  // A gesture can leave the canvas, so once it starts we track move/up on the window.
+  const onWindowMove = useCallback(
+    (e: MouseEvent) => {
+      const g = gestureRef.current
+      if (!g) return
+      const d = toDeviceClamped(e.clientX, e.clientY)
+      if (!d) return
+      sendTouch(SC_ACTION_MOVE, d.x, d.y, PTR_PRIMARY)
+      if (g === 'pinch') {
+        const m = mirrorAboutCenter(d)
+        sendTouch(SC_ACTION_MOVE, m.x, m.y, PTR_SECOND)
+      }
+    },
+    [toDeviceClamped, sendTouch, mirrorAboutCenter]
+  )
+  const onWindowUp = useCallback(
+    (e: MouseEvent) => {
+      const g = gestureRef.current
+      if (!g) return
+      gestureRef.current = null
+      const d = toDeviceClamped(e.clientX, e.clientY)
+      if (d) {
+        sendTouch(SC_ACTION_UP, d.x, d.y, PTR_PRIMARY)
+        if (g === 'pinch') {
+          const m = mirrorAboutCenter(d)
+          sendTouch(SC_ACTION_UP, m.x, m.y, PTR_SECOND)
+        }
+      }
+      window.removeEventListener('mousemove', onWindowMove)
+      window.removeEventListener('mouseup', onWindowUp)
+    },
+    [toDeviceClamped, sendTouch, mirrorAboutCenter]
+  )
+  useEffect(() => {
+    // Detach any in-flight gesture listeners + pinch timer on unmount.
+    return () => {
+      window.removeEventListener('mousemove', onWindowMove)
+      window.removeEventListener('mouseup', onWindowUp)
+      if (pinchEndRef.current) clearTimeout(pinchEndRef.current)
+    }
+  }, [onWindowMove, onWindowUp])
+
   const onCanvasMouseDown = (e: React.MouseEvent): void => {
     const d = toDevice(e.clientX, e.clientY)
-    pressRef.current = d ? { ...d, t: e.timeStamp } : null
+    if (controlReadyRef.current) {
+      if (!d) return
+      // A modifier held → two-finger pinch+rotate (second finger mirrors about
+      // centre); otherwise a single-finger drag. ⌘/⌥/Ctrl all count so it works with
+      // a Magic Mouse (no pinch gesture) — on macOS Ctrl+click is a right-click, hence
+      // the onContextMenu suppression on the canvas. Both track move/up on the window.
+      const pinch = e.ctrlKey || e.metaKey || e.altKey
+      gestureRef.current = pinch ? 'pinch' : 'drag'
+      sendTouch(SC_ACTION_DOWN, d.x, d.y, PTR_PRIMARY)
+      if (pinch) {
+        const m = mirrorAboutCenter(d)
+        sendTouch(SC_ACTION_DOWN, m.x, m.y, PTR_SECOND)
+      }
+      window.addEventListener('mousemove', onWindowMove)
+      window.addEventListener('mouseup', onWindowUp)
+    } else {
+      // Poller / secondary display: remember the press for a one-shot tap/swipe on up.
+      pressRef.current = d ? { ...d, t: e.timeStamp } : null
+    }
   }
   const onCanvasMouseUp = (e: React.MouseEvent): void => {
+    if (controlReadyRef.current) return // handled by onWindowUp
     const press = pressRef.current
     pressRef.current = null
     if (!press) return
@@ -389,6 +691,86 @@ export function MirrorDock({
       sendInput(['swipe', String(press.x), String(press.y), String(up.x), String(up.y), String(ms)])
     }
   }
+
+  // Keyboard → device, when the mirror is focused and control is live. Printable
+  // characters go as text (unicode-safe); named keys map to Android keycodes.
+  const onCanvasKeyDown = (e: React.KeyboardEvent): void => {
+    if (!controlReadyRef.current) return
+    const kc = ANDROID_KEYS[e.key]
+    if (kc !== undefined) {
+      e.preventDefault()
+      sendControl(scrcpyKeycodeMsg(SC_ACTION_DOWN, kc))
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault()
+      sendControl(scrcpyTextMsg(e.key))
+    }
+  }
+  const onCanvasKeyUp = (e: React.KeyboardEvent): void => {
+    if (!controlReadyRef.current) return
+    const kc = ANDROID_KEYS[e.key]
+    if (kc !== undefined) {
+      e.preventDefault()
+      sendControl(scrcpyKeycodeMsg(SC_ACTION_UP, kc))
+    }
+  }
+
+  // --- pinch-to-zoom ------------------------------------------------------
+  // Trackpad pinch (macOS Chromium fires wheel + ctrlKey) drives two virtual fingers
+  // spreading/closing around the cursor — a natural pinch for maps/photos. (Mice have
+  // no pinch gesture; they use the Ctrl/⌘+drag path above, which also rotates.) Wheel
+  // events are discrete with no "end", so a debounce lifts the fingers on a pause.
+  const pinchRef = useRef<{ cx: number; cy: number; radius: number } | null>(null)
+  const pinchEndRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const endPinch = useCallback(() => {
+    const p = pinchRef.current
+    if (!p) return
+    pinchRef.current = null
+    const a = clampDev(p.cx, p.cy - p.radius)
+    const b = clampDev(p.cx, p.cy + p.radius)
+    sendTouch(SC_ACTION_UP, a.x, a.y, PTR_PRIMARY)
+    sendTouch(SC_ACTION_UP, b.x, b.y, PTR_SECOND)
+  }, [clampDev, sendTouch])
+
+  const onWheel = useCallback(
+    (e: WheelEvent) => {
+      if (!controlReadyRef.current || !e.ctrlKey) return // pinch (trackpad / Ctrl+scroll) only
+      e.preventDefault()
+      const eng = engineRef.current
+      if (!eng.srcW || !eng.srcH) return
+      let p = pinchRef.current
+      if (!p) {
+        const at = toDevice(e.clientX, e.clientY)
+        if (!at) return
+        p = { cx: at.x, cy: at.y, radius: Math.max(40, Math.round(eng.srcH * 0.05)) }
+        pinchRef.current = p
+        const a = clampDev(p.cx, p.cy - p.radius)
+        const b = clampDev(p.cx, p.cy + p.radius)
+        sendTouch(SC_ACTION_DOWN, a.x, a.y, PTR_PRIMARY)
+        sendTouch(SC_ACTION_DOWN, b.x, b.y, PTR_SECOND)
+      } else {
+        // deltaY < 0 (spread / zoom-in on macOS) grows the gap; cap per-event change
+        // so a chunky mouse wheel isn't wildly faster than a smooth trackpad pinch.
+        const step = Math.sign(-e.deltaY) * Math.min(60, Math.abs(e.deltaY) * 3)
+        p.radius = Math.max(20, Math.min(Math.round(eng.srcH / 2), p.radius + step))
+        const a = clampDev(p.cx, p.cy - p.radius)
+        const b = clampDev(p.cx, p.cy + p.radius)
+        sendTouch(SC_ACTION_MOVE, a.x, a.y, PTR_PRIMARY)
+        sendTouch(SC_ACTION_MOVE, b.x, b.y, PTR_SECOND)
+      }
+      if (pinchEndRef.current) clearTimeout(pinchEndRef.current)
+      pinchEndRef.current = setTimeout(endPinch, 140)
+    },
+    [toDevice, clampDev, sendTouch, endPinch]
+  )
+
+  // wheel must be a non-passive listener so preventDefault suppresses page zoom.
+  useEffect(() => {
+    const wrap = canvasRef.current?.parentElement
+    if (!wrap) return
+    wrap.addEventListener('wheel', onWheel, { passive: false })
+    return () => wrap.removeEventListener('wheel', onWheel)
+  }, [onWheel])
 
   // --- captures -----------------------------------------------------------
   const doScreenshot = useCallback(async () => {
@@ -445,6 +827,17 @@ export function MirrorDock({
     [displays, startFeed]
   )
 
+  // Ordered display cycle: Main → each secondary → back to Main. Replaces the
+  // native <select> so the rail stays a clean monochrome icon strip.
+  const displayOrder = [null as string | null].concat(
+    displays.filter((d) => d.virtual || d.sfId !== displays.find((x) => !x.virtual)?.sfId).map((d) => d.sfId)
+  )
+  const curName = displays.find((d) => d.sfId === displayRef.current.sf)?.name ?? 'Main'
+  const cycleDisplay = useCallback(() => {
+    const idx = displayOrder.indexOf(displayRef.current.sf)
+    pickDisplay(displayOrder[(idx + 1) % displayOrder.length] ?? '')
+  }, [displayOrder, pickDisplay])
+
   // --- APK drop-to-install ------------------------------------------------
   const onDrop = useCallback(
     (e: React.DragEvent): void => {
@@ -481,8 +874,12 @@ export function MirrorDock({
     <div className={`mirror-dock${fullscreen ? ' mirror-fs' : ''}`}>
       <div
         className="mirror-canvas-wrap"
+        tabIndex={0}
         onMouseDown={onCanvasMouseDown}
         onMouseUp={onCanvasMouseUp}
+        onContextMenu={(e) => e.preventDefault()}
+        onKeyDown={onCanvasKeyDown}
+        onKeyUp={onCanvasKeyUp}
         onDragOver={(e) => {
           e.preventDefault()
           setDropHint(true)
@@ -522,37 +919,16 @@ export function MirrorDock({
       </div>
 
       <div className="mirror-rail">
-        <button className="toggle" title="Back" onClick={() => sendInput(['keyevent', String(KEY_BACK)])}>
-          ‹
-        </button>
-        <button className="toggle" title="Home" onClick={() => sendInput(['keyevent', String(KEY_HOME)])}>
-          ●
-        </button>
-        <button className="toggle" title="Recents" onClick={() => sendInput(['keyevent', String(KEY_RECENTS)])}>
-          ▭
-        </button>
-        <button className="toggle" title="Save a screenshot to ~/Downloads" onClick={() => void doScreenshot()}>
-          📷
-        </button>
+        {/* view controls */}
         <button
-          className={`toggle${recording ? ' rec-on' : ''}`}
-          title={recBtnEnabled ? 'Record the screen to an MP4 in ~/Downloads' : 'Recording works on the main display only'}
-          disabled={!recBtnEnabled}
-          onClick={() => void toggleRecord()}
+          className="rail-btn"
+          title={fullscreen ? 'Exit full screen (Esc)' : 'Full screen mirror (Esc to exit)'}
+          onClick={() => setFullscreen((v) => !v)}
         >
-          {recording ? '⏹' : '⏺'}
+          <RailIcon name={fullscreen ? 'contract' : 'fullscreen'} />
         </button>
-        <button className="toggle" title="Type the Mac clipboard into the focused field" onClick={() => void doPaste()}>
-          📋
-        </button>
-        <button className="toggle" title="Type text into the focused field" onClick={() => setTyping((v) => !v)}>
-          ⌨
-        </button>
-
-        <div className="mirror-rail-spacer" />
-
         <button
-          className={`toggle${preview ? ' active' : ''}`}
+          className={`rail-btn${preview ? ' active' : ''}`}
           title={
             preview
               ? 'Low-latency preview (screencap) — click for smooth H.264 video'
@@ -560,43 +936,75 @@ export function MirrorDock({
           }
           onClick={toggleFeedMode}
         >
-          {preview ? '⚡' : '🎬'}
+          <RailIcon name={preview ? 'bolt' : 'film'} />
         </button>
         {displays.length > 1 ? (
-          <select
-            className="mirror-display"
-            title="Which display to mirror"
-            value={displayRef.current.sf ?? ''}
-            onChange={(e) => pickDisplay(e.target.value)}
-          >
-            <option value="">Main</option>
-            {displays
-              .filter((d) => d.virtual || d.sfId !== displays.find((x) => !x.virtual)?.sfId)
-              .map((d) => (
-                <option key={d.sfId} value={d.sfId}>
-                  {d.name}
-                </option>
-              ))}
-          </select>
+          <button className="rail-btn" title={`Display: ${curName} — click to switch`} onClick={cycleDisplay}>
+            <RailIcon name="monitor" />
+          </button>
         ) : null}
-        <button
-          className="toggle"
-          title={fullscreen ? 'Exit full screen (Esc)' : 'Full screen mirror (Esc to exit)'}
-          onClick={() => setFullscreen((v) => !v)}
-        >
-          ⛶
+
+        <div className="rail-div" />
+
+        {/* navigation */}
+        <button className="rail-btn" title="Back" onClick={() => sendInput(['keyevent', String(KEY_BACK)])}>
+          <RailIcon name="back" />
         </button>
+        <button className="rail-btn" title="Home" onClick={() => sendInput(['keyevent', String(KEY_HOME)])}>
+          <RailIcon name="home" />
+        </button>
+        <button className="rail-btn" title="Recents" onClick={() => sendInput(['keyevent', String(KEY_RECENTS)])}>
+          <RailIcon name="recents" />
+        </button>
+
+        <div className="rail-div" />
+
+        {/* hardware keys */}
+        <button className="rail-btn" title="Volume up" onClick={() => sendInput(['keyevent', String(KEY_VOLUME_UP)])}>
+          <RailIcon name="volUp" />
+        </button>
+        <button className="rail-btn" title="Volume down" onClick={() => sendInput(['keyevent', String(KEY_VOLUME_DOWN)])}>
+          <RailIcon name="volDown" />
+        </button>
+        <button className="rail-btn" title="Power (screen on/off)" onClick={() => sendInput(['keyevent', String(KEY_POWER)])}>
+          <RailIcon name="power" />
+        </button>
+
+        <div className="rail-div" />
+
+        {/* capture & input */}
+        <button className="rail-btn" title="Save a screenshot to ~/Downloads" onClick={() => void doScreenshot()}>
+          <RailIcon name="camera" />
+        </button>
+        <button
+          className={`rail-btn${recording ? ' rec-on' : ''}`}
+          title={recBtnEnabled ? 'Record the screen to an MP4 in ~/Downloads' : 'Recording works on the main display only'}
+          disabled={!recBtnEnabled}
+          onClick={() => void toggleRecord()}
+        >
+          <RailIcon name={recording ? 'stop' : 'record'} />
+        </button>
+        <button className="rail-btn" title="Type the Mac clipboard into the focused field" onClick={() => void doPaste()}>
+          <RailIcon name="clipboard" />
+        </button>
+        <button className="rail-btn" title="Type text into the focused field" onClick={() => setTyping((v) => !v)}>
+          <RailIcon name="keyboard" />
+        </button>
+
+        <div className="rail-div" />
+
+        {/* handoff & close */}
         {scrcpyOk ? (
           <button
-            className="toggle"
+            className="rail-btn"
             title="Open full-quality interactive mirror (scrcpy)"
             onClick={() => serial && window.androidlab.mirror.launchScrcpy(serial, displayRef.current.logical)}
           >
-            ⤢
+            <RailIcon name="external" />
           </button>
         ) : null}
-        <button className="toggle mirror-close" title="Close mirror" onClick={onClose}>
-          ✕
+        <button className="rail-btn rail-close" title="Close mirror" onClick={onClose}>
+          <RailIcon name="close" />
         </button>
       </div>
     </div>

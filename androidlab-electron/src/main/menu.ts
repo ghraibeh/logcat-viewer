@@ -1,7 +1,7 @@
 /**
  * Native application menu.
  * Faithful port of MainWindow._build_menu: File -> Open Log File (Cmd+O) /
- * Export Filtered (Cmd+E) / Export Entire, and Help/App -> About AndroidLab.
+ * Export Filtered (Cmd+E) / Export Entire, and Help/App -> About AndroidLabKit.
  * Menu clicks forward a MenuAction to the renderer, which runs the same flow
  * ui.py ran on those actions.
  */

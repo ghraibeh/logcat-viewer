@@ -36,9 +36,11 @@ export const IPC = {
 
   // screen mirror (invoke/handle + event streams)
   mirrorStartH264: 'mirror:start-h264',
+  mirrorStartScrcpy: 'mirror:start-scrcpy',
   mirrorStartPoller: 'mirror:start-poller',
   mirrorStop: 'mirror:stop',
   mirrorInput: 'mirror:input',
+  mirrorControl: 'mirror:control',
   mirrorScreenshot: 'mirror:screenshot',
   mirrorRecordStart: 'mirror:record-start',
   mirrorRecordStop: 'mirror:record-stop',
@@ -49,12 +51,16 @@ export const IPC = {
   // mirror events (main -> renderer)
   mirrorFrame: 'mirror:frame',
   mirrorH264: 'mirror:h264',
+  mirrorControlReady: 'mirror:control-ready',
   mirrorFailed: 'mirror:failed',
   mirrorRecordDone: 'mirror:record-done',
 
   // device controls (invoke/handle)
   controlsRead: 'controls:read',
   controlsApply: 'controls:apply',
+
+  // wireless adb (invoke/handle)
+  wirelessEnable: 'wireless:enable',
 
   // mock GPS location (invoke/handle)
   mocklocSetup: 'mockloc:setup',
@@ -134,6 +140,20 @@ export const IPC = {
   appmgrBulkPerms: 'appmgr:bulk-perms',
   appmgrIcon: 'appmgr:icon',
   appmgrExtractApk: 'appmgr:extract-apk',
+
+  // network HTTP intercept (control invoke/handle + event streams)
+  interceptStart: 'intercept:start',
+  interceptStop: 'intercept:stop',
+  interceptSetDecrypt: 'intercept:set-decrypt',
+  interceptInstallCert: 'intercept:install-cert',
+  interceptDetail: 'intercept:detail',
+  interceptSaveBody: 'intercept:save-body',
+  interceptDownloadFlow: 'intercept:download-flow',
+  // intercept events (main -> renderer)
+  interceptFlows: 'intercept:flows',
+  interceptStarted: 'intercept:started',
+  interceptStatus: 'intercept:status',
+  interceptFailed: 'intercept:failed',
 
   // system helpers
   systemOpenPath: 'system:open-path',

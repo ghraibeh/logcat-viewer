@@ -6,6 +6,7 @@ import type { NotifItem } from '@core/toolbox'
 import type { Pref } from '@core/prefs'
 import type { CrashItem } from '@core/crash'
 import type { AppDetail, AppInfo } from '@core/appmgr'
+import type { DisplayFlow } from '@core/intercept'
 
 export interface Device {
   serial: string
@@ -274,4 +275,35 @@ export interface IconResult {
   dataUrl: string | null
   /** device has no usable `unzip` — stop requesting icons. */
   unavailable: boolean
+}
+
+// --- Network Intercept payloads (mirror intercept.py's worker signals) --------
+/** Batched display flows streamed from the proxy engine (intercept:flows). */
+export type FlowBatch = DisplayFlow[]
+
+/** Decoded request/response detail for the pane (main decodes via zlib). */
+export interface FlowDetail {
+  found: boolean
+  url: string
+  method: string
+  scheme: string
+  status: number | null
+  durationMs: number | null
+  respSize: number
+  bodyCaptured: boolean
+  note: string
+  reqHeaders: Array<[string, string]>
+  respHeaders: Array<[string, string]>
+  reqBody: string
+  respBody: string
+  reqIsJson: boolean
+  respIsJson: boolean
+  curl: string
+}
+
+/** Result of pushing the CA cert to the device (SaveResult-shaped, dir=on-device). */
+export interface CertResult {
+  ok: boolean
+  message: string
+  dir: string
 }

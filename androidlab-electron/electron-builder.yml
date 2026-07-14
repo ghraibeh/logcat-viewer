@@ -1,5 +1,5 @@
 appId: com.androidlab.app
-productName: AndroidLab
+productName: AndroidLabKit
 copyright: Copyright © 2026 Mahmoud Alghraibeh
 directories:
   output: dist
@@ -29,4 +29,4 @@ mac:
   minimumSystemVersion: "12.0"
   identity: null
 dmg:
-  title: AndroidLab
+  title: AndroidLabKit

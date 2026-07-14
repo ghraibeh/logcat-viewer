@@ -24,7 +24,7 @@ text output — which ports cleanly to Node/TypeScript.
 | `QProcess.startDetached` one-shots | `execFile` / detached `spawn` | Phase 3 |
 | stdlib `sqlite3` | `better-sqlite3` | Phase 3 (Databases) |
 | PyAV / ffmpeg (H.264 mirror) | bundled static ffmpeg → fragmented MP4 → `MediaSource` | Phase 3 (hardest item) |
-| mitmproxy `mitmdump` + `mitm_addon.py` | Node MITM proxy + generated CA (`node-forge`), addon logic ported to JS | Phase 3 (hard item) |
+| mitmproxy `mitmdump` + `mitm_addon.py` | **native Node MITM** (`net`/`tls` proxy + `node-forge` CA); external mitmproxy dropped entirely | ✅ Phase 3 (Network HTTP) — `mitm_addon.py` intentionally NOT ported |
 | jadx / Shark / JRE provisioning | identical: download + `spawn('java', …)` | Phase 3, no Python involved |
 | XML parse/build (prefs, uiautomator, notifs) | `fast-xml-parser` | Phase 3 |
 | `adb` external binary | same binary, bundled via electron-builder `extraResources` | Phase 4 bundling |
@@ -319,8 +319,89 @@ its 64-bit SF id, a 443 KB H.264 stream demuxed to 19 access units / codec
 the live screen to the canvas (screenshotted). Pending live: MP4 record finalize
 and a real >1-display device.
 
-**Still pending** (each shows a "migrated in Phase 3" placeholder): Network HTTP
-(intercept), memory-leak detection, plus Wi-Fi adb and Pull APK.
+**Network HTTP tab — COMPLETE** (`intercept.py`; the hardest cluster). Full-width
+view driven by the device toolbar's serial (NOT the app picker — capture is
+device-wide): filter bar → flow table | request/response detail → control bar.
+Per-module mapping:
+
+| Python | Electron |
+|---|---|
+| `intercept.py` pure helpers (SNI/HTTP wire parse, Flow shape, filter, proxy builders, colors, JSON-tree, headers HTML) | `src/core/intercept.ts` |
+| `decode_body`/`pretty_body`/`flow_to_curl`/`build_flow_export` (need `zlib`) | `src/core/interceptBody.ts` (main + tests only — kept out of the renderer bundle) |
+| `serve`/`_handle_http`/`_handle_connect`/`_relay_body`/`_pump` + `InterceptWorker`/`MitmdumpWorker` + CA + device wiring + watchdog + `teardown_proxy` | `src/main/services/intercept.ts` (`InterceptService`) |
+| `FlowTableModel` (ring buffer + incremental filtered view + trim) | `src/core/flowStore.ts` (renderer external store) |
+| `InterceptView` (filter bar / flow table / detail / control bar / cert flow) | `src/renderer/components/NetworkView.tsx` + `styles/network.css` |
+| `ProxySetupWorker`/`CertPushWorker` | folded into `InterceptService.start()`/`installCert()` |
+
+**The native MITM decision.** The original was two-tier — a built-in asyncio
+proxy (Tier 1) plus an OPTIONAL external `mitmdump` subprocess driven by
+`assets/mitm_addon.py` (Tier 2). The rewrite implements BOTH tiers **natively in
+Node** with **zero external tools and no Python**: Tier 1 is a faithful port of
+the asyncio proxy (`net.createServer`, framing-preserving `_relay_body`, SNI
+sniff, ring buffer `FLOW_CAP`, all constants); Tier 2 is a **native TLS-MITM**
+built on **`node-forge`** (the one new dep — pure-JS, no native build) — a
+self-signed root CA (RSA-2048, `cA:true`) generated + persisted lazily under
+`<userData>/intercept/androidlab-ca.{crt,key}`, per-host leaf certs minted on
+demand + cached, the client TLS-terminated with ALPN pinned to `http/1.1`, the
+decrypted inner HTTP relayed to an upstream `tls.connect`, bodies captured.
+`assets/mitm_addon.py` is therefore **intentionally not ported** (it only existed
+to drive external mitmproxy).
+
+**Cert-pinning passthrough fallback.** If a pinned/untrusting app aborts the TLS
+handshake with our cert, the host is remembered (`pinnedHosts`) and its
+connections fall back to a **blind byte relay** (Tier-1 CONNECT passthrough) so
+the app stays online across its retries — the native analogue of mitmproxy's
+`connection_strategy=lazy`.
+
+**Body decode in main (renderer sandbox has no `zlib`).** The main process keeps
+the authoritative ring buffer of full flows; a lightweight `DisplayFlow` (no body
+bytes) is streamed to the renderer's `FlowStore` for the table/filter, and the
+detail pane / Save Body / Download fetch decoded strings by flow id over IPC
+(`decode_body` gzip/deflate/brotli via Node `zlib`; zstd left as-is like Python's
+optional path). `flow_to_curl` / `build_flow_export` output match the Python
+string format (tested).
+
+**Security cleanup (CLAUDE.md #3).** The device's original `http_proxy` is
+snapshotted before wiring and restored on EVERY exit path (Stop / device-switch /
+app-close / errors); a device-side watchdog (held-open `adb shell` trapping
+SIGHUP, `proxy_watchdog_script`) self-heals the proxy if the link drops; the
+service's `shutdown()` (proxy restore + `reverse --remove` + watchdog kill +
+server close) is wired into `win.on('closed')`.
+
+| Feature | Status |
+|---|---|
+| Tier-1 built-in proxy (plain HTTP full capture; CONNECT SNI + metadata tunnel) | ✅ 🧪 + live |
+| Framing-preserving relay (chunked / content-length / read-until-EOF, 1 MB cap) | ✅ 🧪 + live |
+| Native TLS-MITM decrypt (node-forge CA + per-host leaf, ALPN http/1.1) | ✅ 🧪 (unit) ⏳ live (needs manual CA trust) |
+| Cert-pinning → passthrough fallback (app stays online) | ✅ |
+| adb reverse + `settings put global http_proxy` wiring | ✅ 🧪 + live |
+| Snapshot + restore original proxy on every exit path | ✅ 🧪 + live |
+| Device-side SIGHUP watchdog (self-heal on link drop) | ✅ 🧪 |
+| Flow table (ring buffer + incremental filtered view + trim, virtualized) | ✅ 🧪 + live |
+| Method / status-class / substring‖regex filter (+ invalid-regex disable) | ✅ 🧪 |
+| Detail: headers HTML + decoded/pretty body + JSON tree; Copy cURL / Save Body / Download | ✅ 🧪 + live |
+| CA cert push + Security-settings hand-off + once-per-device marker | ✅ ⏳(live: manual trust) |
+
+Verified: `npm run typecheck` clean, `npm test` **201 passed** (+22
+`test/intercept.test.ts`: parseSni/parseHead/splitUrl/parseStatus, filter
+match+invalid-regex, flowToCurl, buildFlowExport, gzip decodeBody, proxy/restore/
+watchdog builders, humanSize), `npm run build` clean, offline smoke PASS
+(`network=1 … errors=0`; the proxy/CA/port-bind are lazy on Start so smoke binds
+nothing). **Live e2e** on the emulator (`127.0.0.1:6555`) via an esbuild-bundled
+harness driving the **real** `InterceptService`: Enable → `adb reverse tcp:8099`
++ device `http_proxy=127.0.0.1:8099` → a **device-origin** plaintext request
+(device → reverse tunnel → proxy → upstream) captured `GET /from-device → 200
+[text/plain]`, a host-origin request captured with its body decoded
+(`hello-from-upstream`) and cURL generated → Stop → **device `http_proxy`
+restored** (`:0`) and the reverse tunnel removed. Pending live: **HTTPS-decrypt**
+(needs the CA manually trusted on the device — a non-rooted device can't silently
+trust a user CA). Known difference from Qt: the tab unmounts on tab-switch (like
+the other full-width tabs) so the Enable toggle resets on re-entry while the proxy
+keeps running in main — the service is the source of truth (re-enabling replaces
+it; app-close/device-switch stop it), mirroring the documented Location behavior.
+
+**Still pending** (each shows a "migrated in Phase 3" placeholder): memory-leak
+detection, plus Wi-Fi adb and Pull APK.
 
 ### Phase 4 — QA, packaging, docs (PENDING)
 

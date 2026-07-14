@@ -8,9 +8,18 @@ import {
   buildDisplayList,
   escapeInputText,
   isEmulatorProps,
+  parseScrcpyVersion,
   safeSerial,
   screencapArgs,
-  screenrecordH264Args
+  screenrecordH264Args,
+  scrcpyReverseArgs,
+  scrcpyServerArgs,
+  scrcpyKeycodeMsg,
+  scrcpyTextMsg,
+  scrcpyTouchMsg,
+  SC_ACTION_DOWN,
+  SC_ACTION_UP,
+  SCRCPY_DEVICE_SERVER_PATH
 } from '@core/mirror'
 
 describe('escapeInputText', () => {
@@ -160,5 +169,87 @@ describe('AnnexBDemuxer', () => {
     const flushed = d.flush()
     expect(flushed).toHaveLength(1)
     expect(flushed[0].key).toBe(false)
+  })
+})
+
+// --- scrcpy server protocol ---------------------------------------------------
+
+describe('parseScrcpyVersion', () => {
+  it('parses the version token scrcpy --version prints', () => {
+    expect(parseScrcpyVersion('scrcpy 4.0 <https://github.com/Genymobile/scrcpy>')).toBe('4.0')
+    expect(parseScrcpyVersion('scrcpy 2.7')).toBe('2.7')
+    expect(parseScrcpyVersion('scrcpy 3.1.1')).toBe('3.1.1')
+  })
+  it('returns null on unrelated text', () => {
+    expect(parseScrcpyVersion('adb version 1.0.41')).toBeNull()
+  })
+})
+
+describe('scrcpy command builders', () => {
+  it('reverse-maps the scid-named abstract socket to a host port', () => {
+    expect(scrcpyReverseArgs('S', 'deadbeef', 5037)).toEqual([
+      '-s',
+      'S',
+      'reverse',
+      'localabstract:scrcpy_deadbeef',
+      'tcp:5037'
+    ])
+  })
+  it('launches the server: video + control, raw_stream, matching scid', () => {
+    const a = scrcpyServerArgs('S', 'deadbeef', '4.0')
+    expect(a.slice(0, 8)).toEqual([
+      '-s',
+      'S',
+      'shell',
+      `CLASSPATH=${SCRCPY_DEVICE_SERVER_PATH}`,
+      'app_process',
+      '/',
+      'com.genymobile.scrcpy.Server',
+      '4.0'
+    ])
+    expect(a).toContain('scid=deadbeef')
+    expect(a).toContain('video=true')
+    expect(a).toContain('audio=false')
+    expect(a).toContain('control=true')
+    expect(a).toContain('raw_stream=true')
+    expect(a).toContain('max_fps=60')
+    // reverse tunnel is the default → no tunnel_forward; no version-fragile options.
+    expect(a.some((x) => x.startsWith('tunnel_forward'))).toBe(false)
+    expect(a.some((x) => x.startsWith('send_'))).toBe(false)
+    expect(a.some((x) => x.startsWith('video_bit_rate'))).toBe(false)
+  })
+})
+
+describe('scrcpy control messages', () => {
+  const hex = (u: Uint8Array): string => Buffer.from(u).toString('hex')
+
+  it('encodes a keycode message (14 bytes, big-endian)', () => {
+    // type=0, action=DOWN(0), keycode=3 (HOME), repeat=0, metastate=0
+    const m = scrcpyKeycodeMsg(SC_ACTION_DOWN, 3)
+    expect(m.length).toBe(14)
+    expect(hex(m)).toBe('0000000000030000000000000000')
+  })
+  it('encodes a text message (type, u32 length, utf-8)', () => {
+    const m = scrcpyTextMsg('Ab')
+    expect(m[0]).toBe(1) // type = INJECT_TEXT
+    expect([m[1], m[2], m[3], m[4]]).toEqual([0, 0, 0, 2]) // length = 2 (BE)
+    expect(hex(m.subarray(5))).toBe('4162') // "Ab"
+  })
+  it('encodes a touch message (32 bytes; pressure/buttons drop on UP)', () => {
+    const down = scrcpyTouchMsg(SC_ACTION_DOWN, 100, 200, 1080, 2340)
+    expect(down.length).toBe(32)
+    expect(down[0]).toBe(2) // type = INJECT_TOUCH_EVENT
+    expect(down[1]).toBe(SC_ACTION_DOWN)
+    const dv = new DataView(down.buffer)
+    expect(dv.getInt32(10)).toBe(100) // x
+    expect(dv.getInt32(14)).toBe(200) // y
+    expect(dv.getUint16(18)).toBe(1080) // screen w
+    expect(dv.getUint16(20)).toBe(2340) // screen h
+    expect(dv.getUint16(22)).toBe(0xffff) // pressure while pressed
+    expect(dv.getInt32(28)).toBe(1) // primary button while pressed
+    const up = scrcpyTouchMsg(SC_ACTION_UP, 100, 200, 1080, 2340)
+    const dvUp = new DataView(up.buffer)
+    expect(dvUp.getUint16(22)).toBe(0) // pressure 0 on release
+    expect(dvUp.getInt32(28)).toBe(0) // no buttons on release
   })
 })

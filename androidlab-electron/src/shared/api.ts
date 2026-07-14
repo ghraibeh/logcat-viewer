@@ -7,7 +7,10 @@ import type {
   AppList,
   AppListResult,
   BugreportDone,
+  CertResult,
   CrashScanResult,
+  FlowBatch,
+  FlowDetail,
   DbEditResult,
   DbListResult,
   DbOpenResult,
@@ -61,18 +64,19 @@ export interface AndroidLabApi {
     onError(cb: (message: string) => void): Unsubscribe
   }
   shell: {
-    /** Open an interactive PTY sized to the terminal: the device's `adb shell`
-     *  ('device') or this Mac's login shell ('local'). serial is ignored for local. */
-    start(kind: 'device' | 'local', serial: string, cols: number, rows: number): Promise<boolean>
-    /** Forward raw keystrokes (incl. Ctrl-C, arrows) to the shell's pty. */
-    write(data: string): Promise<boolean>
-    /** Resize the remote pty when the terminal is resized. */
-    resize(cols: number, rows: number): Promise<boolean>
-    stop(): Promise<boolean>
-    running(): Promise<boolean>
-    /** Raw pty output (ANSI included) from the shell. */
-    onData(cb: (data: string) => void): Unsubscribe
-    onState(cb: (state: LogcatState) => void): Unsubscribe
+    /** Open an interactive PTY sized to the terminal, scoped to a tab `id`: the
+     *  device's `adb shell` ('device') or this Mac's login shell ('local').
+     *  serial is ignored for local. Multiple ids run concurrently. */
+    start(id: string, kind: 'device' | 'local', serial: string, cols: number, rows: number): Promise<boolean>
+    /** Forward raw keystrokes (incl. Ctrl-C, arrows) to the tab's pty. */
+    write(id: string, data: string): Promise<boolean>
+    /** Resize the tab's remote pty when its terminal is resized. */
+    resize(id: string, cols: number, rows: number): Promise<boolean>
+    stop(id: string): Promise<boolean>
+    running(id: string): Promise<boolean>
+    /** Raw pty output (ANSI included), tagged with the originating tab `id`. */
+    onData(cb: (id: string, data: string) => void): Unsubscribe
+    onState(cb: (id: string, state: LogcatState) => void): Unsubscribe
   }
   monitor: {
     start(serial: string, pkg: string | null, intervalMs: number): Promise<boolean>
@@ -84,14 +88,20 @@ export interface AndroidLabApi {
     capture(serial: string): Promise<InspectResult>
   }
   mirror: {
-    /** Start the low-latency H.264 feed (raw bytes arrive via onH264). */
+    /** Start the raw screenrecord H.264 feed (bytes arrive via onH264). */
     startH264(serial: string): Promise<boolean>
+    /** Start the scrcpy-server feed — raw Annex-B via onH264 (same demuxer as
+     *  screenrecord); falls back to the screenrecord H.264 loop if the jar is absent. */
+    startScrcpy(serial: string): Promise<boolean>
     /** Start the screencap PNG poller (fallback / secondary displays). */
     startPoller(serial: string, displayId: string | null): Promise<boolean>
     /** Stop the live feed (a running MP4 recording keeps going). */
     stop(): Promise<boolean>
     /** One-shot `input` (tap/swipe/keyevent/text), routed to `logicalId` if set. */
     input(serial: string, logicalId: number | null, args: string[]): Promise<void>
+    /** Inject a pre-encoded scrcpy control message (touch/key/text) over the control
+     *  socket — no-op unless scrcpy control is active (see onControlReady). */
+    control(data: Uint8Array): Promise<void>
     /** Save a full-res PNG to ~/Downloads. */
     screenshot(serial: string, displayId: string | null, logicalId: number | null): Promise<SaveResult>
     recordStart(serial: string): Promise<boolean>
@@ -103,12 +113,18 @@ export interface AndroidLabApi {
     launchScrcpy(serial: string, logicalId: number | null): Promise<void>
     onFrame(cb: (base64: string) => void): Unsubscribe
     onH264(cb: (chunk: Uint8Array) => void): Unsubscribe
+    /** scrcpy control channel became available (true) or went away (false). */
+    onControlReady(cb: (ready: boolean) => void): Unsubscribe
     onFailed(cb: (failed: MirrorFailed) => void): Unsubscribe
     onRecordDone(cb: (result: SaveResult) => void): Unsubscribe
   }
   controls: {
     read(serial: string, pkg: string | null): Promise<{ ok: boolean; message: string; state: ControlsState | null }>
     apply(serial: string, argvs: string[][], label: string): Promise<{ ok: boolean; message: string }>
+  }
+  wireless: {
+    /** Flip the current USB device to Wi-Fi: tcpip 5555 + connect to its wlan IP. */
+    enable(serial: string): Promise<{ ok: boolean; message: string; address?: string }>
   }
   mockloc: {
     /** Install the helper APK if absent + grant the mock-location app-op. */
@@ -245,6 +261,26 @@ export interface AndroidLabApi {
     bulkPerms(serial: string, pkg: string, perms: string[], grant: boolean): Promise<AppActionResult>
     icon(serial: string, pkg: string, apkPath: string): Promise<IconResult>
     extractApk(serial: string, pkg: string): Promise<SaveResult>
+  }
+  intercept: {
+    /** Wire the device + bind the proxy; result arrives via onStarted/onFailed. */
+    start(serial: string, port: number, decrypt: boolean): Promise<boolean>
+    /** Stop capture + restore the device proxy + drop the reverse tunnel. */
+    stop(): Promise<boolean>
+    /** Toggle HTTPS decryption on the running session. */
+    setDecrypt(on: boolean): Promise<boolean>
+    /** Push the CA cert to the device + open Security settings. */
+    installCert(serial: string): Promise<CertResult>
+    /** Decoded request/response detail for one flow (by id). */
+    detail(id: number): Promise<FlowDetail>
+    /** Save a flow's (decoded) response body to a file (save dialog). */
+    saveBody(id: number): Promise<SaveResult>
+    /** Save a full request+response dump of a flow (save dialog). */
+    downloadFlow(id: number): Promise<SaveResult>
+    onFlows(cb: (flows: FlowBatch) => void): Unsubscribe
+    onStarted(cb: (port: number) => void): Unsubscribe
+    onStatus(cb: (message: string) => void): Unsubscribe
+    onFailed(cb: (message: string) => void): Unsubscribe
   }
   system: {
     openPath(p: string): Promise<void>

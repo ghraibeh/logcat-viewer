@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Dev-only: make `npm run dev` show "AndroidLab" instead of "Electron".
+ * Dev-only: make `npm run dev` show "AndroidLabKit" instead of "Electron".
  *
  * When running unpackaged (`electron .`), macOS takes the bold menu-bar title
  * from the running bundle's Info.plist — which is node_modules' Electron.app —
  * so `app.setName()` alone can't change it. This patches CFBundleName /
- * CFBundleDisplayName of the local dev Electron bundle to "AndroidLab".
+ * CFBundleDisplayName of the local dev Electron bundle to "AndroidLabKit".
  *
  * macOS-only, idempotent, and safe to re-run: it never touches
  * CFBundleExecutable (the actual binary name). node_modules is gitignored and
@@ -18,7 +18,7 @@ const { join } = require('node:path')
 
 if (process.platform !== 'darwin') process.exit(0)
 
-const APP_NAME = 'AndroidLab'
+const APP_NAME = 'AndroidLabKit'
 const PB = '/usr/libexec/PlistBuddy'
 const plist = join(
   __dirname,

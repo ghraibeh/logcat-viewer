@@ -1,9 +1,8 @@
 /**
  * Named filter presets persisted as JSON in the app-support dir.
  * Faithful port of logtools.load_presets / save_presets. The file lives at
- * <userData>/filter_presets.json — and because main sets the app name to
- * "AndroidLab", that path matches the Python app's app-support dir, so an
- * existing filter_presets.json is read back unchanged.
+ * <userData>/filter_presets.json (main sets the app name to "AndroidLabKit", so
+ * that resolves to ~/Library/Application Support/AndroidLabKit).
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'

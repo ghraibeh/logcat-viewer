@@ -8,6 +8,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import * as C from '@core/controls'
 import type { ControlsState } from '@core/controls'
 import type { Controller } from '../state/useAppController'
+import { ConfirmDialog } from './dialogs'
+import { Icon } from './Icon'
 
 type Argvs = string[][]
 
@@ -95,13 +97,15 @@ function nearestFont(fs: number): number {
   return C.FONT_SCALES.reduce((best, it) => (Math.abs(it[1] - fs) < Math.abs(best - fs) ? it[1] : best), 1.0)
 }
 
-export function ControlsView({ c }: { c: Controller }) {
+export function ControlsView({ c, onViewSecondary }: { c: Controller; onViewSecondary: () => void }) {
   const [st, setSt] = useState<ControlsState | null>(null)
   const [status, setStatus] = useState('')
   const [bright, setBright] = useState(128)
   const [batt, setBatt] = useState(100)
   const [densityText, setDensityText] = useState('')
   const [localeText, setLocaleText] = useState('')
+  const [proxyText, setProxyText] = useState('')
+  const [confirm, setConfirm] = useState<{ title: string; body: string; button: string; onConfirm: () => void } | null>(null)
   const pkg = c.appPkg
   const busyRef = useRef(false)
 
@@ -119,6 +123,7 @@ export function ControlsView({ c }: { c: Controller }) {
     setBright(r.state.brightness)
     if (r.state.batteryLevel !== null) setBatt(r.state.batteryLevel)
     if (r.state.density) setDensityText(String(r.state.density))
+    setProxyText(r.state.proxy)
     if (pkg && r.state.appLocales !== undefined) setLocaleText(r.state.appLocales)
   }, [c.serial, pkg])
 
@@ -143,6 +148,76 @@ export function ControlsView({ c }: { c: Controller }) {
     [c.serial, read]
   )
 
+  // Reboot / power-off run the same apply IPC, but we skip the state re-read —
+  // the device drops off adb while it reboots or powers down.
+  const runPower = useCallback(
+    async (argvs: Argvs, label: string) => {
+      if (!c.serial) {
+        setStatus('✗ no device selected')
+        return
+      }
+      setStatus(`… ${label}`)
+      const r = await window.androidlab.controls.apply(c.serial, argvs, label)
+      setStatus(r.ok ? `✓ ${label} — device disconnecting…` : `✗ ${r.message}`)
+    },
+    [c.serial]
+  )
+
+  // "👁 View": ensure a secondary display exists (create a 720p one if off),
+  // then hand off to the mirror to open on it. Port of controls.py._view_secondary.
+  const viewSecondary = useCallback(async () => {
+    if (!c.serial) {
+      setStatus('✗ no device selected')
+      return
+    }
+    if (!st?.overlay) {
+      await apply(C.setOverlayDisplay(C.OVERLAYS[2][1]), 'Secondary display 720p') // 720p
+    }
+    onViewSecondary()
+  }, [c.serial, st?.overlay, apply, onViewSecondary])
+
+  const askPower = (a: C.PowerAction): void => {
+    setConfirm({
+      title: `${a.title}?`,
+      body: a.danger
+        ? 'Power the device off? You will need physical access to turn it back on.'
+        : `${a.desc}. This drops the adb connection until the device finishes booting.`,
+      button: a.button,
+      onConfirm: () => {
+        setConfirm(null)
+        void runPower(a.argvs, a.title)
+      }
+    })
+  }
+
+  const askReset = (a: C.ResetAction): void => {
+    setConfirm({
+      title: a.confirmTitle,
+      body: a.confirmBody,
+      button: a.confirmButton,
+      onConfirm: () => {
+        setConfirm(null)
+        // Factory reset reboots/wipes → skip the re-read (runPower); the rest
+        // keep the device online, so apply() re-reads state afterwards.
+        if (a.disconnects) void runPower(a.argvs, a.title)
+        else void apply(a.argvs, a.title)
+      }
+    })
+  }
+
+  const enableWireless = useCallback(async () => {
+    if (!c.serial) {
+      setStatus('✗ no device selected')
+      return
+    }
+    if (busyRef.current) return
+    busyRef.current = true
+    setStatus('… enabling wireless debugging')
+    const r = await window.androidlab.wireless.enable(c.serial)
+    busyRef.current = false
+    setStatus(r.ok ? `✓ wireless adb — ${r.message}` : `✗ ${r.message}`)
+  }, [c.serial])
+
   const chips: Array<[string, string]> = []
   if (st?.batteryLevel !== null && st?.batteryLevel !== undefined) {
     chips.push(
@@ -154,6 +229,7 @@ export function ControlsView({ c }: { c: Controller }) {
   if (st?.dozeIdle) chips.push(['😴 dozing', 'warn'])
   if (st?.airplane) chips.push(['✈ airplane', 'warn'])
   if (st?.batterySaver) chips.push(['⚡ saver', 'warn'])
+  if (st?.proxy) chips.push([`🌐 proxy · ${st.proxy}`, 'warn'])
   const bucket = C.bucketName(st?.bucket)
   if (pkg && st?.bucket) chips.push([`bucket · ${bucket || st.bucket}`, 'accent'])
 
@@ -171,7 +247,8 @@ export function ControlsView({ c }: { c: Controller }) {
             </span>
           ))}
           <button disabled={disabled} title="Re-read every toggle's state" onClick={() => void read()}>
-            ⟳  Refresh
+            <Icon name="refresh" size={15} />
+            Refresh
           </button>
         </div>
       </div>
@@ -236,6 +313,22 @@ export function ControlsView({ c }: { c: Controller }) {
               <Row title="Data saver" desc="Restrict background data — test app behavior">
                 <Switch on={!!st?.dataSaver} disabled={disabled} onToggle={(v) => apply(C.setDataSaver(v), `Data saver ${v ? 'on' : 'off'}`)} />
               </Row>
+              <Row title="HTTP proxy" desc="Route all apps through host:port (e.g. Charles/Burp)">
+                <input className="line-edit ctrl-input wide" type="text" value={proxyText} disabled={disabled}
+                  placeholder="192.168.1.5:8888"
+                  onChange={(e) => setProxyText(e.target.value)} />
+                <button className="toggle" disabled={disabled} onClick={() => {
+                  const t = proxyText.trim()
+                  if (C.isValidProxy(t)) void apply(C.setProxy(t), `Proxy → ${t}`)
+                  else setStatus('✗ proxy must be host:port')
+                }}>Set</button>
+                <button className="toggle" disabled={disabled} onClick={() => { setProxyText(''); void apply(C.clearProxy(), 'Proxy reset') }}>Reset</button>
+              </Row>
+              <Row title="Wireless debugging" desc="Switch this USB device to Wi-Fi adb (tcpip 5555 + connect)">
+                <button className="toggle" disabled={disabled}
+                  title="Connect over USB first, then unplug once connected"
+                  onClick={() => void enableWireless()}>Enable</button>
+              </Row>
             </Card>
 
             <Card title="POWER & BACKGROUND">
@@ -292,6 +385,15 @@ export function ControlsView({ c }: { c: Controller }) {
               <Row title="Secondary display" desc="Simulate an extra display (overlay window)">
                 <Segments items={C.OVERLAYS} value={st?.overlay} disabled={disabled}
                   onPick={(d, l) => apply(C.setOverlayDisplay(d), `Secondary display ${l}`)} />
+                <button
+                  className="toggle"
+                  disabled={disabled}
+                  title="Mirror the secondary display (creates a 720p one first if it's off)"
+                  onClick={() => void viewSecondary()}
+                >
+                  <Icon name="eye" size={15} />
+                  View
+                </button>
               </Row>
               <Row title="App locale" desc="Per-app language (Android 13+)">
                 <input className="line-edit ctrl-input" type="text" value={localeText} disabled={disabled || !pkg}
@@ -316,9 +418,56 @@ export function ControlsView({ c }: { c: Controller }) {
                 <Switch on={!!st?.anr} disabled={disabled} onToggle={(v) => apply(C.setShowAnrs(v), `Background ANRs ${v ? 'on' : 'off'}`)} />
               </Row>
             </Card>
+
+            <Card title="SYSTEM">
+              {C.POWER_ACTIONS.map((a, i) => (
+                <Row key={a.key} title={a.title} desc={a.desc} first={i === 0}>
+                  <button
+                    className={`toggle${a.danger ? ' danger' : ''}`}
+                    disabled={disabled}
+                    onClick={() => askPower(a)}
+                  >
+                    {a.button}
+                  </button>
+                </Row>
+              ))}
+              <div className="ctrl-note">
+                Reboots drop the adb link — the device reappears once it finishes booting. Fastboot
+                flashing needs the separate <code>fastboot</code> tool and isn&apos;t available here.
+              </div>
+            </Card>
+
+            <Card title="RESET">
+              {C.RESET_ACTIONS.map((a, i) => (
+                <Row key={a.key} title={a.title} desc={a.desc} first={i === 0}>
+                  <button
+                    className={`toggle${a.key === 'factory' ? ' danger' : ''}`}
+                    disabled={disabled}
+                    onClick={() => askReset(a)}
+                  >
+                    {a.key === 'factory' ? 'Erase' : 'Reset'}
+                  </button>
+                </Row>
+              ))}
+              <div className="ctrl-note">
+                Direct adb resets. Factory reset needs the <code>MASTER_CLEAR</code> permission
+                (emulator / rooted only) — it fails with a permission error on locked production
+                builds.
+              </div>
+            </Card>
           </div>
         </div>
       </div>
+
+      {confirm ? (
+        <ConfirmDialog
+          title={confirm.title}
+          body={confirm.body}
+          confirmLabel={confirm.button}
+          onConfirm={confirm.onConfirm}
+          onCancel={() => setConfirm(null)}
+        />
+      ) : null}
     </div>
   )
 }

@@ -18,6 +18,7 @@ import {
 } from '@core/db'
 import type { DbTableInfo } from '@shared/types'
 import type { Controller } from '../state/useAppController'
+import { Icon } from './Icon'
 
 interface Empty {
   glyph: string
@@ -582,7 +583,8 @@ export function DatabaseView({ c }: { c: Controller }) {
           disabled={!c.serial || !c.appPkg}
           onClick={() => void loadDbs(true)}
         >
-          ⟳  Refresh
+          <Icon name="refresh" size={15} />
+          Refresh
         </button>
       </div>
 
@@ -636,7 +638,7 @@ export function DatabaseView({ c }: { c: Controller }) {
                         }
                       }}
                     >
-                      {tables.length ? (isOpen ? '▾' : '▸') : ''}
+                      {tables.length ? <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /> : null}
                     </span>
                     <DbGlyph />
                     <span className="db-label">{name}</span>
@@ -754,10 +756,12 @@ export function DatabaseView({ c }: { c: Controller }) {
           </div>
           <div className="db-pagebar">
             <button className="toggle" disabled={!prevEnabled} onClick={() => page(-1)}>
-              ◀ Prev
+              <Icon name="chevronLeft" size={14} />
+              Prev
             </button>
             <button className="toggle" disabled={!nextEnabled} onClick={() => page(+1)}>
-              Next ▶
+              Next
+              <Icon name="chevronRight" size={14} />
             </button>
             {savedMsg ? (
               <span className="db-status db-saved">

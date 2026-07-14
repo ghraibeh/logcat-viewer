@@ -1,5 +1,6 @@
 /** A DPR-correct canvas that redraws via a callback on resize + dependency change. */
 import { useEffect, useRef } from 'react'
+import { THEME_EVENT } from '../theme'
 
 export function Canvas({
   draw,
@@ -57,6 +58,15 @@ export function Canvas({
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => render(), deps)
+
+  // Repaint when the theme switches — canvas colors come from the JS PALETTE,
+  // which the theme engine refreshes just before firing this event.
+  useEffect(() => {
+    const onTheme = (): void => render()
+    window.addEventListener(THEME_EVENT, onTheme)
+    return () => window.removeEventListener(THEME_EVENT, onTheme)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return <canvas ref={ref} className={className} style={style} />
 }

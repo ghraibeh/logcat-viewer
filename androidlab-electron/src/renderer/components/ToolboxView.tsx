@@ -23,6 +23,7 @@ import {
   type NotifItem
 } from '@core/toolbox'
 import { MessageBox, type MessageBoxSpec } from './dialogs'
+import { Icon } from './Icon'
 
 type SubTab = 'intents' | 'monkey' | 'perfetto' | 'notifs' | 'bugreport'
 const SUBTABS: Array<[SubTab, string]> = [
@@ -134,11 +135,12 @@ function IntentsPanel({ c }: { c: Controller }) {
       <div className="tb-row">
         <span className="label">Extras</span>
         <button className="toggle" title="Add an extra" onClick={addExtra}>
-          +
+          <Icon name="plus" size={16} />
         </button>
         <span className="grow" />
         <button className="start" onClick={fireFull} disabled={busy}>
-          ⚡  Send intent
+          <Icon name="send" size={15} />
+          Send intent
         </button>
       </div>
 
@@ -156,7 +158,7 @@ function IntentsPanel({ c }: { c: Controller }) {
               <input className="line-edit" type="text" value={e.key} placeholder="key" onChange={(ev) => setExtra(i, { key: ev.target.value })} />
               <input className="line-edit" type="text" value={e.value} placeholder="value" onChange={(ev) => setExtra(i, { value: ev.target.value })} />
               <button className="toggle" title="Remove this extra" onClick={() => rmExtra(i)}>
-                −
+                <Icon name="minus" size={16} />
               </button>
             </div>
           ))}
@@ -235,7 +237,17 @@ function MonkeyPanel({ c }: { c: Controller }) {
         <span className="grow" />
         {status ? <span className="tb-status">{status}</span> : null}
         <button className={`start${running ? ' running' : ''}`} onClick={toggle}>
-          {running ? '■  Stop' : '🐒  Start monkey'}
+          {running ? (
+            <>
+              <Icon name="stop" size={15} />
+              Stop
+            </>
+          ) : (
+            <>
+              <Icon name="play" size={15} />
+              Start monkey
+            </>
+          )}
         </button>
       </div>
       <div className="tb-log grow" ref={outRef}>
@@ -310,7 +322,17 @@ function PerfettoPanel({ c, onSaved }: { c: Controller; onSaved: (spec: MessageB
           ))}
         </select>
         <button className={`start${running ? ' running' : ''}`} onClick={toggle}>
-          {running ? '■  Stop' : '⏺  Record trace'}
+          {running ? (
+            <>
+              <Icon name="stop" size={15} />
+              Stop
+            </>
+          ) : (
+            <>
+              <Icon name="record" size={15} />
+              Record trace
+            </>
+          )}
         </button>
         <button title="Open the trace viewer — drag the saved file in" onClick={() => window.open('https://ui.perfetto.dev')}>
           Open ui.perfetto.dev
@@ -358,7 +380,8 @@ function NotifsPanel({ c }: { c: Controller }) {
     <>
       <div className="tb-row">
         <button disabled={busy} onClick={() => void refresh()}>
-          ⟳  Refresh
+          <Icon name="refresh" size={15} />
+          Refresh
         </button>
         {count ? <span className="tb-status">{count}</span> : null}
       </div>
@@ -434,7 +457,17 @@ function BugreportPanel({ c, onSaved }: { c: Controller; onSaved: (spec: Message
     <>
       <div className="tb-row">
         <button className={`start${running ? ' running' : ''}`} onClick={toggle}>
-          {running ? '■  Cancel' : '🧾  Generate bugreport'}
+          {running ? (
+            <>
+              <Icon name="stop" size={15} />
+              Cancel
+            </>
+          ) : (
+            <>
+              <Icon name="report" size={15} />
+              Generate bugreport
+            </>
+          )}
         </button>
         {running ? (
           <div className="tb-progress">

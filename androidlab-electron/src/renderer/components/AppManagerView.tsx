@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Controller } from '../state/useAppController'
 import { PALETTE } from '../theme'
 import { AppIcon } from './AppIcon'
+import { Icon } from './Icon'
 import { PrefsView } from './PrefsView'
 import { CrashView } from './CrashView'
 import { ConfirmDialog, type MessageBoxSpec } from './dialogs'
@@ -505,7 +506,7 @@ export function AppManagerView({ c, onStatus, onFailed, onMessage }: AppManagerV
               <option>Disabled</option>
             </select>
             <button className="toggle" title="Reload the installed-app list" onClick={() => void reload()}>
-              ⟳
+              <Icon name="refresh" size={16} />
             </button>
           </div>
           <div className="am-list" ref={listRef}>

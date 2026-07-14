@@ -51,6 +51,8 @@
   min-width: 0;
   overflow: hidden;
   background: #0d0f13;
+  /* focusable (tabIndex) so it can capture keyboard for the device — no focus ring */
+  outline: none;
 }
 .mirror-canvas-wrap canvas {
   display: block;
@@ -121,36 +123,74 @@
   flex: 0 0 auto;
 }
 
-/* Vertical control rail on the right of the canvas. */
+/* Vertical control rail on the right of the canvas (Genymotion-style). */
 .mirror-rail {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 6px;
-  background: var(--surface);
+  align-items: stretch;
+  /* Center the whole icon block so it stays one cohesive cluster at any dock
+     height instead of a tight group up top + a big void before the bottom
+     icons. `safe` falls back to top-align (and scrolls) when it can't fit. */
+  justify-content: safe center;
+  gap: 2px;
+  width: 52px;
+  flex: 0 0 auto;
+  padding: 10px 6px;
+  background: #141519;
   border-left: 1px solid var(--border);
+  overflow-y: auto;
+  scrollbar-width: none;
 }
-.mirror-rail .toggle {
-  width: 32px;
-  height: 32px;
-  font-size: 14px;
+.mirror-rail::-webkit-scrollbar {
+  display: none;
 }
-.mirror-rail .rec-on {
-  background: var(--red);
+
+.rail-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 8px;
+  /* Reset the global `button` padding (theme.css) so the rail stays a clean
+     icon strip regardless of the shared button rule — matches the artifact. */
+  padding: 0;
+  background: transparent;
+  color: #c2c8d6;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.rail-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
   color: #fff;
 }
-.mirror-rail .toggle.active {
-  background: var(--accent);
-  color: #fff;
+.rail-btn:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.13);
 }
-.mirror-rail-spacer {
-  flex: 1;
+.rail-btn:disabled {
+  color: #474c59;
+  cursor: default;
 }
-.mirror-display {
-  width: 44px;
-  font-size: 11px;
+.rail-btn.active {
+  color: var(--accent-h);
+  background: var(--select-soft);
 }
-.mirror-close {
-  color: var(--text-dim);
+.rail-btn.rec-on,
+.rail-btn.rec-on:hover {
+  color: var(--red);
+  background: rgba(242, 90, 82, 0.16);
+}
+.rail-close:hover:not(:disabled) {
+  color: var(--red);
+  background: rgba(242, 90, 82, 0.16);
+}
+
+.rail-div {
+  height: 1px;
+  flex: 0 0 auto;
+  margin: 5px 9px;
+  background: var(--border-2);
 }

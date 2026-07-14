@@ -4,7 +4,11 @@
  * Faithful port of logcat_viewer/colors.py (QColor -> hex strings for CSS).
  */
 
-/** Metadata columns (time / pid / tid) — quiet. */
+/** Which palette variant is live — set from the renderer's theme engine. */
+type LogTheme = 'dark' | 'light'
+let logTheme: LogTheme = 'dark'
+
+/** Metadata columns (time / pid / tid) — quiet. Mid-gray reads on both themes. */
 export const META = '#767c88'
 
 /** Message text: light and calm; warnings/errors are the ones that grab the eye. */
@@ -16,6 +20,17 @@ export const MSG_TEXT: Record<string, string> = {
   E: '#ff8f88',
   F: '#ff8f88',
   '?': '#c3c9d2'
+}
+
+/** Message text tuned for a light background (the dark ones are near-invisible). */
+const MSG_TEXT_LIGHT: Record<string, string> = {
+  V: '#767d8a',
+  D: '#525b6b',
+  I: '#4a7d40',
+  W: '#9a6c00',
+  E: '#cc3a30',
+  F: '#cc3a30',
+  '?': '#4b5262'
 }
 
 /** Solid level badge (gutter chip). */
@@ -48,7 +63,35 @@ const TAG_PALETTE = [
   '#7fb0d0' // steel
 ]
 
+/** The same hues, darkened/saturated so they read on a light canvas. */
+const TAG_PALETTE_LIGHT = [
+  '#a86a1f', // tan
+  '#128a8a', // teal
+  '#8a44c0', // purple
+  '#4f8a2f', // green
+  '#2f66d0', // blue
+  '#cc5a30', // coral
+  '#c23f68', // pink
+  '#9a7f10', // gold
+  '#2470b0', // sky
+  '#5f8a2f', // lime
+  '#7040c0', // violet
+  '#1f8a68', // mint
+  '#c04545', // salmon
+  '#3f6f9a' // steel
+]
+
 const tagCache = new Map<string, string>()
+
+/**
+ * Select the light/dark log palettes. Called by the renderer theme engine on
+ * every switch; clears the per-tag cache so tags re-resolve in the new palette.
+ */
+export function setLogTheme(mode: LogTheme): void {
+  if (mode === logTheme) return
+  logTheme = mode
+  tagCache.clear()
+}
 
 /** Deterministic per-tag color (same tag -> same hue across the session). */
 export function tagColor(tag: string): string {
@@ -64,12 +107,14 @@ export function tagColor(tag: string): string {
     // `>>> 0` == Python's `& 0xFFFFFFFF` (ToUint32 keeps it 32-bit unsigned).
     h = (h * 31 + tag.charCodeAt(i)) >>> 0
   }
-  const color = TAG_PALETTE[h % TAG_PALETTE.length]
+  const palette = logTheme === 'light' ? TAG_PALETTE_LIGHT : TAG_PALETTE
+  const color = palette[h % palette.length]
   tagCache.set(tag, color)
   return color
 }
 
 /** Foreground color for a message cell, by level. */
 export function msgColor(level: string): string {
-  return MSG_TEXT[level] ?? MSG_TEXT['?']
+  const table = logTheme === 'light' ? MSG_TEXT_LIGHT : MSG_TEXT
+  return table[level] ?? table['?']
 }

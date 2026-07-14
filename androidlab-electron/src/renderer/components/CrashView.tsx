@@ -16,6 +16,7 @@ import {
   type CrashGroup,
   type CrashItem
 } from '@core/crash'
+import { Icon } from './Icon'
 
 interface CrashViewProps {
   serial: string | null
@@ -273,16 +274,26 @@ export function CrashView({ serial, pkg, active, liveCrashSeq, onStatus, onFaile
       <div className="crash-bar">
         <div className="crash-row">
           <button disabled={scanning} title="Read the logcat crash buffer + dumpsys dropbox records" onClick={() => void scan()}>
-            {scanning ? 'Scanning…' : '⟳  Scan crashes'}
+            {scanning ? (
+              'Scanning…'
+            ) : (
+              <>
+                <Icon name="refresh" size={15} />
+                Scan crashes
+              </>
+            )}
           </button>
           <button className={`toggle${fCrash ? ' checked' : ''}`} title="Show Java/Kotlin fatal exceptions" onClick={() => setFCrash((v) => !v)}>
-            💥 Crashes
+            <Icon name="bug" size={14} />
+            Crashes
           </button>
           <button className={`toggle${fAnr ? ' checked' : ''}`} title="Show Application-Not-Responding records" onClick={() => setFAnr((v) => !v)}>
-            ⏳ ANRs
+            <Icon name="clock" size={14} />
+            ANRs
           </button>
           <button className={`toggle${fOther ? ' checked' : ''}`} title="Show native crashes and Log.wtf records" onClick={() => setFOther((v) => !v)}>
-            🧨 Other
+            <Icon name="alertTriangle" size={14} />
+            Other
           </button>
           <button
             className={`toggle${appOnly ? ' checked' : ''}`}

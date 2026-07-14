@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { validatePrefValue, type Pref } from '@core/prefs'
+import { Icon } from './Icon'
 
 interface PrefsViewProps {
   serial: string | null
@@ -136,10 +137,12 @@ export function PrefsView({ serial, pkg, active, onStatus, onFailed }: PrefsView
     <div className="prefs-view">
       <div className="prefs-bar">
         <button disabled={busy || !pkg} onClick={() => void reload()}>
-          ⟳  Reload
+          <Icon name="refresh" size={15} />
+          Reload
         </button>
         <button disabled={!dirty} onClick={() => void save()}>
-          💾  Save to device
+          <Icon name="save" size={15} />
+          Save to device
         </button>
         <button
           disabled={!pkg}

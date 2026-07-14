@@ -14,6 +14,7 @@ import {
 } from '@core/inspector'
 import { PALETTE } from '../theme'
 import type { Controller } from '../state/useAppController'
+import { Icon } from './Icon'
 
 function findPath(root: UiNode, id: number): UiNode[] {
   const path: UiNode[] = []
@@ -151,7 +152,7 @@ function TreeNode({
             if (hasKids) onToggle(node.id)
           }}
         >
-          {hasKids ? (isOpen ? '▾' : '▸') : ''}
+          {hasKids ? <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /> : null}
         </span>
         <span>{nodeLabel(node)}</span>
       </div>
@@ -283,7 +284,14 @@ export function InspectorView({ c }: { c: Controller }) {
           title="Screenshot + uiautomator view-hierarchy dump of the current screen"
           onClick={() => void capture()}
         >
-          {capturing ? 'Capturing…' : '📸  Capture'}
+          {capturing ? (
+            'Capturing…'
+          ) : (
+            <>
+              <Icon name="camera" size={15} />
+              Capture
+            </>
+          )}
         </button>
         <span className="insp-hint">Click the screenshot or the tree to inspect a view</span>
         <span className="insp-status">{status}</span>
