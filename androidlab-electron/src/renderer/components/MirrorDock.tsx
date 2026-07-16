@@ -108,8 +108,19 @@ class MirrorEngine {
   /** Device-pixel size of the current frame + the letterbox rect it's drawn in. */
   srcW = 0
   srcH = 0
+  /** Device-px → CSS-px scale + the view rotation (0/90/180/270); used for both the
+   *  draw transform and the inverse (canvas → device) mapping for touch input. */
+  scale = 1
+  rotation = 0
   fit: Fit | null = null
   onFail: ((message: string) => void) | null = null
+
+  /** Set the view rotation and immediately repaint the last PNG frame (the H.264 path
+   *  applies it on its next decoded frame). */
+  setRotation(deg: number): void {
+    this.rotation = ((deg % 360) + 360) % 360
+    this.redraw()
+  }
 
   attach(canvas: HTMLCanvasElement | null): void {
     this.canvas = canvas
@@ -320,19 +331,30 @@ class MirrorEngine {
     }
     const ctx = canvas.getContext('2d')
     if (!ctx) return
+    // Rotate the view about the canvas centre; at 90/270 the fit box swaps W/H so a
+    // portrait phone fills the pane horizontally (and vice-versa). toDevice() applies
+    // the inverse rotation so taps still land correctly.
+    const rot = ((this.rotation % 360) + 360) % 360
+    const swap = rot === 90 || rot === 270
+    const effW = swap ? sh : sw
+    const effH = swap ? sw : sh
+    const scale = Math.min(cw / effW, ch / effH)
+    const dw = sw * scale
+    const dh = sh * scale
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.fillStyle = '#0d0f13'
     ctx.fillRect(0, 0, cw, ch)
-    const scale = Math.min(cw / sw, ch / sh)
-    const w = sw * scale
-    const h = sh * scale
-    const x = (cw - w) / 2
-    const y = (ch - h) / 2
+    ctx.translate(cw / 2, ch / 2)
+    ctx.rotate((rot * Math.PI) / 180)
     ctx.imageSmoothingEnabled = true
-    ctx.drawImage(src, x, y, w, h)
+    ctx.drawImage(src, -dw / 2, -dh / 2, dw, dh)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     this.srcW = sw
     this.srcH = sh
-    this.fit = { x, y, w, h }
+    this.scale = scale
+    const boxW = effW * scale
+    const boxH = effH * scale
+    this.fit = { x: (cw - boxW) / 2, y: (ch - boxH) / 2, w: boxW, h: boxH }
   }
 
   close(): void {
@@ -377,6 +399,7 @@ export function MirrorDock({
   const [displays, setDisplays] = useState<DisplayInfo[]>([])
   const [scrcpyOk, setScrcpyOk] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
+  const [rotation, setRotation] = useState(0) // view rotation (0/90/180/270)
   const [typing, setTyping] = useState(false)
   const [typeText, setTypeText] = useState('')
   // Low-latency preview: force the screencap poller instead of the buffered
@@ -474,6 +497,11 @@ export function MirrorDock({
     eng.attach(canvasRef.current)
     return () => eng.close()
   }, [])
+
+  // Apply the view rotation (repaints the last frame immediately for the PNG path).
+  useEffect(() => {
+    engineRef.current.setRotation(rotation)
+  }, [rotation])
 
   // (Re)start whenever the device changes; stop on unmount.
   useEffect(() => {
@@ -592,28 +620,48 @@ export function MirrorDock({
     [serial]
   )
 
-  const toDevice = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
+  // Map a canvas client point back to device pixels, undoing the view rotation +
+  // scale about the canvas centre (inverse of drawSource's transform). Returns raw
+  // coords (may be out of bounds); callers reject or clamp.
+  const canvasToDevice = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
     const eng = engineRef.current
     const canvas = canvasRef.current
-    if (!eng.fit || !canvas || eng.srcW === 0) return null
+    if (!canvas || eng.srcW === 0 || !eng.scale) return null
     const rect = canvas.getBoundingClientRect()
-    const px = clientX - rect.left - eng.fit.x
-    const py = clientY - rect.top - eng.fit.y
-    if (px < 0 || px >= eng.fit.w || py < 0 || py >= eng.fit.h) return null
-    return { x: Math.round((px * eng.srcW) / eng.fit.w), y: Math.round((py * eng.srcH) / eng.fit.h) }
+    const X = clientX - (rect.left + rect.width / 2)
+    const Y = clientY - (rect.top + rect.height / 2)
+    const rad = (-eng.rotation * Math.PI) / 180
+    const c = Math.cos(rad)
+    const s = Math.sin(rad)
+    const ux = X * c - Y * s
+    const uy = X * s + Y * c
+    return { x: ux / eng.scale + eng.srcW / 2, y: uy / eng.scale + eng.srcH / 2 }
   }, [])
+
+  const toDevice = useCallback(
+    (clientX: number, clientY: number): { x: number; y: number } | null => {
+      const eng = engineRef.current
+      const d = canvasToDevice(clientX, clientY)
+      if (!d || d.x < 0 || d.x >= eng.srcW || d.y < 0 || d.y >= eng.srcH) return null
+      return { x: Math.round(d.x), y: Math.round(d.y) }
+    },
+    [canvasToDevice]
+  )
 
   // Like toDevice but clamps to the screen edge instead of returning null, so a drag
   // that runs past the canvas (edge swipes, fast flings) keeps tracking.
-  const toDeviceClamped = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
-    const eng = engineRef.current
-    const canvas = canvasRef.current
-    if (!eng.fit || !canvas || eng.srcW === 0) return null
-    const rect = canvas.getBoundingClientRect()
-    const px = Math.max(0, Math.min(eng.fit.w - 1, clientX - rect.left - eng.fit.x))
-    const py = Math.max(0, Math.min(eng.fit.h - 1, clientY - rect.top - eng.fit.y))
-    return { x: Math.round((px * eng.srcW) / eng.fit.w), y: Math.round((py * eng.srcH) / eng.fit.h) }
-  }, [])
+  const toDeviceClamped = useCallback(
+    (clientX: number, clientY: number): { x: number; y: number } | null => {
+      const eng = engineRef.current
+      const d = canvasToDevice(clientX, clientY)
+      if (!d) return null
+      return {
+        x: Math.round(Math.max(0, Math.min(eng.srcW - 1, d.x))),
+        y: Math.round(Math.max(0, Math.min(eng.srcH - 1, d.y)))
+      }
+    },
+    [canvasToDevice]
+  )
 
   const sendControl = useCallback((data: Uint8Array) => {
     void window.androidlab.mirror.control(data)
@@ -888,15 +936,32 @@ export function MirrorDock({
     [install, flashOverlay]
   )
 
+  // Fullscreen: detached in its own window, drive the real OS-window fullscreen (a
+  // separate window's "full screen" should fill the display, not just this pane).
+  // Docked, expand the pane over the app window via the CSS overlay (.mirror-fs).
+  const toggleFullscreen = useCallback(() => {
+    if (popped) void window.androidlab.mirror.popoutToggleFullscreen()
+    else setFullscreen((v) => !v)
+  }, [popped])
+
+  // Popout: mirror the OS-window fullscreen state (our button, the green traffic
+  // light, or Ctrl+⌘+F) so the icon + overlay stay in sync.
+  useEffect(() => {
+    if (!popped) return
+    return window.androidlab.mirror.onPopoutFullscreen(setFullscreen)
+  }, [popped])
+
   // Esc exits fullscreen.
   useEffect(() => {
     if (!fullscreen) return
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setFullscreen(false)
+      if (e.key !== 'Escape') return
+      if (popped) void window.androidlab.mirror.popoutToggleFullscreen()
+      else setFullscreen(false)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [fullscreen])
+  }, [fullscreen, popped])
 
   const recBtnEnabled = displayRef.current.sf === null || recording
   const showFrame = hasFrame
@@ -959,13 +1024,32 @@ export function MirrorDock({
       </div>
 
       <div className="mirror-rail">
+        {/* Close is pinned to the top of the rail (sticky) so it's always reachable,
+            even when the tall rail scrolls on a short dock. */}
+        <button
+          className="rail-btn rail-close"
+          title={popped ? 'Close mirror window' : 'Close mirror'}
+          onClick={onClose}
+        >
+          <RailIcon name="close" />
+        </button>
+
+        <div className="rail-div" />
+
         {/* view controls */}
         <button
           className="rail-btn"
           title={fullscreen ? 'Exit full screen (Esc)' : 'Full screen mirror (Esc to exit)'}
-          onClick={() => setFullscreen((v) => !v)}
+          onClick={toggleFullscreen}
         >
           <RailIcon name={fullscreen ? 'contract' : 'fullscreen'} />
+        </button>
+        <button
+          className={`rail-btn${rotation ? ' active' : ''}`}
+          title="Rotate the mirror 90° (portrait / landscape)"
+          onClick={() => setRotation((r) => (r + 90) % 360)}
+        >
+          <RailIcon name="rotate" />
         </button>
         <button
           className={`rail-btn${preview ? ' active' : ''}`}
@@ -1033,7 +1117,7 @@ export function MirrorDock({
 
         <div className="rail-div" />
 
-        {/* handoff & close */}
+        {/* handoff */}
         {scrcpyOk ? (
           <button
             className="rail-btn"
@@ -1052,13 +1136,6 @@ export function MirrorDock({
             <RailIcon name={popped ? 'popin' : 'popout'} />
           </button>
         ) : null}
-        <button
-          className="rail-btn rail-close"
-          title={popped ? 'Close mirror window' : 'Close mirror'}
-          onClick={onClose}
-        >
-          <RailIcon name="close" />
-        </button>
       </div>
     </div>
   )

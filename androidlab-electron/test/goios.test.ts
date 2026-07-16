@@ -45,6 +45,39 @@ describe('parseInfo + deviceLabel', () => {
   })
 })
 
+describe('ipArgs + parseNetworkInfo', () => {
+  it('builds the `ios ip` command', () => {
+    expect(G.ipArgs('UDID-1')).toEqual(['ip', '--udid', 'UDID-1'])
+  })
+
+  it('reads Mac/IPv4/IPv6 from the ip document', () => {
+    const out = '{"Mac":"a4:f8:41:aa:bb:cc","IPv4":"192.168.1.42","IPv6":"fe80::1"}'
+    expect(G.parseNetworkInfo(out)).toEqual({
+      ipv4: '192.168.1.42',
+      ipv6: 'fe80::1',
+      mac: 'a4:f8:41:aa:bb:cc'
+    })
+  })
+
+  it('tolerates a missing IPv4/IPv6 (best-effort partial)', () => {
+    expect(G.parseNetworkInfo('{"Mac":"a4:f8:41:aa:bb:cc","IPv4":"","IPv6":""}')).toEqual({
+      ipv4: '',
+      ipv6: '',
+      mac: 'a4:f8:41:aa:bb:cc'
+    })
+  })
+
+  it('skips prepended log lines and keeps the ip document', () => {
+    const out = ['{"level":"warn","msg":"agent not running"}', '{"Mac":"m","IPv4":"10.0.0.5","IPv6":""}'].join('\n')
+    expect(G.parseNetworkInfo(out)).toEqual({ ipv4: '10.0.0.5', ipv6: '', mac: 'm' })
+  })
+
+  it('returns all-empty for junk / empty output', () => {
+    expect(G.parseNetworkInfo('')).toEqual({ ipv4: '', ipv6: '', mac: '' })
+    expect(G.parseNetworkInfo('not json')).toEqual({ ipv4: '', ipv6: '', mac: '' })
+  })
+})
+
 describe('parseApps', () => {
   const APPS = JSON.stringify([
     {

@@ -33,6 +33,7 @@ import {
   imageListArgs,
   infoArgs,
   installArgs,
+  ipArgs,
   killArgs,
   launchArgs,
   listArgs,
@@ -40,6 +41,7 @@ import {
   parseDeviceList,
   parseFsyncTree,
   parseInfo,
+  parseNetworkInfo,
   parseIosBattery,
   parseProcesses,
   parseSysmontapCpu,
@@ -53,7 +55,8 @@ import {
   tunnelStartArgs,
   uninstallArgs,
   userspaceTunPort,
-  type ContainerEntry
+  type ContainerEntry,
+  type IosNetworkInfo
 } from '@core/goios'
 import type {
   AppActionResult,
@@ -202,6 +205,18 @@ export async function deviceInfo(bin: string, udid: string): Promise<IosDeviceIn
     run(bin, batteryCheckArgs(udid), 10000)
   ])
   return parseDeviceInfo(info.stdout, disk.stdout, reg.stdout, chk.stdout)
+}
+
+/** Detect the device's current Wi-Fi/LAN IP via `ios ip` — a pcapd sniff of the
+ *  device's own traffic. Classic-tier (no developer tunnel). Our patched go-ios
+ *  bounds the sniff internally (~12s) and returns its best guess; run()'s longer
+ *  timeout is just a backstop. ipv4 comes back '' when the device is idle, off
+ *  Wi-Fi, or nothing was caught in time — the caller renders that as "not
+ *  detected" and lets the user retry. Kept OUT of deviceInfo() so the dashboard
+ *  paints immediately and the (slower) IP fills in progressively. */
+export async function deviceIp(bin: string, udid: string): Promise<IosNetworkInfo> {
+  const r = await run(bin, ipArgs(udid), 16000)
+  return parseNetworkInfo(r.stdout)
 }
 
 // --- developer tier: the iOS-17+ userspace tunnel + process control ----------

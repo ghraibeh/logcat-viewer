@@ -322,6 +322,24 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* A clickable tile (e.g. the IP-address tile: click to copy / retry). */
+.dinfo-tile-btn {
+  cursor: pointer;
+  outline: none;
+  transition:
+    border-color 0.12s ease,
+    transform 0.12s ease;
+}
+.dinfo-tile-btn:hover {
+  border-color: color-mix(in srgb, var(--tint) 55%, var(--border));
+}
+.dinfo-tile-btn:active {
+  transform: translateY(1px);
+}
+.dinfo-tile-btn:focus-visible {
+  border-color: var(--tint);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--tint) 35%, transparent);
+}
 
 /* ---- Details grid ----------------------------------------------------- */
 .dinfo-details {

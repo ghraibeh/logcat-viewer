@@ -9,13 +9,21 @@
 # evaluation into ios/imagemounter (see the memory note "go-ios DDI mount fix").
 # The same patch also enriches `ios sysmontap` to emit per-core CPU + RAM
 # (per_cpu / mem_total_kb / mem_used_kb), which the CLI otherwise discards —
-# feeding the iOS Monitor tab.
+# feeding the iOS Monitor tab — and rewrites `ios ip` so the Device Info tab's
+# IP-address lookup is reliable (identifies the device's Wi-Fi IP from the pcapd
+# stream without matching the hardware MAC — which iOS's default Private Wi-Fi
+# Address randomises — and returns within a bounded timeout instead of hanging).
 #
-# This clones go-ios, applies the patch, builds the `ios` binary for the host
-# platform, and drops it into node_modules/go-ios/dist/<triple>/ so findGoIos()
-# picks it up. Requires Go >= 1.26 (GOTOOLCHAIN=auto will fetch it).
+# This clones go-ios, applies the patch, and builds the `ios` binary. go-ios is
+# pure Go (CGO disabled), so by default this cross-compiles ALL supported
+# platforms and drops each into node_modules/go-ios/dist/<triple>/ — keeping the
+# whole app multiplatform (macOS/Linux/Windows hosts) from a single build host.
+# Set GOIOS_HOST_ONLY=1 to build just this host's binary. findGoIos() picks up
+# whichever matches the running host. Requires Go >= 1.26 (GOTOOLCHAIN=auto will
+# fetch it).
 #
-# Usage:  bash scripts/build-goios.sh
+# Usage:  bash scripts/build-goios.sh            # all platforms
+#         GOIOS_HOST_ONLY=1 bash scripts/build-goios.sh   # this host only
 set -euo pipefail
 
 GOIOS_REF="${GOIOS_REF:-main}"
@@ -31,25 +39,39 @@ git clone --depth 1 --branch "$GOIOS_REF" https://github.com/danielpaulus/go-ios
 echo "==> applying patch"
 git -C "$WORK/src" apply "$PATCH"
 
+# Build one GOOS/GOARCH -> its npm dist triple. Pure Go, so CGO is disabled and
+# cross-compilation needs no C toolchain.
+build_one() {
+  local goos="$1" goarch="$2" triple="$3"
+  local bin="ios"; [ "$goos" = "windows" ] && bin="ios.exe"
+  local dest="$HERE/node_modules/go-ios/dist/$triple/$bin"
+  if [ -f "$dest" ] && [ ! -f "$dest.orig" ]; then cp "$dest" "$dest.orig"; fi
+  mkdir -p "$(dirname "$dest")"
+  rm -f "$dest" # go build refuses to overwrite a non-object file (the npm binary)
+  echo "==> building $goos/$goarch"
+  ( cd "$WORK/src" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -o "$dest" . )
+  chmod +x "$dest"
+  echo "    installed -> $dest"
+}
+
 echo "==> building ios binary (Go $(go version | awk '{print $3}'); may fetch a newer toolchain)"
-BIN="ios"; case "$(go env GOOS)" in windows) BIN="ios.exe";; esac
-( cd "$WORK/src" && go build -o "$WORK/$BIN" . )
+if [ "${GOIOS_HOST_ONLY:-0}" = "1" ]; then
+  case "$(go env GOOS)-$(go env GOARCH)" in
+    darwin-arm64)  build_one darwin  arm64 go-ios-darwin-arm64_darwin_arm64;;
+    darwin-amd64)  build_one darwin  amd64 go-ios-darwin-amd64_darwin_amd64;;
+    linux-arm64)   build_one linux   arm64 go-ios-linux-arm64_linux_arm64;;
+    linux-amd64)   build_one linux   amd64 go-ios-linux-amd64_linux_amd64;;
+    windows-amd64) build_one windows amd64 go-ios-windows-amd64_windows_amd64;;
+    *) echo "unsupported platform $(go env GOOS)-$(go env GOARCH)"; exit 1;;
+  esac
+else
+  build_one darwin  arm64 go-ios-darwin-arm64_darwin_arm64
+  build_one darwin  amd64 go-ios-darwin-amd64_darwin_amd64
+  build_one linux   arm64 go-ios-linux-arm64_linux_arm64
+  build_one linux   amd64 go-ios-linux-amd64_linux_amd64
+  build_one windows amd64 go-ios-windows-amd64_windows_amd64
+fi
 
-# Map GOOS/GOARCH to the go-ios npm dist triple.
-GOOS="$(go env GOOS)"; GOARCH="$(go env GOARCH)"
-case "$GOOS-$GOARCH" in
-  darwin-arm64) TRIPLE="go-ios-darwin-arm64_darwin_arm64";;
-  darwin-amd64) TRIPLE="go-ios-darwin-amd64_darwin_amd64";;
-  linux-arm64)  TRIPLE="go-ios-linux-arm64_linux_arm64";;
-  linux-amd64)  TRIPLE="go-ios-linux-amd64_linux_amd64";;
-  windows-amd64) TRIPLE="go-ios-windows-amd64_windows_amd64";;
-  *) echo "unsupported platform $GOOS-$GOARCH"; exit 1;;
-esac
-
-DEST="$HERE/node_modules/go-ios/dist/$TRIPLE/$BIN"
-if [ -f "$DEST" ] && [ ! -f "$DEST.orig" ]; then cp "$DEST" "$DEST.orig"; fi
-mkdir -p "$(dirname "$DEST")"
-cp "$WORK/$BIN" "$DEST"
-chmod +x "$DEST"
-echo "==> installed patched go-ios -> $DEST"
-"$DEST" version 2>/dev/null | tail -1 || true
+echo "==> done"
+HOSTBIN="$HERE/node_modules/go-ios/dist/go-ios-$(go env GOOS)-$(go env GOARCH)_$(go env GOOS)_$(go env GOARCH)/ios"
+"$HOSTBIN" version 2>/dev/null | tail -1 || true

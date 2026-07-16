@@ -215,6 +215,7 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
               <Icon name="refresh" size={16} />
             </button>
           </div>
+          {loading ? <div className="app-panel-busy" /> : null}
           <div className="am-list">
             {filtered.map((a) => (
               <div

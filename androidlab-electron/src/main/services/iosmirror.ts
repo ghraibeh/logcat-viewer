@@ -30,11 +30,23 @@ export interface IosMirrorCallbacks {
   onFailed: (message: string) => void
 }
 
+// A dock<->popout move unmounts the old mirror view (which calls stopFeed) and then
+// mounts the new one in the other window (which calls start) a beat later. Deferring
+// the actual teardown by this long lets that follow-up start cancel it, so the capture
+// keeps running across the hand-off instead of being killed and re-acquired.
+const HANDOFF_GRACE_MS = 3000
+
 export class IosMirrorService {
   private udid = ''
   private runToken = 0
   private proc: ChildProcess | null = null
+  // Our own liveness flag. Do NOT use proc.killed for this: Node sets proc.killed=true
+  // the moment ANY signal is sent via .kill(), including the SIGUSR1 we send to force a
+  // keyframe on re-attach — which would wrongly make the next hand-off think the helper
+  // is dead and respawn it. This flips false only on a real terminate / process exit.
+  private alive = false
   private gotData = false
+  private teardownTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly goiosBin: string,
@@ -43,15 +55,52 @@ export class IosMirrorService {
 
   // --- live feed ----------------------------------------------------------
   start(udid: string): void {
-    this.stopFeed()
+    // Seamless dock<->popout hand-off: if the helper is already streaming this exact
+    // device, keep it running and just let the freshly-mounted view re-attach to the
+    // ongoing broadcast — no kill, no CoreMediaIO re-acquire. Force a keyframe (SIGUSR1)
+    // so the new decoder configures + paints at once rather than waiting for the next IDR.
+    const reattach = udid === this.udid && this.proc != null && this.alive
+    this.cancelTeardown()
+    if (reattach) {
+      try {
+        this.proc?.kill('SIGUSR1')
+      } catch {
+        /* helper gone between the check and the signal — fall through to a restart below */
+      }
+      return
+    }
+    this.hardStop()
     this.udid = udid
     const token = ++this.runToken
     void this.startFeed(token)
   }
 
-  /** Stop the live feed + kill the capture helper (idempotent). */
-  stopFeed(): void {
+  /** Stop the live feed. By default on a grace timer so a dock<->popout hand-off can
+   *  cancel it (see HANDOFF_GRACE_MS). `immediate` (a genuine close) tears down now. */
+  stopFeed(immediate = false): void {
+    if (immediate) {
+      this.cancelTeardown()
+      this.hardStop()
+      return
+    }
+    if (this.teardownTimer) clearTimeout(this.teardownTimer)
+    this.teardownTimer = setTimeout(() => {
+      this.teardownTimer = null
+      this.hardStop()
+    }, HANDOFF_GRACE_MS)
+  }
+
+  private cancelTeardown(): void {
+    if (this.teardownTimer) {
+      clearTimeout(this.teardownTimer)
+      this.teardownTimer = null
+    }
+  }
+
+  /** Immediate teardown — kills the capture helper (grace timer firing, new device, quit). */
+  private hardStop(): void {
     this.runToken++
+    this.alive = false
     if (this.proc) {
       try {
         this.proc.kill('SIGTERM')
@@ -82,6 +131,7 @@ export class IosMirrorService {
 
     const proc = spawn(helper, name ? [name] : [], { stdio: ['ignore', 'pipe', 'pipe'] })
     this.proc = proc
+    this.alive = true
     this.gotData = false
     let err = ''
 
@@ -107,7 +157,10 @@ export class IosMirrorService {
       if (token === this.runToken) this.cb.onFailed(`Could not start the capture helper: ${e.message}`)
     })
     proc.on('close', () => {
-      if (this.proc === proc) this.proc = null
+      if (this.proc === proc) {
+        this.proc = null
+        this.alive = false
+      }
       if (token !== this.runToken || this.gotData) return
       // Exited before producing any video — surface a helpful reason.
       this.cb.onFailed(helperFailure(err))
@@ -126,7 +179,8 @@ export class IosMirrorService {
   }
 
   shutdown(): void {
-    this.stopFeed()
+    this.cancelTeardown()
+    this.hardStop()
   }
 }
 

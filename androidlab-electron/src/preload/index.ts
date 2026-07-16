@@ -38,7 +38,8 @@ const api: AndroidLabApi = {
     listDevices: () => ipcRenderer.invoke(IPC.adbListDevices),
     listApps: (serial) => ipcRenderer.invoke(IPC.adbListApps, serial),
     resolvePids: (serial, pkg) => ipcRenderer.invoke(IPC.adbResolvePids, serial, pkg),
-    forceCrash: (serial, pkg, pids) => ipcRenderer.invoke(IPC.adbForceCrash, serial, pkg, pids)
+    forceCrash: (serial, pkg, pids) => ipcRenderer.invoke(IPC.adbForceCrash, serial, pkg, pids),
+    deviceInfo: (serial) => ipcRenderer.invoke(IPC.adbDeviceInfo, serial)
   },
   logcat: {
     start: (serial, clearFirst) => ipcRenderer.invoke(IPC.logcatStart, serial, clearFirst),
@@ -78,7 +79,7 @@ const api: AndroidLabApi = {
     startH264: (serial) => ipcRenderer.invoke(IPC.mirrorStartH264, serial),
     startScrcpy: (serial) => ipcRenderer.invoke(IPC.mirrorStartScrcpy, serial),
     startPoller: (serial, displayId) => ipcRenderer.invoke(IPC.mirrorStartPoller, serial, displayId),
-    stop: () => ipcRenderer.invoke(IPC.mirrorStop),
+    stop: (immediate) => ipcRenderer.invoke(IPC.mirrorStop, immediate),
     input: (serial, logicalId, args) => ipcRenderer.invoke(IPC.mirrorInput, serial, logicalId, args),
     control: (data) => ipcRenderer.invoke(IPC.mirrorControl, data),
     screenshot: (serial, displayId, logicalId) =>
@@ -99,7 +100,9 @@ const api: AndroidLabApi = {
     updatePopout: (info) => ipcRenderer.invoke(IPC.mirrorPopoutUpdate, info),
     popoutInfo: () => ipcRenderer.invoke(IPC.mirrorPopoutInfo),
     onPopoutInfo: (cb) => subscribe<[MirrorPopoutInfo]>(IPC.mirrorPopoutInfoEvent, cb),
-    onPopoutClosed: (cb) => subscribe<[]>(IPC.mirrorPopoutClosed, cb)
+    onPopoutClosed: (cb) => subscribe<[]>(IPC.mirrorPopoutClosed, cb),
+    popoutToggleFullscreen: () => ipcRenderer.invoke(IPC.mirrorPopoutFullscreen),
+    onPopoutFullscreen: (cb) => subscribe<[boolean]>(IPC.mirrorPopoutFullscreenEvent, cb)
   },
   controls: {
     read: (serial, pkg) => ipcRenderer.invoke(IPC.controlsRead, serial, pkg),
@@ -143,7 +146,6 @@ const api: AndroidLabApi = {
     pathForFile: (file) => webUtils.getPathForFile(file)
   },
   apk: {
-    choose: () => ipcRenderer.invoke(IPC.apkChoose),
     install: (serial, paths) => ipcRenderer.invoke(IPC.apkInstall, serial, paths)
   },
   logfile: {
@@ -197,6 +199,7 @@ const api: AndroidLabApi = {
   },
   ios: {
     deviceInfo: (udid) => ipcRenderer.invoke(IPC.iosDeviceInfo, udid),
+    deviceIp: (udid) => ipcRenderer.invoke(IPC.iosDeviceIp, udid),
     deviceImage: (identifier) => ipcRenderer.invoke(IPC.iosDeviceImage, identifier),
     listApps: (udid) => ipcRenderer.invoke(IPC.iosListApps, udid),
     chooseIpa: () => ipcRenderer.invoke(IPC.iosChooseIpa),
@@ -211,7 +214,7 @@ const api: AndroidLabApi = {
   },
   iosMirror: {
     start: (udid) => ipcRenderer.invoke(IPC.iosMirrorStart, udid),
-    stop: () => ipcRenderer.invoke(IPC.iosMirrorStop),
+    stop: (immediate) => ipcRenderer.invoke(IPC.iosMirrorStop, immediate),
     saveFrame: (pngBase64) => ipcRenderer.invoke(IPC.iosMirrorSaveFrame, pngBase64),
     onH264: (cb) => subscribe<[Uint8Array]>(IPC.iosMirrorH264, cb),
     onState: (cb) => subscribe<[IosMirrorState]>(IPC.iosMirrorState, cb),

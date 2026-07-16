@@ -30,6 +30,7 @@ export function AppPickerPanel({ c, width }: { c: Controller; width: number }) {
           onChange={(e) => setNeedle(e.target.value)}
         />
       </div>
+      {c.appsLoading ? <div className="app-panel-busy" /> : null}
       <div className="app-list">
         <div
           className={`app-item${selected === null ? ' selected' : ''}`}

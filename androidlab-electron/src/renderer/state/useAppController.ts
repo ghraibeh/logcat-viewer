@@ -72,6 +72,7 @@ export function useAppController() {
   const [devices, setDevices] = useState<Device[]>([])
   const [serial, setSerialState] = useState<string | null>(null)
   const [apps, setApps] = useState<AppEntry[]>([])
+  const [appsLoading, setAppsLoading] = useState(false)
   const [appPkg, setAppPkg] = useState<string | null>(null)
   const [appPids, setAppPids] = useState<ReadonlySet<number> | null>(null)
 
@@ -255,20 +256,28 @@ export function useAppController() {
     // Clear immediately (before the async fetch) so a device switch never shows
     // the previous device's apps while the new list loads.
     setApps([])
-    if (!s) return
-    // iOS has no adb package list — populate the shared picker from go-ios so the
-    // Databases/Files tabs (which follow c.appPkg) can select an app. User apps
-    // only (dev-signed / file-sharing apps are the container-accessible ones).
-    const dev = devicesRef.current.find((d) => d.serial === s)
-    if (dev?.platform === 'ios') {
-      const r = await window.androidlab.ios.listApps(s)
-      setApps(
-        r.ok ? r.apps.filter((a) => a.type === 'User').map((a) => ({ pkg: a.bundleId, clone: false, host: '' })) : []
-      )
+    if (!s) {
+      setAppsLoading(false)
       return
     }
-    const list = await window.androidlab.adb.listApps(s)
-    setApps(list.apps)
+    setAppsLoading(true)
+    try {
+      // iOS has no adb package list — populate the shared picker from go-ios so the
+      // Databases/Files tabs (which follow c.appPkg) can select an app. User apps
+      // only (dev-signed / file-sharing apps are the container-accessible ones).
+      const dev = devicesRef.current.find((d) => d.serial === s)
+      if (dev?.platform === 'ios') {
+        const r = await window.androidlab.ios.listApps(s)
+        setApps(
+          r.ok ? r.apps.filter((a) => a.type === 'User').map((a) => ({ pkg: a.bundleId, clone: false, host: '' })) : []
+        )
+        return
+      }
+      const list = await window.androidlab.adb.listApps(s)
+      setApps(list.apps)
+    } finally {
+      setAppsLoading(false)
+    }
   }, [])
 
   const resolvePids = useCallback(async (pkg: string): Promise<Set<number>> => {
@@ -546,6 +555,7 @@ export function useAppController() {
     setSerial,
     refreshDevices,
     apps,
+    appsLoading,
     reloadApps,
     appPkg,
     appPids,

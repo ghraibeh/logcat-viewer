@@ -83,9 +83,19 @@ export interface MirrorCallbacks {
   onFailed: (kind: 'h264' | 'poller', message: string) => void
 }
 
+// A dock<->popout move unmounts the old mirror view (which calls stopFeed) and mounts
+// the new one in the other window (which calls a matching start) a beat later. Deferring
+// the real teardown this long lets that follow-up start cancel it, so the feed keeps
+// running across the hand-off (no scrcpy re-push / re-tunnel, no reconnect).
+const HANDOFF_GRACE_MS = 3000
+
 export class MirrorService {
   private serial = ''
   private runToken = 0 // bumped on every stop/start to invalidate old loops
+  // Which display the live feed is capturing (null = main), so a re-primed screencap
+  // on hand-off targets the right one.
+  private feedDisplay: string | null = null
+  private teardownTimer: ReturnType<typeof setTimeout> | null = null
   private h264Proc: ChildProcess | null = null
 
   private scrcpyProc: ChildProcess | null = null
@@ -105,9 +115,20 @@ export class MirrorService {
   ) {}
 
   // --- live feed ----------------------------------------------------------
+  // NOTE on dock<->popout hand-off: unlike the iOS helper (which we can SIGUSR1 to emit
+  // an on-demand keyframe), scrcpy/screenrecord only emit an IDR at start + sparsely
+  // after (~10s), and scrcpy rejects unverified codec options — so we can't force one.
+  // Re-attaching the freshly-mounted window to the ongoing stream would therefore show
+  // the prime screencap and then FREEZE until the next far-off keyframe. Instead every
+  // start restarts the feed: a fresh scrcpy start emits an IDR immediately, and `prime()`
+  // paints the current screen at once, so the hand-off shows a live still then smooth
+  // video within ~1s — no frozen frame. (cancelTeardown drops any pending grace timer so
+  // it can't fire later and kill the just-started feed.)
   startH264(serial: string): void {
-    this.stopFeed()
+    this.cancelTeardown()
+    this.hardStopFeed()
     this.serial = serial
+    this.feedDisplay = null
     const token = ++this.runToken
     void this.h264Loop(token)
   }
@@ -117,8 +138,10 @@ export class MirrorService {
    * Falls back to the screenrecord H.264 loop when the server jar isn't installed.
    */
   startScrcpy(serial: string): void {
-    this.stopFeed()
+    this.cancelTeardown()
+    this.hardStopFeed()
     this.serial = serial
+    this.feedDisplay = null
     const token = ++this.runToken
     const server = resolveScrcpyServer()
     if (server) void this.scrcpyLoop(token, server)
@@ -126,16 +149,41 @@ export class MirrorService {
   }
 
   startPoller(serial: string, displayId: string | null): void {
-    this.stopFeed()
+    this.cancelTeardown()
+    this.hardStopFeed()
     this.serial = serial
+    this.feedDisplay = displayId
     const token = ++this.runToken
     for (let i = 0; i < CAPTURE_THREADS; i++) {
       void this.pollLoop(token, displayId, i * 55)
     }
   }
 
-  /** Stop only the live feed (leaves any recording running, like mirror.py). */
-  stopFeed(): void {
+  /** Stop only the live feed (leaves any recording running, like mirror.py). By default
+   *  on a grace timer so a dock<->popout hand-off can cancel it (see HANDOFF_GRACE_MS);
+   *  `immediate` (a genuine close) tears down now. */
+  stopFeed(immediate = false): void {
+    if (immediate) {
+      this.cancelTeardown()
+      this.hardStopFeed()
+      return
+    }
+    if (this.teardownTimer) clearTimeout(this.teardownTimer)
+    this.teardownTimer = setTimeout(() => {
+      this.teardownTimer = null
+      this.hardStopFeed()
+    }, HANDOFF_GRACE_MS)
+  }
+
+  private cancelTeardown(): void {
+    if (this.teardownTimer) {
+      clearTimeout(this.teardownTimer)
+      this.teardownTimer = null
+    }
+  }
+
+  /** Immediate teardown: kill the streaming proc + scrcpy + any device screenrecord. */
+  private hardStopFeed(): void {
     this.runToken++
     if (this.h264Proc) {
       try {
@@ -192,7 +240,7 @@ export class MirrorService {
   }
 
   private async prime(token: number): Promise<void> {
-    const shot = await runBinary(this.adb, screencapArgs(this.serial), 6000)
+    const shot = await runBinary(this.adb, screencapArgs(this.serial, this.feedDisplay), 6000)
     if (token !== this.runToken) return
     if (isPng(shot.stdout)) this.cb.onFrame(shot.stdout.toString('base64'))
   }
@@ -437,6 +485,8 @@ export class MirrorService {
     // Recording needs the sole display encoder. Stop the scrcpy feed + streaming
     // proc so `screenrecord` can acquire it (the renderer then drops preview to the
     // screencap poller). Invalidate the feed loop so it doesn't fight the recorder.
+    // Drop any pending hand-off teardown so it can't fire mid-recording.
+    this.cancelTeardown()
     this.runToken++
     this.killScrcpy()
     if (this.h264Proc) {
@@ -512,7 +562,8 @@ export class MirrorService {
   }
 
   shutdown(): void {
-    this.stopFeed()
+    this.cancelTeardown()
+    this.hardStopFeed()
     if (this.recProc) {
       this.recStopping = true
       void run(this.adb, this.serial, pkillScreenrecordArgs(this.serial, 'INT').slice(2), 6000)

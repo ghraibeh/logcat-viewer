@@ -92,6 +92,13 @@ export const ICON_PATHS = {
     </>
   ),
   close: <path d="M6 6l12 12M18 6 6 18" />,
+  // Rotate the mirror view 90° (portrait <-> landscape): a circular arrow.
+  rotate: (
+    <>
+      <path d="M12 5a7 7 0 1 0 7 7" />
+      <path d="M12 2 8.5 5 12 8" />
+    </>
+  ),
 
   // --- chrome / actions ---
   refresh: (

@@ -18,6 +18,11 @@ import VideoToolbox
 
 func log(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
 
+// Set by a SIGUSR1 (a dock<->popout re-attach in the app): force the next encoded
+// frame to be a keyframe so a freshly-mounted decoder in the other window can
+// configure + paint immediately instead of waiting for the next periodic IDR.
+var forceKeyframe = false
+
 // Enable the iOS screen-capture CMIO devices (QuickTime's own switch). Unprivileged.
 func enableScreenCaptureDevices() {
     var addr = CMIOObjectPropertyAddress(
@@ -149,8 +154,13 @@ final class FrameHandler: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if !configured { setup(pixel) }
         guard let s = session else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        var props: CFDictionary? = nil
+        if forceKeyframe {
+            forceKeyframe = false
+            props = [kVTEncodeFrameOptionKey_ForceKeyFrame as String: kCFBooleanTrue as Any] as CFDictionary
+        }
         VTCompressionSessionEncodeFrame(s, imageBuffer: pixel, presentationTimeStamp: pts,
-                                        duration: .invalid, frameProperties: nil, sourceFrameRefcon: nil,
+                                        duration: .invalid, frameProperties: props, sourceFrameRefcon: nil,
                                         infoFlagsOut: nil)
         frames += 1
     }
@@ -254,6 +264,13 @@ let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 sigterm.setEventHandler { liveSession?.stopRunning(); exit(0) }
 sigterm.resume()
 signal(SIGTERM, SIG_IGN)
+
+// SIGUSR1 → force a keyframe on the next encode (dock<->popout re-attach). Must have
+// a handler installed or the default action would terminate the helper.
+let sigusr = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+sigusr.setEventHandler { forceKeyframe = true }
+sigusr.resume()
+signal(SIGUSR1, SIG_IGN)
 
 log("waiting for iOS screen device…")
 RunLoop.main.run()

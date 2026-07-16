@@ -268,15 +268,6 @@ export default function App() {
     [c, showToast]
   )
 
-  const doInstall = useCallback(async () => {
-    const paths = await window.androidlab.apk.choose()
-    if (paths.length === 0) return
-    const r = await c.install(paths)
-    if (!r) return
-    if (r.ok) setMsgBox({ title: 'APK installed', body: `✓  ${r.message}` })
-    else setMsgBox({ title: 'Install failed', body: r.output ? `${r.message}\n\n${r.output}` : r.message })
-  }, [c])
-
   const doSavePreset = useCallback(() => setPromptOpen(true), [])
 
   // --- native menu actions ----------------------------------------------
@@ -381,6 +372,16 @@ export default function App() {
   // The popout window was closed (native X or its dock-back button) → re-dock.
   useEffect(() => window.androidlab.mirror.onPopoutClosed(() => setMirrorMode('docked')), [])
 
+  // A genuine close must stop the feed at once. The dock's own unmount defers teardown
+  // briefly (so a dock<->popout hand-off can cancel it), but closing never goes through
+  // a hand-off — so tear the capture down immediately here for both platforms.
+  useEffect(() => {
+    if (mirrorMode === 'closed') {
+      void window.androidlab.iosMirror.stop(true)
+      void window.androidlab.mirror.stop(true)
+    }
+  }, [mirrorMode])
+
   // Keep the popout tracking the currently-selected device.
   useEffect(() => {
     if (mirrorMode === 'popped') {
@@ -411,7 +412,6 @@ export default function App() {
     <div className="app">
       <Toolbar
         c={c}
-        onInstall={() => void doInstall()}
         onAbout={() => setAbout(true)}
         onMirror={toggleMirror}
         mirrorOpen={mirrorMode !== 'closed'}
@@ -455,8 +455,12 @@ export default function App() {
         </div>
       ) : tab === 'monitor' ? (
         <div className="logs-tab">
-          <AppPickerPanel c={c} width={panelWidth} />
-          <div className="splitter" onMouseDown={onSplitterDown} />
+          {c.platform !== 'ios' ? (
+            <>
+              <AppPickerPanel c={c} width={panelWidth} />
+              <div className="splitter" onMouseDown={onSplitterDown} />
+            </>
+          ) : null}
           <MonitorView c={c} onDetectLeaks={(serial, pkg) => setLeakReq({ serial, pkg })} />
         </div>
       ) : tab === 'databases' ? (

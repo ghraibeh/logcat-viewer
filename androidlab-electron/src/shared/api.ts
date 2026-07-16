@@ -50,7 +50,9 @@ import type { FileKind } from '@core/files'
 import type { IntentSpec } from '@core/toolbox'
 import type { Pref } from '@core/prefs'
 import type { DisplayInfo } from '@core/mirror'
+import type { AndroidDeviceInfo } from '@core/deviceinfo'
 import type { IosDeviceInfo } from '@core/iosdeviceinfo'
+import type { IosNetworkInfo } from '@core/goios'
 
 export type Unsubscribe = () => void
 
@@ -61,6 +63,8 @@ export interface AndroidLabApi {
     listApps(serial: string): Promise<AppList>
     resolvePids(serial: string, pkg: string): Promise<number[]>
     forceCrash(serial: string, pkg: string, pids: number[]): Promise<string[]>
+    /** Aggregated "About this device" info for the Device Info tab. */
+    deviceInfo(serial: string): Promise<AndroidDeviceInfo | null>
   }
   logcat: {
     start(serial: string, clearFirst: boolean): Promise<boolean>
@@ -113,8 +117,9 @@ export interface AndroidLabApi {
     startScrcpy(serial: string): Promise<boolean>
     /** Start the screencap PNG poller (fallback / secondary displays). */
     startPoller(serial: string, displayId: string | null): Promise<boolean>
-    /** Stop the live feed (a running MP4 recording keeps going). */
-    stop(): Promise<boolean>
+    /** Stop the live feed (a running MP4 recording keeps going). `immediate` tears down
+     *  now (a genuine close); the default defers briefly so a popout hand-off can cancel it. */
+    stop(immediate?: boolean): Promise<boolean>
     /** One-shot `input` (tap/swipe/keyevent/text), routed to `logicalId` if set. */
     input(serial: string, logicalId: number | null, args: string[]): Promise<void>
     /** Inject a pre-encoded scrcpy control message (touch/key/text) over the control
@@ -148,6 +153,10 @@ export interface AndroidLabApi {
     onPopoutInfo(cb: (info: MirrorPopoutInfo) => void): Unsubscribe
     /** Main window: the popout was closed — re-dock the mirror. */
     onPopoutClosed(cb: () => void): Unsubscribe
+    /** Popout window: toggle the OS window between fullscreen and windowed. */
+    popoutToggleFullscreen(): Promise<void>
+    /** Popout window: the OS-window fullscreen state changed (button/Esc/green button). */
+    onPopoutFullscreen(cb: (fullscreen: boolean) => void): Unsubscribe
   }
   controls: {
     read(serial: string, pkg: string | null): Promise<{ ok: boolean; message: string; state: ControlsState | null }>
@@ -237,7 +246,6 @@ export interface AndroidLabApi {
     pathForFile(file: File): string
   }
   apk: {
-    choose(): Promise<string[]>
     install(serial: string, paths: string[]): Promise<InstallResult>
   }
   logfile: {
@@ -297,6 +305,9 @@ export interface AndroidLabApi {
   ios: {
     /** Aggregated device info (lockdown + disk + battery) for the Device Info tab. */
     deviceInfo(udid: string): Promise<IosDeviceInfo>
+    /** Detect the device's current Wi-Fi/LAN IP (`ios ip` pcapd sniff; classic-tier,
+     *  no tunnel). `ipv4` is '' when idle / off Wi-Fi / not caught in time. */
+    deviceIp(udid: string): Promise<IosNetworkInfo | null>
     /** A real device render (data: URI) for `identifier` from the AppleDB CDN,
      *  cached per-user; null when offline / no render exists. */
     deviceImage(identifier: string): Promise<string | null>
@@ -325,8 +336,9 @@ export interface AndroidLabApi {
   iosMirror: {
     /** Begin the H.264 feed for `udid`. */
     start(udid: string): Promise<boolean>
-    /** Stop the feed + kill the capture helper. */
-    stop(): Promise<boolean>
+    /** Stop the feed + kill the capture helper. `immediate` tears down now (a genuine
+     *  close); the default defers briefly so a dock<->popout hand-off can cancel it. */
+    stop(immediate?: boolean): Promise<boolean>
     /** Save a PNG the renderer grabbed from the mirror canvas to ~/Downloads. */
     saveFrame(pngBase64: string): Promise<SaveResult>
     onH264(cb: (chunk: Uint8Array) => void): Unsubscribe

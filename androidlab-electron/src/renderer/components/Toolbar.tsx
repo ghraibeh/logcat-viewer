@@ -1,6 +1,6 @@
 /**
- * Shared device toolbar (device row) — port of ui.py's row1: device picker +
- * refresh + Wi-Fi + Install + app picker + reload + Pull + Mirror + About.
+ * Shared device toolbar (device row): device picker + refresh + Wi-Fi + Mirror
+ * + theme + About. App selection lives in the left-hand AppPickerPanel now.
  * Stream controls (Start/Pause/Clear) live in the filter bar, exactly as in ui.py.
  */
 import type { Controller } from '../state/useAppController'
@@ -11,7 +11,6 @@ const PHASE3 = 'Available in a later migration phase'
 
 export function Toolbar({
   c,
-  onInstall,
   onAbout,
   onMirror,
   mirrorOpen,
@@ -19,7 +18,6 @@ export function Toolbar({
   onToggleTheme
 }: {
   c: Controller
-  onInstall: () => void
   onAbout: () => void
   onMirror: () => void
   mirrorOpen: boolean
@@ -60,42 +58,7 @@ export function Toolbar({
         <button className="toggle" title={`Connect over Wi-Fi — ${PHASE3}`} disabled>
           <Icon name="wifi" size={16} />
         </button>
-        <button
-          title="Install APK(s) to the selected device"
-          disabled={!hasDevice}
-          onClick={onInstall}
-        >
-          Install…
-        </button>
-
-        <div style={{ width: 6 }} />
-        <span className="label">App</span>
-        <select
-          style={{ flex: 1 }}
-          value={c.appPkg ?? ''}
-          disabled={!hasDevice}
-          onChange={(e) => void c.selectApp(e.target.value || null)}
-        >
-          <option value="">All apps</option>
-          {c.apps.map((a) => (
-            <option key={a.pkg} value={a.pkg}>
-              {a.clone ? `${a.pkg}   (clone)` : a.pkg}
-            </option>
-          ))}
-        </select>
-        <button
-          className="toggle"
-          title="Reload installed / running apps"
-          disabled={!hasDevice}
-          onClick={() => void c.reloadApps()}
-        >
-          <Icon name="refresh" size={16} />
-        </button>
-        <button title={`Pull the selected app's APK(s) — ${PHASE3}`} disabled>
-          Pull
-        </button>
-
-        <div style={{ width: 6 }} />
+        <div style={{ flex: 1 }} />
         <button
           className={mirrorOpen ? 'active' : undefined}
           title="Mirror the device's screen"

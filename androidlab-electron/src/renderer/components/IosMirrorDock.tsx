@@ -11,7 +11,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnnexBDemuxer } from '@core/mirror'
 import type { IosMirrorState, SaveResult } from '@shared/types'
-import { PALETTE } from '../theme'
 import { Icon } from './Icon'
 
 const HAS_WEBCODECS = typeof (globalThis as { VideoDecoder?: unknown }).VideoDecoder !== 'undefined'
@@ -33,8 +32,14 @@ class H264Engine {
   private running = false
   srcW = 0
   srcH = 0
+  scale = 1
+  rotation = 0 // view rotation in degrees (0/90/180/270), portrait <-> landscape
   fit: Fit | null = null
   onFail: ((message: string) => void) | null = null
+
+  setRotation(deg: number): void {
+    this.rotation = ((deg % 360) + 360) % 360
+  }
 
   attach(canvas: HTMLCanvasElement | null): void {
     this.canvas = canvas
@@ -141,19 +146,29 @@ class H264Engine {
     }
     const ctx = canvas.getContext('2d')
     if (!ctx) return
+    // Rotate the view about the canvas centre: at 90/270 the fit box swaps W/H, so a
+    // portrait phone fills the pane horizontally (and vice-versa).
+    const rot = ((this.rotation % 360) + 360) % 360
+    const swap = rot === 90 || rot === 270
+    const effW = swap ? sh : sw
+    const effH = swap ? sw : sh
+    const scale = Math.min(cw / effW, ch / effH)
+    const dw = sw * scale
+    const dh = sh * scale
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.fillStyle = '#0d0f13'
     ctx.fillRect(0, 0, cw, ch)
-    const scale = Math.min(cw / sw, ch / sh)
-    const w = sw * scale
-    const h = sh * scale
-    const x = (cw - w) / 2
-    const y = (ch - h) / 2
+    ctx.translate(cw / 2, ch / 2)
+    ctx.rotate((rot * Math.PI) / 180)
     ctx.imageSmoothingEnabled = true
-    ctx.drawImage(src, x, y, w, h)
+    ctx.drawImage(src, -dw / 2, -dh / 2, dw, dh)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     this.srcW = sw
     this.srcH = sh
-    this.fit = { x, y, w, h }
+    this.scale = scale
+    const boxW = effW * scale
+    const boxH = effH * scale
+    this.fit = { x: (cw - boxW) / 2, y: (ch - boxH) / 2, w: boxW, h: boxH }
   }
 
   /** PNG data URL of just the mirrored content (letterbox cropped out), or null. */
@@ -251,6 +266,7 @@ export function IosMirrorDock({
   const [failed, setFailed] = useState<string | null>(null)
   const [fullscreen, setFullscreen] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [rotation, setRotation] = useState(0) // view rotation (0/90/180/270)
 
   // Attach the canvas + present loop for the component's lifetime.
   useEffect(() => {
@@ -259,6 +275,11 @@ export function IosMirrorDock({
     eng.onFail = (m) => setFailed(m)
     return () => eng.close()
   }, [])
+
+  // Push the view rotation to the engine; the next painted frame applies it.
+  useEffect(() => {
+    engineRef.current.setRotation(rotation)
+  }, [rotation])
 
   // (Re)start the feed whenever the device changes.
   useEffect(() => {
@@ -307,15 +328,32 @@ export function IosMirrorDock({
     onCaptured(r)
   }, [onCaptured])
 
+  // Fullscreen: detached in its own window, drive the real OS-window fullscreen (a
+  // separate window's "full screen" should fill the display, not just this pane).
+  // Docked, expand the pane over the app window via the CSS overlay (.mirror-fs).
+  const toggleFullscreen = useCallback(() => {
+    if (popped) void window.androidlab.mirror.popoutToggleFullscreen()
+    else setFullscreen((v) => !v)
+  }, [popped])
+
+  // Popout: mirror the OS-window fullscreen state (our button, the green traffic
+  // light, or Ctrl+⌘+F) so the icon + overlay stay in sync.
+  useEffect(() => {
+    if (!popped) return
+    return window.androidlab.mirror.onPopoutFullscreen(setFullscreen)
+  }, [popped])
+
   // Esc exits fullscreen.
   useEffect(() => {
     if (!fullscreen) return
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setFullscreen(false)
+      if (e.key !== 'Escape') return
+      if (popped) void window.androidlab.mirror.popoutToggleFullscreen()
+      else setFullscreen(false)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [fullscreen])
+  }, [fullscreen, popped])
 
   return (
     <div className={`mirror-dock${fullscreen ? ' mirror-fs' : ''}`}>
@@ -333,23 +371,33 @@ export function IosMirrorDock({
             <div className="mirror-msg">{message}</div>
           )
         ) : null}
-        {hasFrame ? (
-          <div className="mirror-overlay ios-status">
-            <span className="ic" style={{ color: PALETTE.GREEN }}>
-              ●
-            </span>
-            <span className="tx">Live stream</span>
-          </div>
-        ) : null}
       </div>
 
       <div className="mirror-rail">
+        {/* Close is pinned to the top of the rail (sticky) so it's always reachable. */}
+        <button
+          className="rail-btn rail-close"
+          title={popped ? 'Close mirror window' : 'Close mirror'}
+          onClick={onClose}
+        >
+          <Icon name="close" size={24} />
+        </button>
+
+        <div className="rail-div" />
+
         <button
           className="rail-btn"
           title={fullscreen ? 'Exit full screen (Esc)' : 'Full screen mirror (Esc to exit)'}
-          onClick={() => setFullscreen((v) => !v)}
+          onClick={toggleFullscreen}
         >
           <Icon name={fullscreen ? 'contract' : 'fullscreen'} size={24} />
+        </button>
+        <button
+          className={`rail-btn${rotation ? ' active' : ''}`}
+          title="Rotate the mirror 90° (portrait / landscape)"
+          onClick={() => setRotation((r) => (r + 90) % 360)}
+        >
+          <Icon name="rotate" size={24} />
         </button>
 
         <div className="rail-div" />
@@ -363,24 +411,18 @@ export function IosMirrorDock({
           <Icon name="camera" size={24} />
         </button>
 
-        <div className="rail-div" />
-
         {onPopout ? (
-          <button
-            className="rail-btn"
-            title={popped ? 'Dock back into the main window' : 'Open mirror in a separate window'}
-            onClick={onPopout}
-          >
-            <Icon name={popped ? 'popin' : 'popout'} size={24} />
-          </button>
+          <>
+            <div className="rail-div" />
+            <button
+              className="rail-btn"
+              title={popped ? 'Dock back into the main window' : 'Open mirror in a separate window'}
+              onClick={onPopout}
+            >
+              <Icon name={popped ? 'popin' : 'popout'} size={24} />
+            </button>
+          </>
         ) : null}
-        <button
-          className="rail-btn rail-close"
-          title={popped ? 'Close mirror window' : 'Close mirror'}
-          onClick={onClose}
-        >
-          <Icon name="close" size={24} />
-        </button>
       </div>
     </div>
   )

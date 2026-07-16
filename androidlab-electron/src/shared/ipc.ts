@@ -6,6 +6,7 @@ export const IPC = {
   adbListApps: 'adb:list-apps',
   adbResolvePids: 'adb:resolve-pids',
   adbForceCrash: 'adb:force-crash',
+  adbDeviceInfo: 'adb:device-info',
 
   // logcat stream control (invoke/handle)
   logcatStart: 'logcat:start',
@@ -60,6 +61,7 @@ export const IPC = {
   mirrorPopoutClose: 'mirror:popout-close', // -> main: close the window (arg: redock?)
   mirrorPopoutUpdate: 'mirror:popout-update', // -> main: push a new device to the window
   mirrorPopoutInfo: 'mirror:popout-info', // popout renderer -> main: which device to mirror
+  mirrorPopoutFullscreen: 'mirror:popout-fullscreen', // popout renderer -> main: toggle OS-window fullscreen
   // mirror events (main -> renderer)
   mirrorFrame: 'mirror:frame',
   mirrorH264: 'mirror:h264',
@@ -68,6 +70,7 @@ export const IPC = {
   mirrorRecordDone: 'mirror:record-done',
   mirrorPopoutInfoEvent: 'mirror:popout-info-event', // main -> popout: device changed
   mirrorPopoutClosed: 'mirror:popout-closed', // main -> main window: popout closed, re-dock
+  mirrorPopoutFullscreenEvent: 'mirror:popout-fullscreen-event', // main -> popout: OS-window fullscreen changed
 
   // device controls (invoke/handle)
   controlsRead: 'controls:read',
@@ -102,7 +105,6 @@ export const IPC = {
   filesChoosePush: 'files:choose-push',
 
   // apk install (invoke/handle)
-  apkChoose: 'apk:choose',
   apkInstall: 'apk:install',
 
   // log file open/export (invoke/handle)
@@ -157,6 +159,7 @@ export const IPC = {
 
   // iOS Apps tab (go-ios backend)
   iosDeviceInfo: 'ios:device-info',
+  iosDeviceIp: 'ios:device-ip',
   iosDeviceImage: 'ios:device-image',
   iosListApps: 'ios:list-apps',
   iosChooseIpa: 'ios:choose-ipa',

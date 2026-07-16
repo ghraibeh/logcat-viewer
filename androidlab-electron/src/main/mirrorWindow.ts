@@ -75,6 +75,10 @@ export class MirrorWindowManager {
       void win.webContents.setVisualZoomLevelLimits(1, 1)
       win.webContents.setZoomFactor(1)
     })
+    // Keep the popout's fullscreen button in sync however fullscreen is entered/left
+    // (our button, the green traffic-light, or Ctrl+⌘+F).
+    win.on('enter-full-screen', () => this.pushFullscreen(true))
+    win.on('leave-full-screen', () => this.pushFullscreen(false))
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     win.webContents.on('will-navigate', (e) => e.preventDefault())
 
@@ -98,6 +102,16 @@ export class MirrorWindowManager {
 
   private pushInfo(): void {
     if (this.isOpen()) this.win!.webContents.send(IPC.mirrorPopoutInfoEvent, this.info)
+  }
+
+  private pushFullscreen(fullscreen: boolean): void {
+    if (this.isOpen()) this.win!.webContents.send(IPC.mirrorPopoutFullscreenEvent, fullscreen)
+  }
+
+  /** Toggle the popout OS window between fullscreen and windowed. */
+  toggleFullScreen(): void {
+    if (!this.isOpen()) return
+    this.win!.setFullScreen(!this.win!.isFullScreen())
   }
 
   /** Close the window. `redock` re-attaches the in-app dock; `false` is a full

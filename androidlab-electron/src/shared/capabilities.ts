@@ -12,7 +12,7 @@ import type { Device, Platform } from './types'
 
 /** Tab id (from App.tsx TABS) -> the platforms that currently support it. */
 export const TAB_SUPPORT: Record<string, Platform[]> = {
-  deviceinfo: ['ios'],
+  deviceinfo: ['android', 'ios'],
   logs: ['android', 'ios'],
   location: ['android', 'ios'],
   network: ['android'],

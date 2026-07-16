@@ -450,6 +450,30 @@ button.adv-toggle.checked {
   color: var(--text-dim);
   font-size: 11px;
 }
+/* Thin indeterminate busy bar shown while the app list loads (matches the
+   .db-busy / .files-busy bars used elsewhere). */
+.app-panel-busy {
+  height: 3px;
+  flex: 0 0 auto;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.app-panel-busy::after {
+  content: '';
+  display: block;
+  height: 100%;
+  width: 40%;
+  background: var(--accent);
+  animation: app-panel-busy-slide 1.1s ease-in-out infinite;
+}
+@keyframes app-panel-busy-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
 
 /* Resizer handle between panel and log view */
 .splitter {

@@ -10,6 +10,7 @@ import { IPC } from '@shared/ipc'
 import type { Device, MirrorPopoutInfo, PresetMap } from '@shared/types'
 import { MirrorWindowManager } from './mirrorWindow'
 import { findAdb, listDevices, listApps, resolvePids, forceCrash } from './services/adb'
+import { readDeviceInfo } from './services/deviceinfo'
 import * as goios from './services/goios'
 import * as iosfiles from './services/iosfiles'
 import { LogcatReader } from './services/logcat'
@@ -122,6 +123,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     const adb = findAdb()
     if (!adb || !serial) return []
     return await forceCrash(adb, serial, pkg, pids)
+  })
+
+  ipcMain.handle(IPC.adbDeviceInfo, async (_e, serial: string) => {
+    const adb = findAdb()
+    if (!adb || !serial) return null
+    return await readDeviceInfo(adb, serial)
   })
 
   ipcMain.handle(IPC.logcatStart, (_e, serial: string, clearFirst: boolean) => {
@@ -322,8 +329,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return true
   })
 
-  ipcMain.handle(IPC.mirrorStop, () => {
-    mirrorSvc?.stopFeed()
+  ipcMain.handle(IPC.mirrorStop, (_e, immediate?: boolean) => {
+    mirrorSvc?.stopFeed(immediate)
     return true
   })
 
@@ -380,6 +387,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle(IPC.mirrorPopoutClose, (_e, redock: boolean) => mirrorWin.close(redock))
   ipcMain.handle(IPC.mirrorPopoutUpdate, (_e, info: MirrorPopoutInfo) => mirrorWin.update(info))
   ipcMain.handle(IPC.mirrorPopoutInfo, () => mirrorWin.getInfo())
+  ipcMain.handle(IPC.mirrorPopoutFullscreen, () => mirrorWin.toggleFullScreen())
 
   ipcMain.handle(IPC.controlsRead, async (_e, serial: string, pkg: string | null) => {
     const adb = findAdb()
@@ -706,21 +714,6 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return res.canceled ? [] : res.filePaths
   })
 
-  ipcMain.handle(IPC.apkChoose, async () => {
-    const win = getWindow()
-    if (!win) return []
-    const res = await dialog.showOpenDialog(win, {
-      title: 'Select APK(s) to install',
-      defaultPath: homedir(),
-      properties: ['openFile', 'multiSelections'],
-      filters: [
-        { name: 'Android packages', extensions: ['apk'] },
-        { name: 'All files', extensions: ['*'] }
-      ]
-    })
-    return res.canceled ? [] : res.filePaths
-  })
-
   ipcMain.handle(IPC.apkInstall, async (_e, serial: string, paths: string[]) => {
     const adb = findAdb()
     if (!adb || !serial) return { ok: false, message: 'No device selected', output: '', names: '' }
@@ -970,6 +963,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return await goios.deviceInfo(bin, udid)
   })
 
+  ipcMain.handle(IPC.iosDeviceIp, async (_e, udid: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return null
+    return await goios.deviceIp(bin, udid)
+  })
+
   ipcMain.handle(IPC.iosDeviceImage, (_e, identifier: string) => deviceImage(identifier))
 
   ipcMain.handle(IPC.iosListApps, async (_e, udid: string) => {
@@ -1061,8 +1060,8 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return true
   })
 
-  ipcMain.handle(IPC.iosMirrorStop, () => {
-    iosMirrorSvc?.stopFeed()
+  ipcMain.handle(IPC.iosMirrorStop, (_e, immediate?: boolean) => {
+    iosMirrorSvc?.stopFeed(immediate)
     return true
   })
 

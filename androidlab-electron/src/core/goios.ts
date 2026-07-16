@@ -44,6 +44,17 @@ export interface IosDeviceFields {
   version: string
 }
 
+/** Device network addresses from `ios ip` (a pcapd sniff of the device's own
+ *  traffic). Any field the sniff couldn't determine is an empty string. */
+export interface IosNetworkInfo {
+  /** Wi-Fi/LAN IPv4, e.g. "192.168.1.42" ('' when idle, off Wi-Fi, or timed out). */
+  ipv4: string
+  /** IPv6 address if one was observed ('' otherwise). */
+  ipv6: string
+  /** Hardware Wi-Fi MAC (lockdown WiFiAddress). */
+  mac: string
+}
+
 // --- JSON-loose reader --------------------------------------------------------
 /** Parse every JSON value on stdout. go-ios normally prints one JSON document,
  *  but depending on log level it can prepend structured log lines; try the whole
@@ -97,6 +108,17 @@ export function parseInfo(stdout: string): IosDeviceFields | null {
     }
   }
   return null
+}
+
+/** Parse `ios ip` output — {"Mac":…,"IPv4":…,"IPv6":…} — into IosNetworkInfo.
+ *  Fields the sniff couldn't fill come back as empty strings. */
+export function parseNetworkInfo(stdout: string): IosNetworkInfo {
+  for (const v of jsonValues(stdout)) {
+    if (isObj(v) && ('IPv4' in v || 'IPv6' in v || 'Mac' in v)) {
+      return { ipv4: str(v, 'IPv4'), ipv6: str(v, 'IPv6'), mac: str(v, 'Mac') }
+    }
+  }
+  return { ipv4: '', ipv6: '', mac: '' }
 }
 
 /** Human label + description for a device, mirroring adb.ts's "<id> — <desc>". */
@@ -195,6 +217,13 @@ export function listArgs(): string[] {
 
 export function infoArgs(udid: string): string[] {
   return ['info', '--udid', udid]
+}
+
+/** `ios ip` — sniff the device's live packet capture to report its Wi-Fi IP.
+ *  Classic-tier (no developer tunnel); our patched go-ios bounds it with an
+ *  internal timeout and returns its best guess rather than blocking. */
+export function ipArgs(udid: string): string[] {
+  return ['ip', '--udid', udid]
 }
 
 export function appsArgs(udid: string, kind: 'user' | 'system' | 'all' = 'all'): string[] {

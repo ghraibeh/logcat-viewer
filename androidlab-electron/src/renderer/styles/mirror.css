@@ -284,6 +284,15 @@
   color: var(--red);
   background: rgba(242, 90, 82, 0.16);
 }
+/* Close stays pinned at the top of the rail (first child) so it's always reachable,
+   even when a tall rail scrolls on a short dock. The rail-bg fill covers the buttons
+   that scroll underneath it. */
+.mirror-rail .rail-close {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #141519;
+}
 .rail-close:hover:not(:disabled) {
   color: var(--red);
   background: rgba(242, 90, 82, 0.16);
