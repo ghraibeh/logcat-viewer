@@ -42,6 +42,11 @@ export function FilterBar({
   const set = c.setFilterField
   const f = c.filter
   const field = <K extends keyof FilterFields>(k: K): FilterFields[K] => f[k]
+  // On iOS the log is `ios syslog`: the "tag" field is the emitting process, and
+  // there's no per-app PID filter — so we relabel Tag→Process here (the app
+  // picker is already hidden for iOS logs in App.tsx). All other filters (level,
+  // search, PID, exclude, presets) apply to both platforms.
+  const ios = c.platform === 'ios'
 
   return (
     <div className="filter-bar" id="FilterBar">
@@ -106,8 +111,8 @@ export function FilterBar({
             ref={searchRef}
             type="text"
             className={c.fieldErrors.text ? 'error' : ''}
-            placeholder="🔍  Search tag + message   (error|success)"
-            title={`Show lines whose tag or message matches.\n${OR_HINT}`}
+            placeholder={`🔍  Search ${ios ? 'process' : 'tag'} + message   (error|success)`}
+            title={`Show lines whose ${ios ? 'process' : 'tag'} or message matches.\n${OR_HINT}`}
             value={field('text')}
             onChange={(e) => set('text', e.target.value)}
           />
@@ -181,20 +186,20 @@ export function FilterBar({
       {/* Advanced panel */}
       {c.advancedOpen ? (
         <div className="filter-row">
-          <span className="label">Tag</span>
+          <span className="label">{ios ? 'Process' : 'Tag'}</span>
           <div className="field-group" style={{ flex: 2 }}>
             <input
               type="text"
               className={c.fieldErrors.tag ? 'error' : ''}
-              placeholder="tag  (e.g. Activity|View)"
-              title={`Show lines whose tag matches.\n${OR_HINT}`}
+              placeholder={ios ? 'process  (e.g. audiomxd|kernel)' : 'tag  (e.g. Activity|View)'}
+              title={`Show lines whose ${ios ? 'process' : 'tag'} matches.\n${OR_HINT}`}
               value={field('tag')}
               onChange={(e) => set('tag', e.target.value)}
             />
             <RegexToggle
               on={f.tagRegex}
               onToggle={() => set('tagRegex', !f.tagRegex, true)}
-              title="Treat tag filter as a regular expression"
+              title={`Treat ${ios ? 'process' : 'tag'} filter as a regular expression`}
             />
           </div>
           <div style={{ width: 6 }} />

@@ -31,6 +31,7 @@ import { CrashService } from './services/crash'
 import { AppMgrService } from './services/appmgr'
 import { InterceptService } from './services/intercept'
 import { installApks } from './services/apk'
+import { deviceImage } from './services/deviceimage'
 import { writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { FileKind } from '@core/files'
@@ -124,18 +125,31 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   })
 
   ipcMain.handle(IPC.logcatStart, (_e, serial: string, clearFirst: boolean) => {
+    if (!serial) return false
+    if (isIos(serial)) {
+      const bin = goios.findGoIos()
+      if (!bin) return false
+      // iOS: stream `ios syslog`, reshaped to threadtime so the shared parser reads it.
+      return goios.syslogStart(
+        bin,
+        serial,
+        (lines) => send(IPC.logcatLines, lines),
+        (s) => send(IPC.logcatState, s)
+      )
+    }
     const adb = findAdb()
-    if (!adb || !serial) return false
+    if (!adb) return false
     ensureReader(adb).start(serial, clearFirst)
     return true
   })
 
   ipcMain.handle(IPC.logcatStop, () => {
     reader?.stop()
+    goios.syslogStop()
     return true
   })
 
-  ipcMain.handle(IPC.logcatRunning, () => reader?.running ?? false)
+  ipcMain.handle(IPC.logcatRunning, () => (reader?.running ?? false) || goios.syslogRunning())
 
   // --- interactive adb shell (one PTY per tab, keyed by id) ----------------
   const ensureShell = (id: string, adb: string): ShellSession => {
@@ -950,6 +964,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   })
 
   // --- iOS Apps tab (go-ios backend) --------------------------------------
+  ipcMain.handle(IPC.iosDeviceInfo, async (_e, udid: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return null
+    return await goios.deviceInfo(bin, udid)
+  })
+
+  ipcMain.handle(IPC.iosDeviceImage, (_e, identifier: string) => deviceImage(identifier))
+
   ipcMain.handle(IPC.iosListApps, async (_e, udid: string) => {
     const bin = goios.findGoIos()
     if (!bin) return { ok: false, apps: [], error: 'go-ios binary not found' }
@@ -1173,6 +1195,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     iosfiles.shutdown()
     goios.shutdownMock()
     goios.monitorStop()
+    goios.syslogStop()
     goios.stopTunnel()
   })
 }

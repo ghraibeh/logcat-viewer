@@ -12,11 +12,16 @@ import type { Device, Platform } from './types'
 
 /** Tab id (from App.tsx TABS) -> the platforms that currently support it. */
 export const TAB_SUPPORT: Record<string, Platform[]> = {
-  logs: ['android'],
+  deviceinfo: ['ios'],
+  logs: ['android', 'ios'],
   location: ['android', 'ios'],
   network: ['android'],
-  databases: ['android', 'ios'],
-  files: ['android', 'ios'],
+  // On iOS both the file browser and the database inspector reach an app's own
+  // sandbox container (via go-ios house-arrest/AFC), not a device-wide store — so
+  // neither is a top-level tab on iOS; they live as the "Files"/"Databases" sub-tabs
+  // inside Apps, scoped to the selected app (see IosAppsView).
+  databases: ['android'],
+  files: ['android'],
   apps: ['android', 'ios'],
   monitor: ['android', 'ios'],
   inspector: ['android'],

@@ -274,6 +274,41 @@ export const ICON_PATHS = {
       <rect x="5" y="5" width="14" height="10" rx="1.5" />
       <path d="M2.5 18.5h19" />
     </>
+  ),
+
+  // --- device info ---
+  chip: (
+    <>
+      <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
+      <rect x="9.5" y="9.5" width="5" height="5" rx="0.8" />
+      <path d="M9 6.5V3.5M15 6.5V3.5M9 20.5v-3M15 20.5v-3M6.5 9h-3M6.5 15h-3M20.5 9h-3M20.5 15h-3" />
+    </>
+  ),
+  memory: (
+    <>
+      <rect x="3" y="8" width="18" height="9" rx="1.5" />
+      <path d="M6.5 8V5M10 8V5M14 8V5M17.5 8V5M8 17v2.5M16 17v2.5" />
+    </>
+  ),
+  battery: (
+    <>
+      <rect x="3" y="8" width="16" height="9" rx="2.5" />
+      <path d="M21.5 11.5v2" />
+      <rect x="5" y="10" width="8" height="5" rx="1" fill="currentColor" stroke="none" />
+    </>
+  ),
+  signal: <path d="M4 20v-2.5M9 20v-6M14 20v-9.5M19 20V5" />,
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3c2.8 2.6 2.8 15.4 0 18M12 3c-2.8 2.6-2.8 15.4 0 18" />
+    </>
+  ),
+  shield: (
+    <>
+      <path d="M12 3l7 2.8v5.7c0 4.4-3 7.4-7 8.7-4-1.3-7-4.3-7-8.7V5.8z" />
+      <path d="M9 12l2 2 4-4.2" />
+    </>
   )
 } satisfies Record<string, ReactNode>
 

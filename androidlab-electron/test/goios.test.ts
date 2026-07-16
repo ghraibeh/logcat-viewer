@@ -279,3 +279,18 @@ describe('parseIosBattery', () => {
     expect(G.parseIosBattery('{}', '{}')).toBeNull()
   })
 })
+
+describe('syslogToThreadtime', () => {
+  it('reshapes an ASL line into adb threadtime (process→tag, level, tid 0)', () => {
+    const line = 'Jul 16 03:41:21 iPhone-14 audiomxd(AudioToolbox)[104] <Error>: could not fetch'
+    expect(G.syslogToThreadtime(line)).toBe('07-16 03:41:21.000 104 0 E audiomxd(AudioToolbox): could not fetch')
+  })
+  it('maps iOS levels to the closest Android priority (Notice→I)', () => {
+    const line = 'Jan  6 09:00:00 host kernel[0] <Notice>: hi'
+    expect(G.syslogToThreadtime(line)).toBe('01-06 09:00:00.000 0 0 I kernel: hi')
+  })
+  it('returns null for a line that is not standard syslog', () => {
+    expect(G.syslogToThreadtime('a continuation line with no header')).toBeNull()
+    expect(G.syslogToThreadtime('')).toBeNull()
+  })
+})

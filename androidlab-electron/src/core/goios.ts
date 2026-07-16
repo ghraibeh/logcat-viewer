@@ -363,11 +363,48 @@ export function resetLocationArgs(udid: string): string[] {
 // its memory/per-process data is requested but discarded by the CLI (would need
 // a deeper go-ios patch to surface — memory/per-app are left null for now).
 
+export function syslogArgs(udid: string): string[] {
+  return ['syslog', '--udid', udid]
+}
+
+// --- iOS syslog → adb-threadtime bridge ---------------------------------------
+// `ios syslog` emits classic ASL lines like:
+//   "Jul 16 03:41:21 iPhone-14 audiomxd(AudioToolbox)[104] <Notice>: message"
+// We reshape each into an adb `logcat -v threadtime` line so the shared parser +
+// log table render it unchanged: process→tag, iOS level→closest Android
+// priority, and tid 0 (iOS syslog carries no thread id).
+const SYSLOG_MONTHS: Record<string, string> = {
+  Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06',
+  Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12'
+}
+const SYSLOG_LEVEL: Record<string, string> = {
+  debug: 'D', info: 'I', notice: 'I', default: 'I',
+  warning: 'W', warn: 'W', error: 'E', err: 'E',
+  fault: 'F', critical: 'F', alert: 'F', emergency: 'F'
+}
+const SYSLOG_RE = /^(\w{3}) +(\d+) (\d{2}:\d{2}:\d{2}) \S+ (.+?)\[(\d+)\] <([^>]+)>: ?([\s\S]*)$/
+
+/** Reshape one `ios syslog` message into an adb-threadtime line, or null if it
+ *  doesn't parse (skipped rather than shown with a bogus timestamp). */
+export function syslogToThreadtime(msg: string): string | null {
+  const m = SYSLOG_RE.exec(msg.trimEnd())
+  if (!m) return null
+  const [, mon, day, time, proc, pid, level, message] = m
+  const mm = SYSLOG_MONTHS[mon] ?? '01'
+  const dd = day.padStart(2, '0')
+  const lvl = SYSLOG_LEVEL[level.toLowerCase()] ?? 'I'
+  const tag = proc.trim().replace(/:/g, '') // a tag must not contain the ": " separator
+  return `${mm}-${dd} ${time}.000 ${pid} 0 ${lvl} ${tag}: ${message.trimStart()}`
+}
+
 export function batteryCheckArgs(udid: string): string[] {
   return ['batterycheck', '--udid', udid]
 }
 export function batteryRegistryArgs(udid: string): string[] {
   return ['batteryregistry', '--udid', udid]
+}
+export function diskspaceArgs(udid: string): string[] {
+  return ['diskspace', '--udid', udid]
 }
 
 export interface SysmontapSample {

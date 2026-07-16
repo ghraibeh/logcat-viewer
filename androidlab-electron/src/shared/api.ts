@@ -50,6 +50,7 @@ import type { FileKind } from '@core/files'
 import type { IntentSpec } from '@core/toolbox'
 import type { Pref } from '@core/prefs'
 import type { DisplayInfo } from '@core/mirror'
+import type { IosDeviceInfo } from '@core/iosdeviceinfo'
 
 export type Unsubscribe = () => void
 
@@ -294,6 +295,11 @@ export interface AndroidLabApi {
   }
   /** iOS Apps tab (go-ios backend). `udid` is the device serial. */
   ios: {
+    /** Aggregated device info (lockdown + disk + battery) for the Device Info tab. */
+    deviceInfo(udid: string): Promise<IosDeviceInfo>
+    /** A real device render (data: URI) for `identifier` from the AppleDB CDN,
+     *  cached per-user; null when offline / no render exists. */
+    deviceImage(identifier: string): Promise<string | null>
     listApps(udid: string): Promise<IosAppListResult>
     /** Open a file dialog for a signed .ipa; returns its path or null. */
     chooseIpa(): Promise<string | null>

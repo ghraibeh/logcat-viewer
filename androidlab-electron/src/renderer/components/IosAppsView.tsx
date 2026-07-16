@@ -18,6 +18,8 @@ import { AppIcon } from './AppIcon'
 import { Icon } from './Icon'
 import { CrashView } from './CrashView'
 import { PrefsView } from './PrefsView'
+import { FilesView } from './FilesView'
+import { DatabaseView } from './DatabaseView'
 
 type FilterKind = 'user' | 'system' | 'all'
 
@@ -37,7 +39,7 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
   // Selection is the shared app pick (c.appPkg) so the Databases tab + sub-tabs
   // all follow one selection, like Android's AppManagerView.
   const selected = c.appPkg
-  const [sub, setSub] = useState<'info' | 'crashes' | 'prefs'>('info')
+  const [sub, setSub] = useState<'info' | 'files' | 'databases' | 'crashes' | 'prefs'>('info')
   const [busy, setBusy] = useState(false)
   const [confirmApp, setConfirmApp] = useState<IosAppInfo | null>(null)
   // Developer tier (userspace tunnel — no sudo): launch / force-quit / ps.
@@ -300,6 +302,12 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
             <button className={`tab${sub === 'info' ? ' selected' : ''}`} onClick={() => setSub('info')}>
               Info
             </button>
+            <button className={`tab${sub === 'files' ? ' selected' : ''}`} onClick={() => setSub('files')}>
+              Files
+            </button>
+            <button className={`tab${sub === 'databases' ? ' selected' : ''}`} onClick={() => setSub('databases')}>
+              Databases
+            </button>
             <button className={`tab${sub === 'crashes' ? ' selected' : ''}`} onClick={() => setSub('crashes')}>
               Crashes
             </button>
@@ -350,6 +358,24 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
               ) : (
                 <div className="ios-empty">Pick an app on the left to see its details.</div>
               )}
+              </div>
+            ) : sub === 'files' ? (
+              current ? (
+                // Reuse the Android File Explorer — on iOS it browses the selected
+                // app's sandbox container ('/'-rooted) via go-ios house-arrest/AFC.
+                <div className="am-embed" style={{ display: 'flex' }}>
+                  <FilesView c={c} />
+                </div>
+              ) : (
+                <div className="am-scroll">
+                  <div className="ios-empty">Pick an app on the left to browse its container.</div>
+                </div>
+              )
+            ) : sub === 'databases' ? (
+              // Reuse the Android Database Inspector — on iOS it lists the selected
+              // app's SQLite files inside its container (via go-ios) and browses them.
+              <div className="am-embed" style={{ display: 'flex' }}>
+                <DatabaseView c={c} />
               </div>
             ) : sub === 'crashes' ? (
               <div className="am-embed" style={{ display: 'flex' }}>

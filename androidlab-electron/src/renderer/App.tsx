@@ -11,6 +11,7 @@ import { FilterBar } from './components/FilterBar'
 import { AppPickerPanel } from './components/AppPickerPanel'
 import { LogWorkArea } from './components/LogWorkArea'
 import { MonitorView } from './components/MonitorView'
+import { DeviceInfoView } from './components/DeviceInfoView'
 import { LeakReportModal } from './components/LeakReportModal'
 import { InspectorView } from './components/InspectorView'
 import { ControlsView } from './components/ControlsView'
@@ -32,6 +33,7 @@ import { useAppController } from './state/useAppController'
 import { useTheme } from './state/useTheme'
 
 const TABS: TabDef[] = [
+  { id: 'deviceinfo', label: 'Device Info' },
   { id: 'logs', label: 'Logs' },
   { id: 'location', label: 'Location' },
   { id: 'network', label: 'Network HTTP' },
@@ -426,10 +428,18 @@ export default function App() {
 
       <div className="main-row">
       <div className="main-content">
-      {tab === 'logs' ? (
+      {tab === 'deviceinfo' ? (
+        <DeviceInfoView c={c} />
+      ) : tab === 'logs' ? (
         <div className="logs-tab">
-          <AppPickerPanel c={c} width={panelWidth} />
-          <div className="splitter" onMouseDown={onSplitterDown} />
+          {/* iOS syslog is device-wide and can't be filtered by app (no
+              bundle→PID like adb), so the app-picker filter is Android-only. */}
+          {c.platform !== 'ios' ? (
+            <>
+              <AppPickerPanel c={c} width={panelWidth} />
+              <div className="splitter" onMouseDown={onSplitterDown} />
+            </>
+          ) : null}
           <div className="logs-right">
             <FilterBar c={c} searchRef={searchRef} onSavePreset={doSavePreset} />
             <LogWorkArea

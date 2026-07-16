@@ -196,6 +196,8 @@ const api: AndroidLabApi = {
     extractApk: (serial, pkg) => ipcRenderer.invoke(IPC.appmgrExtractApk, serial, pkg)
   },
   ios: {
+    deviceInfo: (udid) => ipcRenderer.invoke(IPC.iosDeviceInfo, udid),
+    deviceImage: (identifier) => ipcRenderer.invoke(IPC.iosDeviceImage, identifier),
     listApps: (udid) => ipcRenderer.invoke(IPC.iosListApps, udid),
     chooseIpa: () => ipcRenderer.invoke(IPC.iosChooseIpa),
     install: (udid, ipaPath) => ipcRenderer.invoke(IPC.iosInstall, udid, ipaPath),

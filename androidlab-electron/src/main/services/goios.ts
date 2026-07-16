@@ -17,6 +17,7 @@ import { basename, delimiter, join } from 'node:path'
 import { app } from 'electron'
 import { parseIpsReport } from '@core/ipscrash'
 import { plistJsonToPrefs } from '@core/iosprefs'
+import { parseDeviceInfo, type IosDeviceInfo } from '@core/iosdeviceinfo'
 import type { CrashItem } from '@core/crash'
 import type { Battery, Sample } from '@core/monitor'
 import {
@@ -24,6 +25,7 @@ import {
   batteryCheckArgs,
   batteryRegistryArgs,
   deviceLabel,
+  diskspaceArgs,
   fsyncPullArgs,
   fsyncTreeArgs,
   imageAutoArgs,
@@ -43,6 +45,8 @@ import {
   parseSysmontapCpu,
   psArgs,
   setLocationArgs,
+  syslogArgs,
+  syslogToThreadtime,
   sysmontapCpuPercent,
   tunnelHasUdid,
   tunnelLsArgs,
@@ -186,6 +190,18 @@ export async function uninstall(bin: string, udid: string, bundleId: string): Pr
   const r = await run(bin, uninstallArgs(udid, bundleId), 60000)
   if (r.code === 0) return { ok: true, message: `Uninstalled ${bundleId}` }
   return { ok: false, message: lastLine(r.stderr, r.stdout, 'Uninstall failed') }
+}
+
+/** Aggregate lockdown info + disk + battery into the Device Info payload. All of
+ *  these are classic-tier (no developer tunnel needed). */
+export async function deviceInfo(bin: string, udid: string): Promise<IosDeviceInfo> {
+  const [info, disk, reg, chk] = await Promise.all([
+    run(bin, infoArgs(udid), 12000),
+    run(bin, diskspaceArgs(udid), 10000),
+    run(bin, batteryRegistryArgs(udid), 10000),
+    run(bin, batteryCheckArgs(udid), 10000)
+  ])
+  return parseDeviceInfo(info.stdout, disk.stdout, reg.stdout, chk.stdout)
 }
 
 // --- developer tier: the iOS-17+ userspace tunnel + process control ----------
@@ -527,6 +543,65 @@ export function monitorStop(): void {
   if (monitorBatteryTimer) {
     clearInterval(monitorBatteryTimer)
     monitorBatteryTimer = null
+  }
+}
+
+// --- live device log (`ios syslog`, no tunnel — the iOS logcat analogue) ------
+// Streams the classic ASL syslog and reshapes each line into adb-threadtime so
+// the shared logcat parser/table renders it unchanged. go-ios emits one JSON
+// object per line ({"msg": "<raw syslog line>"}).
+let syslogProc: ChildProcess | null = null
+
+export function syslogRunning(): boolean {
+  return syslogProc !== null
+}
+
+export function syslogStart(
+  bin: string,
+  udid: string,
+  onLines: (lines: string[]) => void,
+  onState: (state: string) => void
+): boolean {
+  syslogStop()
+  const proc = spawn(bin, syslogArgs(udid), { stdio: ['ignore', 'pipe', 'ignore'] })
+  syslogProc = proc
+  proc.on('spawn', () => onState('started'))
+  let buf = ''
+  proc.stdout?.on('data', (d: Buffer) => {
+    buf += d.toString()
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? '' // keep the partial tail
+    const out: string[] = []
+    for (const line of lines) {
+      const t = line.trim()
+      if (!t) continue
+      let msg = t
+      try {
+        const o = JSON.parse(t) as { msg?: unknown }
+        if (o && typeof o.msg === 'string') msg = o.msg
+      } catch {
+        /* not JSON — treat the whole line as the message */
+      }
+      const tt = syslogToThreadtime(msg)
+      if (tt) out.push(tt)
+    }
+    if (out.length) onLines(out)
+  })
+  proc.on('exit', () => {
+    if (syslogProc === proc) syslogProc = null
+    onState('stopped')
+  })
+  return true
+}
+
+export function syslogStop(): void {
+  if (syslogProc) {
+    try {
+      syslogProc.kill()
+    } catch {
+      /* already gone */
+    }
+    syslogProc = null
   }
 }
 

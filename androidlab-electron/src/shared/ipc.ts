@@ -156,6 +156,8 @@ export const IPC = {
   appmgrExtractApk: 'appmgr:extract-apk',
 
   // iOS Apps tab (go-ios backend)
+  iosDeviceInfo: 'ios:device-info',
+  iosDeviceImage: 'ios:device-image',
   iosListApps: 'ios:list-apps',
   iosChooseIpa: 'ios:choose-ipa',
   iosInstall: 'ios:install',
