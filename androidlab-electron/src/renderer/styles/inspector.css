@@ -63,6 +63,7 @@
   overflow: auto;
   padding: 4px 0;
   border-bottom: 1px solid var(--border);
+  position: relative;
 }
 .insp-node {
   display: flex;
@@ -90,6 +91,7 @@
   flex: 2;
   min-height: 0;
   overflow: auto;
+  position: relative;
 }
 .insp-props table {
   width: 100%;

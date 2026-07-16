@@ -1,0 +1,140 @@
+diff --git a/ios/imagemounter/personalized_image.go b/ios/imagemounter/personalized_image.go
+index d35eadd..1e74763 100644
+--- a/ios/imagemounter/personalized_image.go
++++ b/ios/imagemounter/personalized_image.go
+@@ -38,6 +38,15 @@ func (m buildManifest) findIdentity(identifiers personalizationIdentifiers) (bui
+ 	return buildIdentity{}, fmt.Errorf("findIdentity: failed to find identity for ApBoardId 0x%x and ApChipId 0x%x", identifiers.BoardId, identifiers.ChipID)
+ }
+ 
++// restoreRequestRule is one entry of a manifest component's
++// Info.RestoreRequestRules: a set of Conditions (evaluated against the
++// personalization parameters) that, when all satisfied, apply its Actions
++// (e.g. EPRO/ESEC) to the TSS request entry. See applyRestoreRequestRules.
++type restoreRequestRule struct {
++	Conditions map[string]interface{} `plist:"Conditions"`
++	Actions    map[string]interface{} `plist:"Actions"`
++}
++
+ type manifestEntry struct {
+ 	Digest  []byte
+ 	Trusted bool `plist:"Trusted"`
+@@ -45,7 +54,8 @@ type manifestEntry struct {
+ 	ESEC    bool `plist:"ESEC"`
+ 	Name    string
+ 	Info    struct {
+-		Path string
++		Path                string
++		RestoreRequestRules []restoreRequestRule `plist:"RestoreRequestRules"`
+ 	}
+ }
+ 
+diff --git a/ios/imagemounter/tss.go b/ios/imagemounter/tss.go
+index 488c537..f77444a 100644
+--- a/ios/imagemounter/tss.go
++++ b/ios/imagemounter/tss.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 	"io"
+ 	"net/http"
++	"reflect"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+@@ -48,6 +49,23 @@ func (t tssClient) getSignature(identity buildIdentity, identifiers personalizat
+ 		"UID_MODE":          false,
+ 	}
+ 
++	// EPRO/ESEC are not present on the raw manifest entries — they are derived
++	// from the manifest's RestoreRequestRules (carried on the LoadableTrustCache
++	// component). Reading entry.EPRO/entry.ESEC directly yields false, and TSS then
++	// rejects the request with status 94 ("device isn't eligible for the requested
++	// build"). A DDI mount is always production + secure + Img4, under which the
++	// rules resolve EPRO=true and ESEC=true. Evaluate the rules exactly like
++	// idevicerestore/pymobiledevice3 do so the flags match what Apple expects.
++	ruleParams := map[string]interface{}{
++		"ApProductionMode": true,
++		"ApSecurityMode":   true,
++		"ApSupportsImg4":   true,
++	}
++	var rules []restoreRequestRule
++	if ltc, ok := identity.Manifest["LoadableTrustCache"]; ok {
++		rules = ltc.Info.RestoreRequestRules
++	}
++
+ 	for key, entry := range identity.Manifest {
+ 		if !entry.Trusted {
+ 			continue
+@@ -58,6 +76,7 @@ func (t tssClient) getSignature(identity buildIdentity, identifiers personalizat
+ 			"EPRO":    entry.EPRO,
+ 			"ESEC":    entry.ESEC,
+ 		}
++		applyRestoreRequestRules(entryParams, ruleParams, rules)
+ 		if key == "PersonalizedDMG" || key == "PersonalizedDmg" {
+ 			if entry.Name != "" {
+ 				entryParams["Name"] = entry.Name
+@@ -119,6 +138,65 @@ func (t tssClient) getSignature(identity buildIdentity, identifiers personalizat
+ 	return nil, fmt.Errorf("getSignature: unexpected response status %d", res.StatusCode)
+ }
+ 
++// applyRestoreRequestRules mutates a TSS component entry by applying every rule
++// whose Conditions are all satisfied by params — a faithful port of
++// pymobiledevice3's TSSRequest.apply_restore_request_rules. Condition keys map to
++// the personalization parameters; a missing/falsy parameter fails the condition
++// (matching pymobiledevice3's `value == value2 if value2 else False`). Action
++// values of 255 are sentinels and skipped.
++func applyRestoreRequestRules(entry, params map[string]interface{}, rules []restoreRequestRule) {
++	for _, rule := range rules {
++		fulfilled := true
++		for key, want := range rule.Conditions {
++			var have interface{}
++			switch key {
++			case "ApRawProductionMode", "ApCurrentProductionMode":
++				have = params["ApProductionMode"]
++			case "ApRawSecurityMode":
++				have = params["ApSecurityMode"]
++			case "ApRequiresImage4":
++				have = params["ApSupportsImg4"]
++			case "ApDemotionPolicyOverride":
++				have = params["DemotionPolicy"]
++			case "ApInRomDFU":
++				have = params["ApInRomDFU"]
++			default:
++				have = nil
++			}
++			if !isTruthy(have) || !reflect.DeepEqual(want, have) {
++				fulfilled = false
++				break
++			}
++		}
++		if !fulfilled {
++			continue
++		}
++		for key, value := range rule.Actions {
++			if n, ok := value.(uint64); ok && n == 255 {
++				continue
++			}
++			entry[key] = value
++		}
++	}
++}
++
++func isTruthy(v interface{}) bool {
++	switch t := v.(type) {
++	case nil:
++		return false
++	case bool:
++		return t
++	case string:
++		return t != ""
++	case uint64:
++		return t != 0
++	case int64:
++		return t != 0
++	default:
++		return true
++	}
++}
++
+ type response struct {
+ 	status        int
+ 	message       string

@@ -3,21 +3,27 @@
  * This is the single boundary between the privileged main process (subprocess +
  * fs + dialogs) and the sandboxed renderer.
  */
-import { ipcMain, dialog, shell, type BrowserWindow } from 'electron'
+import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { IPC } from '@shared/ipc'
-import type { PresetMap } from '@shared/types'
+import type { Device, MirrorPopoutInfo, PresetMap } from '@shared/types'
+import { MirrorWindowManager } from './mirrorWindow'
 import { findAdb, listDevices, listApps, resolvePids, forceCrash } from './services/adb'
+import * as goios from './services/goios'
+import * as iosfiles from './services/iosfiles'
 import { LogcatReader } from './services/logcat'
 import { ShellSession } from './services/shell'
 import { MonitorService } from './services/monitor'
+import { LeakDetectService } from './services/leakdetect'
 import { captureInspect } from './services/inspector'
 import { MirrorService } from './services/mirror'
+import { IosMirrorService } from './services/iosmirror'
 import { readControlsState, applyControls } from './services/controls'
 import { enableWirelessDebug } from './services/wireless'
 import { MockLocationService } from './services/mocklocation'
 import { DbService } from './services/db'
+import { IosDbService } from './services/iosdb'
 import { FilesService } from './services/files'
 import { ToolboxService } from './services/toolbox'
 import { PrefsService } from './services/prefs'
@@ -37,7 +43,9 @@ import { loadPresets, savePresets } from './services/presets'
 export function registerIpc(getWindow: () => BrowserWindow | null): void {
   let reader: LogcatReader | null = null
   let monitor: MonitorService | null = null
+  let leak: LeakDetectService | null = null
   let db: DbService | null = null
+  let iosDb: IosDbService | null = null
   let files: FilesService | null = null
   let toolbox: ToolboxService | null = null
   let prefs: PrefsService | null = null
@@ -45,14 +53,33 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   let appmgr: AppMgrService | null = null
   let mockloc: MockLocationService | null = null
   let mirrorSvc: MirrorService | null = null
+  let iosMirrorSvc: IosMirrorService | null = null
   // One PTY-backed session per renderer shell tab, keyed by the tab's id.
   const shellSessions = new Map<string, ShellSession>()
   let intercept: InterceptService | null = null
+
+  // Cache of the last merged device list so handlers can tell a serial's
+  // platform (Android via adb vs iOS via go-ios) and route accordingly.
+  let lastDevices: Device[] = []
+  const isIos = (serial: string): boolean =>
+    lastDevices.some((d) => d.serial === serial && d.platform === 'ios')
 
   const send = (channel: string, ...args: unknown[]): void => {
     const win = getWindow()
     if (win && !win.isDestroyed()) win.webContents.send(channel, ...args)
   }
+
+  // Fan an event out to every live window. Used for the mirror frame/H.264
+  // streams so they reach whichever window currently hosts the dock — the main
+  // window OR the detached pop-out window (only one mounts the dock at a time).
+  const broadcast = (channel: string, ...args: unknown[]): void => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send(channel, ...args)
+    }
+  }
+
+  // The detached mirror window; on close it tells the main window to re-dock.
+  const mirrorWin = new MirrorWindowManager(() => send(IPC.mirrorPopoutClosed))
 
   const ensureReader = (adb: string): LogcatReader => {
     if (!reader) {
@@ -68,8 +95,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle(IPC.adbFind, () => ({ path: findAdb() }))
 
   ipcMain.handle(IPC.adbListDevices, async () => {
+    // The app's device list is the union of adb (Android) + go-ios (iOS). Either
+    // backend being absent just contributes an empty list.
     const adb = findAdb()
-    return adb ? await listDevices(adb) : []
+    const android = adb ? await listDevices(adb) : []
+    const iosBin = goios.findGoIos()
+    const ios = iosBin ? await goios.listDevices(iosBin).catch(() => []) : []
+    lastDevices = [...android, ...ios]
+    return lastDevices
   })
 
   ipcMain.handle(IPC.adbListApps, async (_e, serial: string) => {
@@ -175,6 +208,49 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return true
   })
 
+  // --- memory-leak detection (LeakCanary/Shark) ---------------------------
+  const ensureLeak = (adb: string): LeakDetectService => {
+    if (!leak) {
+      leak = new LeakDetectService(adb, {
+        onProgress: (message) => send(IPC.leakProgress, message),
+        onDone: (ok, report, hprofPath, pkg) => send(IPC.leakDone, { ok, report, hprofPath, pkg })
+      })
+    }
+    return leak
+  }
+
+  ipcMain.handle(IPC.leakStart, (_e, serial: string, pkg: string) => {
+    const adb = findAdb()
+    if (!adb || !serial || !pkg) return false
+    return ensureLeak(adb).start(serial, pkg)
+  })
+
+  ipcMain.handle(IPC.leakCancel, () => {
+    leak?.cancel()
+    return true
+  })
+
+  ipcMain.handle(IPC.leakSaveReport, async (_e, html: string, pkg: string) => {
+    const win = getWindow()
+    if (!win) return { ok: false, message: 'no window', dir: '' }
+    const safe = (pkg || 'app').replace(/[^a-zA-Z0-9._-]/g, '_')
+    const res = await dialog.showSaveDialog(win, {
+      title: 'Save leak report',
+      defaultPath: join(homedir(), 'Downloads', `leak-report-${safe}.html`),
+      filters: [
+        { name: 'HTML', extensions: ['html'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    })
+    if (res.canceled || !res.filePath) return { ok: false, message: 'cancelled', dir: '' }
+    try {
+      writeFileSync(res.filePath, html, 'utf8')
+    } catch (e) {
+      return { ok: false, message: `Couldn't save: ${e instanceof Error ? e.message : String(e)}`, dir: '' }
+    }
+    return { ok: true, message: `Leak report saved to ${res.filePath.split('/').pop()}`, dir: dirname(res.filePath) }
+  })
+
   ipcMain.handle(IPC.inspectCapture, async (_e, serial: string) => {
     const adb = findAdb()
     if (!adb || !serial) {
@@ -187,12 +263,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   const ensureMirror = (adb: string): MirrorService => {
     if (!mirrorSvc) {
       mirrorSvc = new MirrorService(adb, {
-        onFrame: (base64) => send(IPC.mirrorFrame, base64),
-        onH264: (chunk) => send(IPC.mirrorH264, chunk),
-        onControlReady: (ready) => send(IPC.mirrorControlReady, ready),
-        onFailed: (kind, message) => send(IPC.mirrorFailed, { kind, message })
+        onFrame: (base64) => broadcast(IPC.mirrorFrame, base64),
+        onH264: (chunk) => broadcast(IPC.mirrorH264, chunk),
+        onControlReady: (ready) => broadcast(IPC.mirrorControlReady, ready),
+        onFailed: (kind, message) => broadcast(IPC.mirrorFailed, { kind, message })
       })
-      mirrorSvc.onRecordDone((result) => send(IPC.mirrorRecordDone, result))
+      mirrorSvc.onRecordDone((result) => broadcast(IPC.mirrorRecordDone, result))
     }
     return mirrorSvc
   }
@@ -271,6 +347,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     if (adb && serial) ensureMirror(adb).launchScrcpy(serial, logicalId)
   })
 
+  // Detached mirror window (Android Studio-style pop-out).
+  ipcMain.handle(IPC.mirrorPopoutOpen, (_e, info: MirrorPopoutInfo) => mirrorWin.open(info))
+  ipcMain.handle(IPC.mirrorPopoutClose, (_e, redock: boolean) => mirrorWin.close(redock))
+  ipcMain.handle(IPC.mirrorPopoutUpdate, (_e, info: MirrorPopoutInfo) => mirrorWin.update(info))
+  ipcMain.handle(IPC.mirrorPopoutInfo, () => mirrorWin.getInfo())
+
   ipcMain.handle(IPC.controlsRead, async (_e, serial: string, pkg: string | null) => {
     const adb = findAdb()
     if (!adb || !serial) return { ok: false, message: 'no device selected', state: null }
@@ -298,24 +380,42 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return mockloc
   }
 
+  // Mock GPS. Android drives a helper-APK service; iOS drives go-ios's DVT
+  // simulate-location (tunnel + Developer Disk Image mount). Same MockResult
+  // shape → the shared LocationView works unchanged for both.
   ipcMain.handle(IPC.mocklocSetup, async (_e, serial: string) => {
+    if (!serial) return { ok: false, message: 'No device selected' }
+    if (isIos(serial)) {
+      const bin = goios.findGoIos()
+      return bin ? await goios.mockSetup(bin, serial) : { ok: false, message: 'go-ios not found' }
+    }
     const adb = findAdb()
-    if (!adb || !serial) return { ok: false, message: 'No device selected' }
+    if (!adb) return { ok: false, message: 'No device selected' }
     return await ensureMockloc(adb).setup(serial)
   })
 
   ipcMain.handle(
     IPC.mocklocSet,
     async (_e, serial: string, lat: number, lng: number, acc?: number, alt?: number) => {
+      if (!serial) return { ok: false, message: 'No device selected' }
+      if (isIos(serial)) {
+        const bin = goios.findGoIos()
+        return bin ? await goios.setLocation(bin, serial, lat, lng) : { ok: false, message: 'go-ios not found' }
+      }
       const adb = findAdb()
-      if (!adb || !serial) return { ok: false, message: 'No device selected' }
+      if (!adb) return { ok: false, message: 'No device selected' }
       return await ensureMockloc(adb).set(serial, lat, lng, acc ?? null, alt ?? null)
     }
   )
 
   ipcMain.handle(IPC.mocklocStop, async (_e, serial: string) => {
+    if (!serial) return { ok: false, message: 'No device selected' }
+    if (isIos(serial)) {
+      const bin = goios.findGoIos()
+      return bin ? await goios.resetLocation(bin, serial) : { ok: false, message: 'go-ios not found' }
+    }
     const adb = findAdb()
-    if (!adb || !serial) return { ok: false, message: 'No device selected' }
+    if (!adb) return { ok: false, message: 'No device selected' }
     return await ensureMockloc(adb).stop(serial)
   })
 
@@ -324,26 +424,46 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     if (!db) db = new DbService(adb)
     return db
   }
+  // iOS DB backend (fsync pull → same sql.js readers as Android). `bin` non-null
+  // only when the serial is an iOS device.
+  const iosDbFor = (serial: string): IosDbService | null => {
+    if (!isIos(serial)) return null
+    const bin = goios.findGoIos()
+    if (!bin) return null
+    if (!iosDb) iosDb = new IosDbService(bin)
+    return iosDb
+  }
 
   ipcMain.handle(IPC.dbList, async (_e, serial: string, pkg: string) => {
-    const adb = findAdb()
-    if (!adb || !serial || !pkg) {
+    if (!serial || !pkg) {
       return { ok: false, dbs: [], message: 'no device / app selected', usedSu: false, hasSqlite3: false }
     }
+    const ios = iosDbFor(serial)
+    if (ios) return await ios.list(serial, pkg)
+    const adb = findAdb()
+    if (!adb) return { ok: false, dbs: [], message: 'no device / app selected', usedSu: false, hasSqlite3: false }
     return await ensureDb(adb).list(serial, pkg)
   })
 
   ipcMain.handle(IPC.dbOpen, async (_e, serial: string, pkg: string, name: string, force: boolean) => {
+    if (!serial || !pkg) return { ok: false, name, tables: [], message: 'no device / app selected' }
+    const ios = iosDbFor(serial)
+    if (ios) return await ios.open(serial, pkg, name, force)
     const adb = findAdb()
-    if (!adb || !serial || !pkg) return { ok: false, name, tables: [], message: 'no device / app selected' }
+    if (!adb) return { ok: false, name, tables: [], message: 'no device / app selected' }
     return await ensureDb(adb).open(serial, pkg, name, force)
   })
 
   ipcMain.handle(
     IPC.dbReadTable,
     async (_e, serial: string, pkg: string, name: string, table: string, limit: number, offset: number) => {
+      if (!serial || !pkg) {
+        return { ok: false, cols: [], rows: [], total: -1, truncated: false, rowids: null, message: 'no device' }
+      }
+      const ios = iosDbFor(serial)
+      if (ios) return await ios.readTable(serial, pkg, name, table, limit, offset)
       const adb = findAdb()
-      if (!adb || !serial || !pkg) {
+      if (!adb) {
         return { ok: false, cols: [], rows: [], total: -1, truncated: false, rowids: null, message: 'no device' }
       }
       return await ensureDb(adb).readTable(serial, pkg, name, table, limit, offset)
@@ -351,8 +471,13 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   )
 
   ipcMain.handle(IPC.dbQuery, async (_e, serial: string, pkg: string, name: string, sql: string) => {
+    if (!serial || !pkg) {
+      return { ok: false, cols: [], rows: [], total: -1, truncated: false, rowids: null, message: 'no device' }
+    }
+    const ios = iosDbFor(serial)
+    if (ios) return await ios.runQuery(serial, pkg, name, sql)
     const adb = findAdb()
-    if (!adb || !serial || !pkg) {
+    if (!adb) {
       return { ok: false, cols: [], rows: [], total: -1, truncated: false, rowids: null, message: 'no device' }
     }
     return await ensureDb(adb).runQuery(serial, pkg, name, sql)
@@ -371,16 +496,17 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       value: string | null,
       setNull: boolean
     ) => {
+      if (!serial || !pkg) return { ok: false, message: 'no device / app selected' }
+      if (isIos(serial)) return { ok: false, message: 'Editing iOS databases is not supported yet (read-only).' }
       const adb = findAdb()
-      if (!adb || !serial || !pkg) return { ok: false, message: 'no device / app selected' }
+      if (!adb) return { ok: false, message: 'no device / app selected' }
       return await ensureDb(adb).edit(serial, pkg, name, table, col, rowid, value, setNull)
     }
   )
 
   ipcMain.handle(IPC.dbExport, async (_e, serial: string, pkg: string, name: string, suggested: string) => {
-    const adb = findAdb()
     const win = getWindow()
-    if (!adb || !serial || !pkg || !win) return { ok: false, message: 'no device / app selected', dir: '' }
+    if (!serial || !pkg || !win) return { ok: false, message: 'no device / app selected', dir: '' }
     const res = await dialog.showSaveDialog(win, {
       title: `Export '${name}' as a .db file`,
       defaultPath: join(homedir(), 'Downloads', suggested),
@@ -390,6 +516,10 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       ]
     })
     if (res.canceled || !res.filePath) return { ok: false, message: 'cancelled', dir: '' }
+    const ios = iosDbFor(serial)
+    if (ios) return await ios.exportDb(serial, pkg, name, res.filePath)
+    const adb = findAdb()
+    if (!adb) return { ok: false, message: 'no device / app selected', dir: '' }
     return await ensureDb(adb).exportDb(serial, pkg, name, res.filePath)
   })
 
@@ -415,9 +545,20 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return files
   }
 
+  // iOS: browse the app container via fsync (read-only). `bin` non-null only for
+  // an iOS device; the container is per-app, so `pkg` is required.
+  const iosFilesBin = (serial: string): string | null => (isIos(serial) ? goios.findGoIos() : null)
+  const IOS_FILES_READONLY = 'iOS containers are read-only here — upload/new-folder/rename/delete aren’t supported yet.'
+
   ipcMain.handle(IPC.filesList, async (_e, serial: string, path: string, pkg: string | null, rootMode: boolean) => {
+    if (!serial) return { ok: false, path, entries: [], error: 'No device selected', usedSu: false }
+    const bin = iosFilesBin(serial)
+    if (bin) {
+      if (!pkg) return { ok: false, path, entries: [], error: 'Select an app to browse its container', usedSu: false }
+      return await iosfiles.list(bin, serial, pkg, path)
+    }
     const adb = findAdb()
-    if (!adb || !serial) return { ok: false, path, entries: [], error: 'No device selected', usedSu: false }
+    if (!adb) return { ok: false, path, entries: [], error: 'No device selected', usedSu: false }
     return await ensureFiles(adb).listDir(serial, path, pkg, rootMode)
   })
 
@@ -432,8 +573,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       items: FilesPullItem[],
       destDir: string
     ) => {
+      if (!serial) return { ok: false, message: 'No device selected', dir: '' }
+      const bin = iosFilesBin(serial)
+      if (bin) {
+        if (!pkg) return { ok: false, message: 'Select an app to browse its container', dir: '' }
+        return await iosfiles.pull(bin, serial, pkg, path, items, destDir)
+      }
       const adb = findAdb()
-      if (!adb || !serial) return { ok: false, message: 'No device selected', dir: '' }
+      if (!adb) return { ok: false, message: 'No device selected', dir: '' }
       return await ensureFiles(adb).pull(serial, path, pkg, rootMode, items, destDir)
     }
   )
@@ -441,6 +588,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle(
     IPC.filesPush,
     async (_e, serial: string, path: string, pkg: string | null, rootMode: boolean, sources: string[]) => {
+      if (isIos(serial)) return { ok: false, message: IOS_FILES_READONLY, dir: '' }
       const adb = findAdb()
       if (!adb || !serial) return { ok: false, message: 'No device selected', dir: '' }
       return await ensureFiles(adb).push(serial, path, pkg, rootMode, sources)
@@ -450,6 +598,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle(
     IPC.filesMkdir,
     async (_e, serial: string, path: string, pkg: string | null, rootMode: boolean, name: string) => {
+      if (isIos(serial)) return { ok: false, message: IOS_FILES_READONLY }
       const adb = findAdb()
       if (!adb || !serial) return { ok: false, message: 'No device selected' }
       return await ensureFiles(adb).mkdir(serial, path, pkg, rootMode, name)
@@ -467,6 +616,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       oldName: string,
       newName: string
     ) => {
+      if (isIos(serial)) return { ok: false, message: IOS_FILES_READONLY }
       const adb = findAdb()
       if (!adb || !serial) return { ok: false, message: 'No device selected' }
       return await ensureFiles(adb).rename(serial, path, pkg, rootMode, oldName, newName)
@@ -476,6 +626,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle(
     IPC.filesDelete,
     async (_e, serial: string, path: string, pkg: string | null, rootMode: boolean, names: string[]) => {
+      if (isIos(serial)) return { ok: false, message: IOS_FILES_READONLY }
       const adb = findAdb()
       if (!adb || !serial) return { ok: false, message: 'No device selected' }
       return await ensureFiles(adb).delete(serial, path, pkg, rootMode, names)
@@ -493,8 +644,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       name: string,
       kind: FileKind
     ) => {
+      if (!serial) return { ok: false, message: 'No device selected', localPath: '' }
+      const bin = iosFilesBin(serial)
+      if (bin) {
+        if (!pkg) return { ok: false, message: 'Select an app to browse its container', localPath: '' }
+        return await iosfiles.openEntry(bin, serial, pkg, path, name, kind)
+      }
       const adb = findAdb()
-      if (!adb || !serial) return { ok: false, message: 'No device selected', localPath: '' }
+      if (!adb) return { ok: false, message: 'No device selected', localPath: '' }
       return await ensureFiles(adb).openEntry(serial, path, pkg, rootMode, name, kind)
     }
   )
@@ -618,27 +775,46 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return prefs
   }
 
+  // iOS prefs = NSUserDefaults plists (read-only). Same PrefsListResult/Load shape.
+  const iosPrefsBin = (serial: string): string | null => (isIos(serial) ? goios.findGoIos() : null)
+
   ipcMain.handle(IPC.prefsList, async (_e, serial: string, pkg: string) => {
+    if (!serial || !pkg) return { ok: false, files: [], error: 'no device / app selected', usedSu: false }
+    const bin = iosPrefsBin(serial)
+    if (bin) return await goios.iosPrefsList(bin, serial, pkg)
     const adb = findAdb()
-    if (!adb || !serial || !pkg) return { ok: false, files: [], error: 'no device / app selected', usedSu: false }
+    if (!adb) return { ok: false, files: [], error: 'no device / app selected', usedSu: false }
     return await ensurePrefs(adb).list(serial, pkg)
   })
 
   ipcMain.handle(IPC.prefsLoad, async (_e, serial: string, pkg: string, fname: string) => {
+    if (!serial || !pkg) return { ok: false, error: 'no device / app selected', fname, prefs: [] }
+    const bin = iosPrefsBin(serial)
+    if (bin) return await goios.iosPrefsLoad(bin, serial, pkg, fname)
     const adb = findAdb()
-    if (!adb || !serial || !pkg) return { ok: false, error: 'no device / app selected', fname, prefs: [] }
+    if (!adb) return { ok: false, error: 'no device / app selected', fname, prefs: [] }
     return await ensurePrefs(adb).load(serial, pkg, fname)
   })
 
   ipcMain.handle(IPC.prefsSave, async (_e, serial: string, pkg: string, fname: string, values: Pref[]) => {
+    if (!serial || !pkg) return { ok: false, error: 'no device / app selected' }
+    // Writing NSUserDefaults back isn't supported yet (would need a plist rebuild
+    // + fsync push while the app may hold cached defaults) — read-only on iOS.
+    if (isIos(serial)) return { ok: false, error: 'Editing iOS preferences is not supported yet (read-only).' }
     const adb = findAdb()
-    if (!adb || !serial || !pkg) return { ok: false, error: 'no device / app selected' }
+    if (!adb) return { ok: false, error: 'no device / app selected' }
     return await ensurePrefs(adb).save(serial, pkg, fname, values)
   })
 
   ipcMain.handle(IPC.prefsForceStop, async (_e, serial: string, pkg: string) => {
+    if (!serial || !pkg) return false
+    if (isIos(serial)) {
+      const bin = goios.findGoIos()
+      if (!bin) return false
+      return (await goios.kill(bin, serial, pkg)).ok
+    }
     const adb = findAdb()
-    if (!adb || !serial || !pkg) return false
+    if (!adb) return false
     return await ensurePrefs(adb).forceStop(serial, pkg)
   })
 
@@ -649,8 +825,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   }
 
   ipcMain.handle(IPC.crashScan, async (_e, serial: string) => {
+    if (!serial) return { ok: false, message: 'no device selected', items: [] }
+    // iOS crash reports (.ips) → same CrashItem shape the shared CrashView renders.
+    if (isIos(serial)) {
+      const bin = goios.findGoIos()
+      if (!bin) return { ok: false, message: 'go-ios binary not found', items: [] }
+      return await goios.crashReports(bin, serial)
+    }
     const adb = findAdb()
-    if (!adb || !serial) return { ok: false, message: 'no device selected', items: [] }
+    if (!adb) return { ok: false, message: 'no device selected', items: [] }
     return await ensureCrash(adb).scan(serial)
   })
 
@@ -752,6 +935,117 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return await ensureAppmgr(adb).extractApk(serial, pkg)
   })
 
+  // --- iOS Apps tab (go-ios backend) --------------------------------------
+  ipcMain.handle(IPC.iosListApps, async (_e, udid: string) => {
+    const bin = goios.findGoIos()
+    if (!bin) return { ok: false, apps: [], error: 'go-ios binary not found' }
+    if (!udid) return { ok: false, apps: [], error: 'No device selected' }
+    return await goios.listApps(bin, udid)
+  })
+
+  ipcMain.handle(IPC.iosChooseIpa, async () => {
+    const win = getWindow()
+    if (!win) return null
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Select an .ipa to install',
+      defaultPath: homedir(),
+      properties: ['openFile'],
+      filters: [
+        { name: 'iOS app packages', extensions: ['ipa'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    })
+    return res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0]
+  })
+
+  ipcMain.handle(IPC.iosInstall, async (_e, udid: string, ipaPath: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid || !ipaPath) return { ok: false, message: 'No device / file selected' }
+    return await goios.install(bin, udid, ipaPath)
+  })
+
+  ipcMain.handle(IPC.iosUninstall, async (_e, udid: string, bundleId: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid || !bundleId) return { ok: false, message: 'No device / app selected' }
+    return await goios.uninstall(bin, udid, bundleId)
+  })
+
+  // iOS developer tier — userspace tunnel + process control.
+  ipcMain.handle(IPC.iosTunnelStatus, async (_e, udid: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return { ready: false }
+    return await goios.getTunnelStatus(bin, udid)
+  })
+
+  ipcMain.handle(IPC.iosTunnelStart, async (_e, udid: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return { ok: false, message: 'No device selected' }
+    return await goios.startTunnel(bin, udid)
+  })
+
+  ipcMain.handle(IPC.iosTunnelStop, () => {
+    goios.stopTunnel()
+    return true
+  })
+
+  ipcMain.handle(IPC.iosProcesses, async (_e, udid: string, appsOnly: boolean) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return { ok: false, processes: [], error: 'No device selected' }
+    return await goios.processes(bin, udid, appsOnly)
+  })
+
+  ipcMain.handle(IPC.iosLaunch, async (_e, udid: string, bundleId: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid || !bundleId) return { ok: false, message: 'No device / app selected' }
+    return await goios.launch(bin, udid, bundleId)
+  })
+
+  ipcMain.handle(IPC.iosKill, async (_e, udid: string, bundleId: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid || !bundleId) return { ok: false, message: 'No device / app selected' }
+    return await goios.kill(bin, udid, bundleId)
+  })
+
+  // --- iOS screen mirror (macOS native AVFoundation/VideoToolbox H.264 helper) ---
+  const ensureIosMirror = (bin: string): IosMirrorService => {
+    if (!iosMirrorSvc) {
+      iosMirrorSvc = new IosMirrorService(bin, {
+        onH264: (chunk) => broadcast(IPC.iosMirrorH264, chunk),
+        onState: (state) => broadcast(IPC.iosMirrorState, state),
+        onFailed: (message) => broadcast(IPC.iosMirrorFailed, message)
+      })
+    }
+    return iosMirrorSvc
+  }
+
+  ipcMain.handle(IPC.iosMirrorStart, (_e, udid: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return false
+    ensureIosMirror(bin).start(udid)
+    return true
+  })
+
+  ipcMain.handle(IPC.iosMirrorStop, () => {
+    iosMirrorSvc?.stopFeed()
+    return true
+  })
+
+  ipcMain.handle(IPC.iosMirrorSaveFrame, (_e, pngBase64: string) => {
+    const b64 = pngBase64.replace(/^data:image\/png;base64,/, '')
+    if (!b64) return { ok: false, message: 'No frame to save', dir: '' }
+    const dl = join(homedir(), 'Downloads')
+    const d = new Date()
+    const p = (n: number): string => String(n).padStart(2, '0')
+    const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+    const dest = join(dl, `screenshot-ios-${stamp}.png`)
+    try {
+      writeFileSync(dest, Buffer.from(b64, 'base64'))
+      return { ok: true, message: `Saved ${dest.split('/').pop()}`, dir: dl }
+    } catch (e) {
+      return { ok: false, message: `Cannot save screenshot: ${e instanceof Error ? e.message : String(e)}`, dir: '' }
+    }
+  })
+
   // --- network HTTP intercept ---------------------------------------------
   const ensureIntercept = (adb: string): InterceptService => {
     if (!intercept) {
@@ -848,15 +1142,22 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   // Stop background workers when the window goes away (mirrors closeEvent).
   const win = getWindow()
   win?.on('closed', () => {
+    mirrorWin.destroy()
     reader?.stop()
     for (const s of shellSessions.values()) s.shutdown()
     shellSessions.clear()
     monitor?.stop()
+    leak?.shutdown()
     db?.shutdown()
     files?.shutdown()
     toolbox?.shutdown()
     mockloc?.shutdown()
     mirrorSvc?.shutdown()
+    iosMirrorSvc?.shutdown()
     intercept?.shutdown()
+    iosDb?.shutdown()
+    iosfiles.shutdown()
+    goios.shutdownMock()
+    goios.stopTunnel()
   })
 }

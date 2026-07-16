@@ -6,7 +6,7 @@
  * Follows the shared App picker (c.serial + c.appPkg). Only mounts when the
  * Databases tab is active, so nothing touches adb until the tab is opened.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   PAGE_SIZE,
   cellText,
@@ -18,12 +18,49 @@ import {
 } from '@core/db'
 import type { DbTableInfo } from '@shared/types'
 import type { Controller } from '../state/useAppController'
-import { Icon } from './Icon'
+import { Icon, type IconName } from './Icon'
+import { EmptyState, type EmptyAction } from './EmptyState'
+
+// A folder in the schema tree. iOS db "names" are container paths
+// ("Library/Application Support/.mapbox/tile_store/metadata.db"); each path
+// segment becomes a nested folder node. `dbs` are the full db-path leaves that
+// live directly in this folder. Android names have no '/', so they all land in
+// the root's `dbs` (no folders — flat, as before).
+interface DbTreeNode {
+  name: string
+  path: string
+  folders: Map<string, DbTreeNode>
+  dbs: string[]
+}
+
+function buildDbTree(paths: string[]): DbTreeNode {
+  const root: DbTreeNode = { name: '', path: '', folders: new Map(), dbs: [] }
+  for (const full of paths) {
+    const parts = full.split('/')
+    const file = parts.pop()
+    if (file === undefined) continue
+    let node = root
+    let acc = ''
+    for (const seg of parts) {
+      acc = acc ? `${acc}/${seg}` : seg
+      let child = node.folders.get(seg)
+      if (!child) {
+        child = { name: seg, path: acc, folders: new Map(), dbs: [] }
+        node.folders.set(seg, child)
+      }
+      node = child
+    }
+    node.dbs.push(full)
+  }
+  return root
+}
 
 interface Empty {
-  glyph: string
+  icon: IconName
+  tone?: 'accent' | 'warn'
   title: string
-  sub: string
+  body: string
+  actions?: EmptyAction[]
 }
 interface CellState {
   row: number
@@ -155,6 +192,10 @@ export function DatabaseView({ c }: { c: Controller }) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [canEdit, setCanEdit] = useState(false)
   const [search, setSearch] = useState('')
+  // Resizable schema panel + collapsible folder grouping (iOS db files live at
+  // container paths like "Documents/FPDB.sqlite"; Android names have no folder).
+  const [leftWidth, setLeftWidth] = useState(260)
+  const [collapsedFolders, setCollapsedFolders] = useState<ReadonlySet<string>>(new Set())
 
   const [curDb, setCurDb] = useState<string | null>(null)
   const [curTable, setCurTable] = useState<string | null>(null)
@@ -226,7 +267,7 @@ export function DatabaseView({ c }: { c: Controller }) {
         setCols([])
         setRows([])
         setRowids(null)
-        setResultsEmpty({ glyph: '⚠️', title: 'Query failed', sub: res.message })
+        setResultsEmpty({ icon: 'alertTriangle', tone: 'warn', title: 'Query failed', body: res.message })
         return
       }
       setCols(res.cols)
@@ -238,7 +279,9 @@ export function DatabaseView({ c }: { c: Controller }) {
       setStatus(`${table}: rows ${first}–${off + res.rows.length} of ${res.total.toLocaleString()}`)
       const end = Math.min(off + PAGE_SIZE, res.total)
       setPageLabel(`rows ${res.total ? off + 1 : 0}–${end} of ${res.total.toLocaleString()}`)
-      setResultsEmpty(res.rows.length ? null : { glyph: '📭', title: 'Empty table', sub: `“${table}” has no rows.` })
+      setResultsEmpty(
+        res.rows.length ? null : { icon: 'database', title: 'Empty table', body: `“${table}” has no rows.` }
+      )
     })
   }
 
@@ -273,7 +316,7 @@ export function DatabaseView({ c }: { c: Controller }) {
         setCols([])
         setRows([])
         setRowids(null)
-        setResultsEmpty({ glyph: '⚠️', title: 'Query failed', sub: res.message })
+        setResultsEmpty({ icon: 'alertTriangle', tone: 'warn', title: 'Query failed', body: res.message })
         return
       }
       setCols(res.cols)
@@ -283,7 +326,9 @@ export function DatabaseView({ c }: { c: Controller }) {
       const tail = res.truncated ? ' (truncated)' : ''
       setStatus(`Query OK — ${res.rows.length.toLocaleString()} row(s)${tail}`)
       setPageLabel(`${res.rows.length.toLocaleString()} row(s)${tail}`)
-      setResultsEmpty(res.rows.length ? null : { glyph: '🔍', title: 'No matching rows', sub: 'Your query returned 0 rows.' })
+      setResultsEmpty(
+        res.rows.length ? null : { icon: 'search', title: 'No matching rows', body: 'Your query returned 0 rows.' }
+      )
     })
   }
 
@@ -410,7 +455,13 @@ export function DatabaseView({ c }: { c: Controller }) {
     canEditRef.current = res.hasSqlite3
     if (!res.ok) {
       setStatus(res.message)
-      setTreeEmpty({ glyph: '⚠️', title: 'Can’t read this app’s databases', sub: res.message })
+      setTreeEmpty({
+        icon: 'alertTriangle',
+        tone: 'warn',
+        title: 'Can’t read databases',
+        body: res.message,
+        actions: [{ label: 'Try again', icon: 'refresh', primary: true, onClick: () => void loadDbs(true) }]
+      })
       return
     }
     setDbs(res.dbs)
@@ -420,7 +471,12 @@ export function DatabaseView({ c }: { c: Controller }) {
       setTreeEmpty(null)
       openDb(res.dbs[0], true) // auto-connect the first DB so the tab isn't empty
     } else {
-      setTreeEmpty({ glyph: '🗄', title: 'No databases', sub: `${p} hasn’t created any SQLite databases yet.` })
+      setTreeEmpty({
+        icon: 'database',
+        title: 'No databases',
+        body: `${p} hasn’t created any SQLite databases yet.`,
+        actions: [{ label: 'Refresh', icon: 'refresh', onClick: () => void loadDbs(true) }]
+      })
     }
   }
 
@@ -551,15 +607,25 @@ export function DatabaseView({ c }: { c: Controller }) {
   const busyTree = listing || opening
   const treeEmptyShown: Empty | null = busyTree
     ? null
-    : !(c.serial && c.appPkg)
-      ? { glyph: '🗄', title: 'No app selected', sub: 'Pick an app in the list to inspect its SQLite databases.' }
-      : dbs.length === 0
-        ? treeEmpty ?? { glyph: '🗄', title: 'No databases', sub: "This app hasn't created any SQLite databases yet." }
-        : null
+    : !c.serial
+      ? {
+          icon: 'phone',
+          title: 'No device connected',
+          body: 'Connect a device to inspect an app’s SQLite databases.',
+          actions: [{ label: 'Refresh devices', icon: 'refresh', primary: true, onClick: () => void c.refreshDevices() }]
+        }
+      : !c.appPkg
+        ? { icon: 'database', title: 'No app selected', body: 'Pick an app in the list on the left to inspect its SQLite databases.' }
+        : dbs.length === 0
+          ? treeEmpty ?? { icon: 'database', title: 'No databases', body: "This app hasn't created any SQLite databases yet." }
+          : null
   const resultsEmptyShown: Empty | null = querying
     ? null
     : rows.length === 0
-      ? resultsEmpty ?? { glyph: '📋', title: 'No table selected', sub: 'Choose a table on the left, or run a query, to see rows here.' }
+      ? resultsEmpty ??
+        (!(c.serial && c.appPkg)
+          ? { icon: 'database', title: 'No database open', body: 'Select an app, then a table, to browse its data here.' }
+          : { icon: 'database', title: 'No table selected', body: 'Choose a table on the left, or run a query, to see rows here.' })
       : null
 
   const q = search.trim().toLowerCase()
@@ -569,6 +635,146 @@ export function DatabaseView({ c }: { c: Controller }) {
   const closeMenus = (): void => {
     setTreeMenu(null)
     setCellMenu(null)
+  }
+
+  // --- resizable schema panel (drag the splitter between the tree + results) --
+  const leftWidthRef = useRef(leftWidth)
+  leftWidthRef.current = leftWidth
+  const onSplitterDown = useCallback((ev: React.MouseEvent) => {
+    ev.preventDefault()
+    const startX = ev.clientX
+    const startW = leftWidthRef.current
+    const move = (e: MouseEvent): void => setLeftWidth(Math.max(180, Math.min(620, startW + (e.clientX - startX))))
+    const up = (): void => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }, [])
+
+  // --- databases as a nested, collapsible folder tree ------------------------
+  const dbTree = useMemo(() => buildDbTree(dbs), [dbs])
+
+  const dbVisible = (name: string): boolean => {
+    if (!q) return true
+    if (name.toLowerCase().includes(q)) return true
+    return (openTables[name] ?? []).some((t) => t.name.toLowerCase().includes(q))
+  }
+
+  const toggleFolder = (folder: string): void =>
+    setCollapsedFolders((prev) => {
+      const n = new Set(prev)
+      if (n.has(folder)) n.delete(folder)
+      else n.add(folder)
+      return n
+    })
+
+  // Render one database node (twisty → tables). `label` is the display text
+  // (basename when nested under a folder, full path at the root).
+  const renderDbNode = (name: string, label: string): React.ReactNode => {
+    const tables = openTables[name] ?? []
+    const dbMatch = !q || name.toLowerCase().includes(q)
+    const connected = name in openTables
+    const isOpen = expanded.has(name) || (q !== '' && dbMatch) || (q !== '' && tables.some((t) => t.name.toLowerCase().includes(q)))
+    const visibleTables = tables.filter((t) => dbMatch || t.name.toLowerCase().includes(q))
+    return (
+      <div key={name}>
+        <div
+          className={`db-node${connected ? ' db-connected' : ''}`}
+          title={name}
+          onClick={() => openDb(name, false)}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            setCellMenu(null)
+            setTreeMenu({ x: e.clientX, y: e.clientY, kind: 'db', db: name, connected })
+          }}
+        >
+          <span
+            className="db-twisty"
+            onClick={(e) => {
+              e.stopPropagation()
+              if (connected) {
+                setExpanded((prev) => {
+                  const n = new Set(prev)
+                  if (n.has(name)) n.delete(name)
+                  else n.add(name)
+                  return n
+                })
+              } else {
+                openDb(name, false)
+              }
+            }}
+          >
+            {tables.length ? <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /> : null}
+          </span>
+          <DbGlyph />
+          <span className="db-label">{label}</span>
+        </div>
+        {isOpen
+          ? visibleTables.map((t) => {
+              const selected = curDb === name && curTable === t.name
+              const count = t.type === 'view' ? 'view' : t.count >= 0 ? t.count.toLocaleString() : '—'
+              return (
+                <div
+                  key={t.name}
+                  className={`db-node db-node-table${selected ? ' selected' : ''}`}
+                  title={`${t.name}  ·  ${t.type}`}
+                  onClick={() => browseTable(name, t.name, 0)}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    setCellMenu(null)
+                    setTreeMenu({ x: e.clientX, y: e.clientY, kind: 'table', db: name, table: t.name, connected: true })
+                  }}
+                >
+                  <TableGlyph view={t.type === 'view'} />
+                  <span className="db-label">{t.name}</span>
+                  <span className="db-count">({count})</span>
+                </div>
+              )
+            })
+          : null}
+      </div>
+    )
+  }
+
+  // Does any db anywhere under this folder match the current search?
+  const treeHasMatch = (node: DbTreeNode): boolean => {
+    if (!q) return true
+    if (node.dbs.some(dbVisible)) return true
+    for (const f of node.folders.values()) if (treeHasMatch(f)) return true
+    return false
+  }
+
+  // Render a folder node's children recursively: nested folders first, then the
+  // db files that live directly in this folder. Nesting the child wrapper in
+  // `.db-folder-kids` gives cumulative indentation per depth.
+  const renderTree = (node: DbTreeNode): React.ReactNode => {
+    const folders = [...node.folders.values()].sort((a, b) =>
+      a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0
+    )
+    const leafDbs = node.dbs.filter(dbVisible).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    return (
+      <>
+        {folders.map((f) => {
+          if (!treeHasMatch(f)) return null
+          const open = !collapsedFolders.has(f.path) || q !== ''
+          return (
+            <div key={`d:${f.path}`}>
+              <div className="db-node db-folder" title={f.path} onClick={() => toggleFolder(f.path)}>
+                <span className="db-twisty">
+                  <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
+                </span>
+                <Icon name="folder" size={13} />
+                <span className="db-label">{f.name}</span>
+              </div>
+              {open ? <div className="db-folder-kids">{renderTree(f)}</div> : null}
+            </div>
+          )
+        })}
+        {leafDbs.map((full) => renderDbNode(full, full.split('/').pop() ?? full))}
+      </>
+    )
   }
 
   return (
@@ -589,8 +795,8 @@ export function DatabaseView({ c }: { c: Controller }) {
       </div>
 
       <div className="db-split">
-        {/* Left: filter + schema tree */}
-        <div className="db-left">
+        {/* Left: filter + schema tree (resizable) */}
+        <div className="db-left" style={{ width: leftWidth }}>
           <div className="db-searchbar">
             <input
               type="text"
@@ -602,82 +808,23 @@ export function DatabaseView({ c }: { c: Controller }) {
           {busyTree ? <div className="db-busy" /> : null}
           <div className="db-tree">
             <div className="db-tree-head">DATABASES</div>
-            {dbs.map((name) => {
-              const tables = openTables[name] ?? []
-              const dbMatch = !q || name.toLowerCase().includes(q)
-              const anyChild = q !== '' && tables.some((t) => t.name.toLowerCase().includes(q))
-              if (!(dbMatch || anyChild)) return null
-              const connected = name in openTables
-              const isOpen = expanded.has(name) || (q !== '' && (dbMatch || anyChild))
-              const visibleTables = tables.filter((t) => dbMatch || t.name.toLowerCase().includes(q))
-              return (
-                <div key={name}>
-                  <div
-                    className={`db-node${connected ? ' db-connected' : ''}`}
-                    title={name}
-                    onClick={() => openDb(name, false)}
-                    onContextMenu={(e) => {
-                      e.preventDefault()
-                      setCellMenu(null)
-                      setTreeMenu({ x: e.clientX, y: e.clientY, kind: 'db', db: name, connected })
-                    }}
-                  >
-                    <span
-                      className="db-twisty"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        if (connected) {
-                          setExpanded((prev) => {
-                            const n = new Set(prev)
-                            if (n.has(name)) n.delete(name)
-                            else n.add(name)
-                            return n
-                          })
-                        } else {
-                          openDb(name, false)
-                        }
-                      }}
-                    >
-                      {tables.length ? <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /> : null}
-                    </span>
-                    <DbGlyph />
-                    <span className="db-label">{name}</span>
-                  </div>
-                  {isOpen
-                    ? visibleTables.map((t) => {
-                        const selected = curDb === name && curTable === t.name
-                        const count = t.type === 'view' ? 'view' : t.count >= 0 ? t.count.toLocaleString() : '—'
-                        return (
-                          <div
-                            key={t.name}
-                            className={`db-node db-node-table${selected ? ' selected' : ''}`}
-                            title={`${t.name}  ·  ${t.type}`}
-                            onClick={() => browseTable(name, t.name, 0)}
-                            onContextMenu={(e) => {
-                              e.preventDefault()
-                              setCellMenu(null)
-                              setTreeMenu({ x: e.clientX, y: e.clientY, kind: 'table', db: name, table: t.name, connected: true })
-                            }}
-                          >
-                            <TableGlyph view={t.type === 'view'} />
-                            <span className="db-label">{t.name}</span>
-                            <span className="db-count">({count})</span>
-                          </div>
-                        )
-                      })
-                    : null}
-                </div>
-              )
-            })}
+            {renderTree(dbTree)}
             {treeEmptyShown ? (
               <div className="db-empty">
-                <div className="glyph">{treeEmptyShown.glyph}</div>
-                <div className="title">{treeEmptyShown.title}</div>
-                <div className="sub">{treeEmptyShown.sub}</div>
+                <EmptyState
+                  compact
+                  icon={treeEmptyShown.icon}
+                  tone={treeEmptyShown.tone}
+                  title={treeEmptyShown.title}
+                  body={treeEmptyShown.body}
+                  actions={treeEmptyShown.actions}
+                />
               </div>
             ) : null}
           </div>
         </div>
+
+        <div className="db-splitter" onMouseDown={onSplitterDown} title="Drag to resize" />
 
         {/* Right: query box + results + paging */}
         <div className="db-right">
@@ -748,9 +895,13 @@ export function DatabaseView({ c }: { c: Controller }) {
             ) : null}
             {resultsEmptyShown ? (
               <div className="db-empty">
-                <div className="glyph">{resultsEmptyShown.glyph}</div>
-                <div className="title">{resultsEmptyShown.title}</div>
-                <div className="sub">{resultsEmptyShown.sub}</div>
+                <EmptyState
+                  icon={resultsEmptyShown.icon}
+                  tone={resultsEmptyShown.tone}
+                  title={resultsEmptyShown.title}
+                  body={resultsEmptyShown.body}
+                  actions={resultsEmptyShown.actions}
+                />
               </div>
             ) : null}
           </div>

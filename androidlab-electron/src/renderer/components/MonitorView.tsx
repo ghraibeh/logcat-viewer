@@ -158,7 +158,13 @@ function Card({
   )
 }
 
-export function MonitorView({ c }: { c: Controller }) {
+export function MonitorView({
+  c,
+  onDetectLeaks
+}: {
+  c: Controller
+  onDetectLeaks: (serial: string, pkg: string) => void
+}) {
   const [interval, setIntervalMs] = useState(1000)
   const [st, setSt] = useState<MonState>(() => initState(c.serial, c.appPkg))
   const pkgRef = useRef(c.appPkg)
@@ -192,8 +198,17 @@ export function MonitorView({ c }: { c: Controller }) {
         <span className="mon-heading">Device Performance</span>
         <span className="grow" />
         <button
-          disabled
-          title="Memory-leak detection (LeakCanary/Shark) is migrated with the leakdetect module later in Phase 3"
+          disabled={!c.serial || !c.appPkg}
+          title={
+            !c.serial
+              ? 'Select a device first'
+              : !c.appPkg
+                ? 'Pick an app (left) — its heap is captured and analyzed for leaks'
+                : `Capture ${c.appPkg}'s heap and analyze it with LeakCanary/Shark (app must be debuggable)`
+          }
+          onClick={() => {
+            if (c.serial && c.appPkg) onDetectLeaks(c.serial, c.appPkg)
+          }}
         >
           <Icon name="search" size={15} />
           Detect leaks

@@ -37,13 +37,24 @@
 
 /* Left: filter box + schema tree. */
 .db-left {
-  width: 260px;
-  min-width: 200px;
+  /* width is set inline (resizable via .db-splitter); this is the floor. */
+  min-width: 160px;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border);
   background: var(--bg);
+}
+
+/* Draggable divider between the schema tree and the results pane. */
+.db-splitter {
+  flex: 0 0 auto;
+  width: 5px;
+  cursor: col-resize;
+  background: var(--border);
+  transition: background 0.12s;
+}
+.db-splitter:hover {
+  background: var(--accent);
 }
 .db-searchbar {
   background: var(--surface);
@@ -103,7 +114,18 @@
   white-space: nowrap;
   cursor: default;
   color: var(--text-dim);
-  overflow: hidden;
+  /* Grow to content so long container paths are reachable by horizontal scroll
+   * (the .db-tree scrolls); min-width keeps hover/selection spanning the panel. */
+  width: max-content;
+  min-width: 100%;
+}
+/* Folder grouping (iOS container paths: Documents/, Library/Caches/, …). */
+.db-folder {
+  color: var(--text);
+  font-weight: 600;
+}
+.db-folder-kids {
+  padding-left: 10px;
 }
 .db-node:hover {
   background: var(--surface-2);
@@ -131,8 +153,8 @@
   color: var(--accent);
 }
 .db-node .db-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* full text (the tree scrolls horizontally rather than truncating). */
+  overflow: visible;
 }
 .db-node .db-count {
   color: var(--text-dim);
@@ -142,32 +164,13 @@
   padding-left: 24px;
 }
 
-/* Empty-state overlay (both panes). */
+/* Empty-state overlay (both panes) — hosts the shared <EmptyState>, which
+ * supplies the glyph/title/body/actions. This is just the positioning shell. */
 .db-empty {
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  color: var(--text-dim);
-  padding: 24px;
-  pointer-events: none;
-}
-.db-empty .glyph {
-  font-size: 34px;
-}
-.db-empty .title {
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 600;
-  margin-top: 10px;
-}
-.db-empty .sub {
-  font-size: 12px;
-  margin-top: 4px;
-  max-width: 320px;
+  background: var(--bg);
 }
 
 /* Right: query box + results table + paging. */

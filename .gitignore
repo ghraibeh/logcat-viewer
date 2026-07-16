@@ -14,3 +14,11 @@ packaging/staging/
 # logcat_viewer/assets/, but the intermediate build/ and keystore are not).
 android-helper/build/
 android-helper/debug.keystore
+
+# go-ios device-pairing identity — contains a PRIVATE KEY, machine-specific,
+# regenerated at runtime. Must never be committed.
+selfIdentity.plist
+
+# A stray node_modules can appear at the repo root; only the app's is real
+# (and that one is ignored by androidlab-electron/.gitignore).
+/node_modules/

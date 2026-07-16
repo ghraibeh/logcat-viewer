@@ -9,9 +9,12 @@ import type { AndroidLabApi, Unsubscribe } from '@shared/api'
 import type {
   BugreportDone,
   FlowBatch,
+  IosMirrorState,
+  LeakDone,
   LogcatState,
   MenuAction,
   MirrorFailed,
+  MirrorPopoutInfo,
   MonkeyDone,
   PerfettoDone,
   PresetMap,
@@ -61,6 +64,13 @@ const api: AndroidLabApi = {
     onSample: (cb) => subscribe<[Sample]>(IPC.monitorSample, cb),
     onFailed: (cb) => subscribe<[string]>(IPC.monitorFailed, cb)
   },
+  leak: {
+    start: (serial, pkg) => ipcRenderer.invoke(IPC.leakStart, serial, pkg),
+    cancel: () => ipcRenderer.invoke(IPC.leakCancel),
+    saveReport: (html, pkg) => ipcRenderer.invoke(IPC.leakSaveReport, html, pkg),
+    onProgress: (cb) => subscribe<[string]>(IPC.leakProgress, cb),
+    onDone: (cb) => subscribe<[LeakDone]>(IPC.leakDone, cb)
+  },
   inspect: {
     capture: (serial) => ipcRenderer.invoke(IPC.inspectCapture, serial)
   },
@@ -83,7 +93,13 @@ const api: AndroidLabApi = {
     onH264: (cb) => subscribe<[Uint8Array]>(IPC.mirrorH264, cb),
     onControlReady: (cb) => subscribe<[boolean]>(IPC.mirrorControlReady, cb),
     onFailed: (cb) => subscribe<[MirrorFailed]>(IPC.mirrorFailed, cb),
-    onRecordDone: (cb) => subscribe<[SaveResult]>(IPC.mirrorRecordDone, cb)
+    onRecordDone: (cb) => subscribe<[SaveResult]>(IPC.mirrorRecordDone, cb),
+    openPopout: (info) => ipcRenderer.invoke(IPC.mirrorPopoutOpen, info),
+    closePopout: (redock) => ipcRenderer.invoke(IPC.mirrorPopoutClose, redock),
+    updatePopout: (info) => ipcRenderer.invoke(IPC.mirrorPopoutUpdate, info),
+    popoutInfo: () => ipcRenderer.invoke(IPC.mirrorPopoutInfo),
+    onPopoutInfo: (cb) => subscribe<[MirrorPopoutInfo]>(IPC.mirrorPopoutInfoEvent, cb),
+    onPopoutClosed: (cb) => subscribe<[]>(IPC.mirrorPopoutClosed, cb)
   },
   controls: {
     read: (serial, pkg) => ipcRenderer.invoke(IPC.controlsRead, serial, pkg),
@@ -178,6 +194,26 @@ const api: AndroidLabApi = {
     bulkPerms: (serial, pkg, perms, grant) => ipcRenderer.invoke(IPC.appmgrBulkPerms, serial, pkg, perms, grant),
     icon: (serial, pkg, apkPath) => ipcRenderer.invoke(IPC.appmgrIcon, serial, pkg, apkPath),
     extractApk: (serial, pkg) => ipcRenderer.invoke(IPC.appmgrExtractApk, serial, pkg)
+  },
+  ios: {
+    listApps: (udid) => ipcRenderer.invoke(IPC.iosListApps, udid),
+    chooseIpa: () => ipcRenderer.invoke(IPC.iosChooseIpa),
+    install: (udid, ipaPath) => ipcRenderer.invoke(IPC.iosInstall, udid, ipaPath),
+    uninstall: (udid, bundleId) => ipcRenderer.invoke(IPC.iosUninstall, udid, bundleId),
+    tunnelStatus: (udid) => ipcRenderer.invoke(IPC.iosTunnelStatus, udid),
+    tunnelStart: (udid) => ipcRenderer.invoke(IPC.iosTunnelStart, udid),
+    tunnelStop: () => ipcRenderer.invoke(IPC.iosTunnelStop),
+    processes: (udid, appsOnly) => ipcRenderer.invoke(IPC.iosProcesses, udid, appsOnly),
+    launch: (udid, bundleId) => ipcRenderer.invoke(IPC.iosLaunch, udid, bundleId),
+    kill: (udid, bundleId) => ipcRenderer.invoke(IPC.iosKill, udid, bundleId)
+  },
+  iosMirror: {
+    start: (udid) => ipcRenderer.invoke(IPC.iosMirrorStart, udid),
+    stop: () => ipcRenderer.invoke(IPC.iosMirrorStop),
+    saveFrame: (pngBase64) => ipcRenderer.invoke(IPC.iosMirrorSaveFrame, pngBase64),
+    onH264: (cb) => subscribe<[Uint8Array]>(IPC.iosMirrorH264, cb),
+    onState: (cb) => subscribe<[IosMirrorState]>(IPC.iosMirrorState, cb),
+    onFailed: (cb) => subscribe<[string]>(IPC.iosMirrorFailed, cb)
   },
   intercept: {
     start: (serial, port, decrypt) => ipcRenderer.invoke(IPC.interceptStart, serial, port, decrypt),

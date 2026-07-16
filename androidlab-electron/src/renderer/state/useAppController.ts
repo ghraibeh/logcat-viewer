@@ -8,7 +8,8 @@ import { parseLine, type LogEntry } from '@core/parser'
 import { FilterSpec } from '@core/filters'
 import { PRIORITY } from '@core/priorities'
 import { exportText, cleanPreset, type PresetValues } from '@core/logtools'
-import type { AppEntry, Device, PresetMap, SaveResult, InstallResult } from '@shared/types'
+import type { AppEntry, Device, Platform, PresetMap, SaveResult, InstallResult } from '@shared/types'
+import { platformOf } from '@shared/capabilities'
 import { LogStore } from '@core/logStore'
 
 const FLUSH_MS = 100
@@ -109,7 +110,13 @@ export function useAppController() {
   const appPkgRef = useRef<string | null>(null)
   const appPidsRef = useRef<ReadonlySet<number> | null>(null)
   const serialRef = useRef<string | null>(null)
+  // Mirror of `devices` for use inside stable callbacks (reloadApps) that must
+  // know the current device's platform without re-subscribing.
+  const devicesRef = useRef<Device[]>([])
   const filterRef = useRef<FilterFields>(EMPTY_FILTER)
+
+  // Platform of the selected device — drives per-platform tab/feature gating.
+  const platform = useMemo<Platform>(() => platformOf(devices, serial), [devices, serial])
 
   useEffect(() => {
     filterRef.current = filter
@@ -245,8 +252,19 @@ export function useAppController() {
   // --- devices / apps ----------------------------------------------------
   const reloadApps = useCallback(async () => {
     const s = serialRef.current
-    if (!s) {
-      setApps([])
+    // Clear immediately (before the async fetch) so a device switch never shows
+    // the previous device's apps while the new list loads.
+    setApps([])
+    if (!s) return
+    // iOS has no adb package list — populate the shared picker from go-ios so the
+    // Databases/Files tabs (which follow c.appPkg) can select an app. User apps
+    // only (dev-signed / file-sharing apps are the container-accessible ones).
+    const dev = devicesRef.current.find((d) => d.serial === s)
+    if (dev?.platform === 'ios') {
+      const r = await window.androidlab.ios.listApps(s)
+      setApps(
+        r.ok ? r.apps.filter((a) => a.type === 'User').map((a) => ({ pkg: a.bundleId, clone: false, host: '' })) : []
+      )
       return
     }
     const list = await window.androidlab.adb.listApps(s)
@@ -266,6 +284,17 @@ export function useAppController() {
         appPkgRef.current = null
         appPidsRef.current = null
         setAppPkg(null)
+        setAppPids(null)
+        applyFilter()
+        return
+      }
+      // iOS: no adb PID resolution — just set the selected package (drives the
+      // Databases/Files tabs + the Apps sub-tabs).
+      const dev = devicesRef.current.find((d) => d.serial === serialRef.current)
+      if (dev?.platform === 'ios') {
+        appPkgRef.current = cleaned
+        appPidsRef.current = null
+        setAppPkg(cleaned)
         setAppPids(null)
         applyFilter()
         return
@@ -305,28 +334,41 @@ export function useAppController() {
     return () => clearInterval(id)
   }, [applyFilter, resolvePids])
 
+  // Reset the selected app (picker + DB/Files/Logs all follow c.appPkg) — it
+  // belonged to the previous device.
+  const clearAppSelection = useCallback(() => {
+    appPkgRef.current = null
+    appPidsRef.current = null
+    setAppPkg(null)
+    setAppPids(null)
+    applyFilter()
+  }, [applyFilter])
+
   const setSerial = useCallback(
     (s: string | null) => {
       serialRef.current = s
       setSerialState(s)
+      clearAppSelection()
       void reloadApps()
     },
-    [reloadApps]
+    [reloadApps, clearAppSelection]
   )
 
   const refreshDevices = useCallback(async () => {
     const list = await window.androidlab.adb.listDevices()
     setDevices(list)
+    devicesRef.current = list
     const prior = serialRef.current
     let pick: string | null = null
     if (list.length > 0) {
       if (prior && list.some((d) => d.serial === prior)) pick = prior
       else pick = (list.find((d) => d.online) ?? list[0]).serial
     }
+    if (pick !== prior) clearAppSelection()
     serialRef.current = pick
     setSerialState(pick)
     void reloadApps()
-  }, [reloadApps])
+  }, [reloadApps, clearAppSelection])
 
   // --- init: adb path + devices + presets --------------------------------
   useEffect(() => {
@@ -500,6 +542,7 @@ export function useAppController() {
     adbReady,
     devices,
     serial,
+    platform,
     setSerial,
     refreshDevices,
     apps,

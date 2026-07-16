@@ -45,6 +45,63 @@
   border-left: none;
 }
 
+/* Detached mirror window (Android Studio-style pop-out): a custom title bar on
+   top (the drag handle for the frameless window) + the dock filling the rest. */
+.mirror-window {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0d0f13;
+}
+/* Title bar = the only window-drag region (matches the main window's toolbar). */
+.mirror-titlebar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding-left: 78px; /* clear the macOS traffic-light buttons (hiddenInset) */
+  padding-right: 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.mirror-titlebar .mw-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+.mirror-window-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+/* The mirror itself must never drag the window (so a swipe stays a swipe). */
+.mirror-window .mirror-dock {
+  border-left: none;
+  -webkit-app-region: no-drag;
+}
+/* Capture toast (screenshot / recording saved) inside the popout. */
+.mirror-window-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  max-width: 88%;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: rgba(20, 22, 28, 0.94);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  z-index: 2500;
+  pointer-events: none;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
 .mirror-canvas-wrap {
   position: relative;
   flex: 1;
@@ -58,6 +115,17 @@
   display: block;
 }
 
+/* iOS mirror: the WebRTC <video> + its fallback capture canvas both fill the
+   wrap and letterbox via object-fit (view-only, no click-to-tap mapping). */
+.ios-surface {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #0d0f13;
+}
+
 .mirror-msg {
   position: absolute;
   inset: 0;
@@ -67,6 +135,39 @@
   color: var(--text-dim);
   font-size: 13px;
   pointer-events: none;
+}
+
+/* Loading / device-switch state: an opaque backdrop (so no stale frame from the
+   previous device can show through) with a spinner + status text. */
+.mirror-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: #0d0f13;
+  pointer-events: none;
+}
+.mirror-loading-tx {
+  color: var(--text-dim);
+  font-size: 13px;
+  max-width: 80%;
+  text-align: center;
+}
+.mirror-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.14);
+  border-top-color: var(--accent);
+  animation: mirror-spin 0.8s linear infinite;
+}
+@keyframes mirror-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* Status banner drawn over the top of the mirrored screen. */

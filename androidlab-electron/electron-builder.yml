@@ -25,6 +25,11 @@ extraResources:
   # mirror (video + control) self-contained with no scrcpy install on the host.
   - from: resources/scrcpy-server
     to: scrcpy-server
+  # Native macOS iOS-screen capture helper (AVFoundation + VideoToolbox → H.264).
+  # Compiled from native/macos/iosscreen.swift via `npm run build:ioshelper`. Only
+  # meaningful on macOS; harmless elsewhere. Drives the iOS screen mirror.
+  - from: resources/iosscreen
+    to: iosscreen
 mac:
   category: public.app-category.developer-tools
   target:

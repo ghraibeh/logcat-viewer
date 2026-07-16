@@ -25,8 +25,7 @@ import {
   isApkPath
 } from '@core/mirror'
 import type { DisplayInfo } from '@core/mirror'
-import type { SaveResult } from '@shared/types'
-import type { Controller } from '../state/useAppController'
+import type { InstallResult, SaveResult } from '@shared/types'
 import { PALETTE } from '../theme'
 import { Icon, type IconName } from './Icon'
 
@@ -281,6 +280,24 @@ class MirrorEngine {
     this.onFail?.(message)
   }
 
+  /** Blank the canvas to the mirror background (device / display switch) so no
+   *  stale frame lingers behind the loader; drops fit/size so input is disabled. */
+  clear(): void {
+    const canvas = this.canvas
+    if (canvas && canvas.width && canvas.height) {
+      const ctx = canvas.getContext('2d')
+      if (ctx) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0)
+        ctx.fillStyle = '#0d0f13'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+      }
+    }
+    this.lastImage = null
+    this.srcW = 0
+    this.srcH = 0
+    this.fit = null
+  }
+
   // --- shared canvas draw -------------------------------------------------
   /** Redraw the last PNG frame (used on container resize). */
   redraw(): void {
@@ -327,14 +344,22 @@ class MirrorEngine {
 }
 
 export function MirrorDock({
-  c,
+  serial,
+  install,
   onClose,
   onCaptured,
+  onPopout,
+  popped = false,
   secondaryReq = 0
 }: {
-  c: Controller
+  serial: string | null
+  install: (paths: string[]) => Promise<InstallResult | null>
   onClose: () => void
   onCaptured: (result: SaveResult) => void
+  /** Detach into a separate window (docked) or re-dock (popped). Hidden if absent. */
+  onPopout?: () => void
+  /** True when rendered inside the detached window — flips the pop-out button to dock-back. */
+  popped?: boolean
   /** Bumped by the Controls "👁 View" button to auto-switch to the secondary display. */
   secondaryReq?: number
 }) {
@@ -343,6 +368,9 @@ export function MirrorDock({
 
   const [message, setMessage] = useState('Connecting…')
   const [hasFrame, setHasFrame] = useState(false)
+  // True only when the feed reported a hard failure (device asleep/gone) — keeps
+  // the loader spinner (a transient "connecting" state) distinct from an error.
+  const [failed, setFailed] = useState(false)
   const [overlay, setOverlay] = useState<{ kind: OverlayKind; text: string } | null>(null)
   const [recording, setRecording] = useState(false)
   const [dropHint, setDropHint] = useState(false)
@@ -372,7 +400,6 @@ export function MirrorDock({
   // Active mouse gesture: single-finger 'drag', or 'pinch' (Ctrl/⌘+drag → a second
   // finger mirrored about the screen centre, giving pinch-zoom AND rotation).
   const gestureRef = useRef<'drag' | 'pinch' | null>(null)
-  const serial = c.serial
 
   const flashOverlay = useCallback((kind: OverlayKind, text: string, ms = 4000) => {
     if (overlayTimer.current) clearTimeout(overlayTimer.current)
@@ -385,9 +412,11 @@ export function MirrorDock({
     if (!serial) return
     const eng = engineRef.current
     eng.reset()
+    eng.clear() // blank the previous device's frame so the loader isn't over a frozen image
     controlReadyRef.current = false // a fresh feed re-establishes (or drops) control
     gestureRef.current = null
     setHasFrame(false)
+    setFailed(false)
     setMessage('Connecting…')
     const { sf } = displayRef.current
     if (HAS_WEBCODECS && h264OkRef.current && !recordingRef.current && !previewRef.current && sf === null) {
@@ -459,6 +488,7 @@ export function MirrorDock({
     }
     if (!serial) {
       setMessage('No device selected')
+      setFailed(false)
       return
     }
     h264OkRef.current = true
@@ -508,6 +538,7 @@ export function MirrorDock({
       } else {
         setMessage(f.message)
         setHasFrame(false)
+        setFailed(true)
       }
     })
     const unRec = window.androidlab.mirror.onRecordDone((result) => {
@@ -850,11 +881,11 @@ export function MirrorDock({
       }
       if (paths.length === 0) return
       flashOverlay('installing', `Installing ${paths.map((p) => p.split('/').pop()).join(', ')}…`, 0)
-      void c.install(paths).then((r) => {
+      void install(paths).then((r) => {
         if (r) flashOverlay(r.ok ? 'success' : 'error', r.message, 6000)
       })
     },
-    [c, flashOverlay]
+    [install, flashOverlay]
   )
 
   // Esc exits fullscreen.
@@ -888,7 +919,16 @@ export function MirrorDock({
         onDrop={onDrop}
       >
         <canvas ref={canvasRef} />
-        {!showFrame ? <div className="mirror-msg">{message}</div> : null}
+        {!showFrame ? (
+          serial && !failed ? (
+            <div className="mirror-loading">
+              <div className="mirror-spinner" />
+              <div className="mirror-loading-tx">{message}</div>
+            </div>
+          ) : (
+            <div className="mirror-msg">{message}</div>
+          )
+        ) : null}
         {overlay ? (
           <div className="mirror-overlay">
             <span className="ic" style={{ color: OVERLAY_COLOR[overlay.kind] }}>
@@ -1003,7 +1043,20 @@ export function MirrorDock({
             <RailIcon name="external" />
           </button>
         ) : null}
-        <button className="rail-btn rail-close" title="Close mirror" onClick={onClose}>
+        {onPopout ? (
+          <button
+            className="rail-btn"
+            title={popped ? 'Dock back into the main window' : 'Open mirror in a separate window'}
+            onClick={onPopout}
+          >
+            <RailIcon name={popped ? 'popin' : 'popout'} />
+          </button>
+        ) : null}
+        <button
+          className="rail-btn rail-close"
+          title={popped ? 'Close mirror window' : 'Close mirror'}
+          onClick={onClose}
+        >
           <RailIcon name="close" />
         </button>
       </div>

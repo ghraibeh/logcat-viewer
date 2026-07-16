@@ -31,6 +31,13 @@ export const IPC = {
   monitorSample: 'monitor:sample',
   monitorFailed: 'monitor:failed',
 
+  // memory-leak detection (control invoke/handle + event streams)
+  leakStart: 'leak:start',
+  leakCancel: 'leak:cancel',
+  leakProgress: 'leak:progress',
+  leakDone: 'leak:done',
+  leakSaveReport: 'leak:save-report',
+
   // layout inspector (invoke/handle)
   inspectCapture: 'inspect:capture',
 
@@ -48,12 +55,19 @@ export const IPC = {
   mirrorIsEmulator: 'mirror:is-emulator',
   mirrorScrcpyAvailable: 'mirror:scrcpy-available',
   mirrorLaunchScrcpy: 'mirror:launch-scrcpy',
+  // detached mirror window (Android Studio-style pop-out) — invoke/handle
+  mirrorPopoutOpen: 'mirror:popout-open', // main-window renderer -> main: open the window
+  mirrorPopoutClose: 'mirror:popout-close', // -> main: close the window (arg: redock?)
+  mirrorPopoutUpdate: 'mirror:popout-update', // -> main: push a new device to the window
+  mirrorPopoutInfo: 'mirror:popout-info', // popout renderer -> main: which device to mirror
   // mirror events (main -> renderer)
   mirrorFrame: 'mirror:frame',
   mirrorH264: 'mirror:h264',
   mirrorControlReady: 'mirror:control-ready',
   mirrorFailed: 'mirror:failed',
   mirrorRecordDone: 'mirror:record-done',
+  mirrorPopoutInfoEvent: 'mirror:popout-info-event', // main -> popout: device changed
+  mirrorPopoutClosed: 'mirror:popout-closed', // main -> main window: popout closed, re-dock
 
   // device controls (invoke/handle)
   controlsRead: 'controls:read',
@@ -140,6 +154,26 @@ export const IPC = {
   appmgrBulkPerms: 'appmgr:bulk-perms',
   appmgrIcon: 'appmgr:icon',
   appmgrExtractApk: 'appmgr:extract-apk',
+
+  // iOS Apps tab (go-ios backend)
+  iosListApps: 'ios:list-apps',
+  iosChooseIpa: 'ios:choose-ipa',
+  iosInstall: 'ios:install',
+  iosUninstall: 'ios:uninstall',
+  // iOS developer tier: userspace tunnel + process control
+  iosTunnelStatus: 'ios:tunnel-status',
+  iosTunnelStart: 'ios:tunnel-start',
+  iosTunnelStop: 'ios:tunnel-stop',
+  iosProcesses: 'ios:processes',
+  iosLaunch: 'ios:launch',
+  iosKill: 'ios:kill',
+  // iOS screen mirror (macOS native AVFoundation/VideoToolbox H.264 helper)
+  iosMirrorStart: 'ios-mirror:start',
+  iosMirrorStop: 'ios-mirror:stop',
+  iosMirrorSaveFrame: 'ios-mirror:save-frame', // save a canvas PNG to ~/Downloads
+  iosMirrorH264: 'ios-mirror:h264', // event: raw Annex-B H.264 bytes (main -> renderer)
+  iosMirrorState: 'ios-mirror:state', // event: status message
+  iosMirrorFailed: 'ios-mirror:failed', // event: feed could not produce frames
 
   // network HTTP intercept (control invoke/handle + event streams)
   interceptStart: 'intercept:start',

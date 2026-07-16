@@ -36,10 +36,17 @@ export interface LogTableProps {
   c: Controller
   selectedRows: ReadonlySet<number>
   onRowMouseDown: (row: number, e: React.MouseEvent) => void
+  onRowMouseEnter: (row: number) => void
   onRowContextMenu: (row: number, e: React.MouseEvent) => void
 }
 
-export function LogTable({ c, selectedRows, onRowMouseDown, onRowContextMenu }: LogTableProps) {
+export function LogTable({
+  c,
+  selectedRows,
+  onRowMouseDown,
+  onRowMouseEnter,
+  onRowContextMenu
+}: LogTableProps) {
   const version = useSyncExternalStore(c.store.subscribe, c.store.getSnapshot)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [viewportW, setViewportW] = useState(800)
@@ -147,6 +154,7 @@ export function LogTable({ c, selectedRows, onRowMouseDown, onRowContextMenu }: 
                   minHeight: c.wrap ? undefined : rowHeight
                 }}
                 onMouseDown={(ev) => onRowMouseDown(vi.index, ev)}
+                onMouseEnter={() => onRowMouseEnter(vi.index)}
                 onContextMenu={(ev) => onRowContextMenu(vi.index, ev)}
               >
                 <div className="cell meta" style={{ width: W_TIME, color: META }}>

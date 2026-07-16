@@ -141,7 +141,8 @@ export async function listDevices(adb: string): Promise<Device[]> {
       state,
       description,
       online,
-      label: deviceLabel(serial, description, online) + stateSuffix
+      label: deviceLabel(serial, description, online) + stateSuffix,
+      platform: 'android'
     })
   }
   return devices

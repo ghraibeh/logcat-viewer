@@ -15,6 +15,7 @@ import {
 import { PALETTE } from '../theme'
 import type { Controller } from '../state/useAppController'
 import { Icon } from './Icon'
+import { EmptyState, type EmptyStateProps } from './EmptyState'
 
 function findPath(root: UiNode, id: number): UiNode[] {
   const path: UiNode[] = []
@@ -60,12 +61,9 @@ function ShotCanvas({
     ctx.fillStyle = PALETTE.BG
     ctx.fillRect(0, 0, cw, ch)
     if (!img) {
+      // The guided <EmptyState> overlay (see below) covers this pane when there
+      // is no capture yet; the canvas just paints its background.
       fitRef.current = null
-      ctx.fillStyle = PALETTE.TEXT_DIM
-      ctx.font = '13px -apple-system, sans-serif'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.fillText('Capture to inspect the current screen', cw / 2, ch / 2)
       return
     }
     const scale = Math.min(cw / img.width, ch / img.height)
@@ -276,6 +274,39 @@ export function InspectorView({ c }: { c: Controller }) {
     return [...primary, ...falsy]
   }, [selectedNode])
 
+  // Guided placeholder for the (empty) screenshot pane — mirrors the Logs / DB
+  // treatment: connect a device → capture → (busy) → recover from a failure.
+  const captureFailed = status.startsWith('✗')
+  const canvasScene: EmptyStateProps = capturing
+    ? {
+        icon: 'camera',
+        pulse: true,
+        title: 'Capturing…',
+        body: 'Grabbing a screenshot and the view hierarchy from the device.'
+      }
+    : !c.serial
+      ? {
+          icon: 'phone',
+          title: 'No device connected',
+          body: 'Connect a device to inspect its on-screen layout.',
+          actions: [{ label: 'Refresh devices', icon: 'refresh', primary: true, onClick: () => void c.refreshDevices() }]
+        }
+      : captureFailed
+        ? {
+            icon: 'alertTriangle',
+            tone: 'warn',
+            title: 'Capture failed',
+            body: status.replace(/^✗\s*/, ''),
+            actions: [{ label: 'Try again', icon: 'refresh', primary: true, onClick: () => void capture() }]
+          }
+        : {
+            icon: 'camera',
+            title: 'Inspect the current screen',
+            body: 'Capture a screenshot and the uiautomator view hierarchy to explore every view — its bounds, text and properties.',
+            actions: [{ label: 'Capture', icon: 'camera', primary: true, onClick: () => void capture() }],
+            hint: 'Then click the screenshot or a tree row to select a view.'
+          }
+
   return (
     <div className="insp-view">
       <div className="insp-bar">
@@ -299,33 +330,57 @@ export function InspectorView({ c }: { c: Controller }) {
       <div className="insp-split">
         <div className="insp-canvas-wrap">
           <ShotCanvas img={img} selection={selection} onPick={onPick} />
+          {!img ? (
+            <div className="empty-overlay">
+              <EmptyState {...canvasScene} />
+            </div>
+          ) : null}
         </div>
         <div className="insp-right">
           <div className="insp-tree">
-            {root
-              ? root.children.map((n) => (
-                  <TreeNode
-                    key={n.id}
-                    node={n}
-                    selectedId={selectedId}
-                    expanded={expanded}
-                    onToggle={toggle}
-                    onSelect={selectNode}
-                  />
-                ))
-              : null}
+            {root ? (
+              root.children.map((n) => (
+                <TreeNode
+                  key={n.id}
+                  node={n}
+                  selectedId={selectedId}
+                  expanded={expanded}
+                  onToggle={toggle}
+                  onSelect={selectNode}
+                />
+              ))
+            ) : (
+              <div className="empty-overlay">
+                <EmptyState
+                  compact
+                  icon="eye"
+                  title="View hierarchy"
+                  body="Capture a screen to load its view tree here."
+                />
+              </div>
+            )}
           </div>
           <div className="insp-props">
-            <table>
-              <tbody>
-                {props.map(([k, v]) => (
-                  <tr key={k}>
-                    <td className="k">{k}</td>
-                    <td className="v">{v}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {root && !selectedNode ? (
+              <div className="empty-overlay">
+                <EmptyState
+                  compact
+                  title="No view selected"
+                  body="Click the screenshot or a tree row to see a view’s properties."
+                />
+              </div>
+            ) : (
+              <table>
+                <tbody>
+                  {props.map(([k, v]) => (
+                    <tr key={k}>
+                      <td className="k">{k}</td>
+                      <td className="v">{v}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
       </div>

@@ -117,7 +117,24 @@ establishes two reusable patterns: a **polling worker → IPC sample-event strea
 | Per-app CPU / PSS / gfxinfo jank overlay | ✅ 🧪 |
 | History spark-lines (device + app series) + refresh-rate selector | ✅ 🧪(e2e smoke) |
 | Poll only while tab active; restart on device/app/interval change | ✅ ⏳(live) |
-| **Detect leaks** button (LeakCanary/Shark) | ⏳ deferred to the leakdetect cluster |
+| **Detect leaks** button (LeakCanary/Shark) | ✅ 🧪 (`leakdetect.py` → `core/leakdetect.ts` + `services/leakdetect.ts` + `services/tools.ts` + `LeakReportModal`) |
+
+**Memory-leak detection — COMPLETE** (`leakdetect.py`). `am dumpheap` a **debuggable**
+app → poll-until-stable → pull the `.hprof` → run LeakCanary's Shark `analyze`
+(`shark.MainKt`), rendering the same application-leak traces LeakCanary prints
+in-app. The Java runtime + the pinned Shark jar set are **provisioned on first
+use** (system Java, else a downloaded Adoptium JRE; jars from Maven Central),
+cached under the app-support `tools/` dir — a new `services/tools.ts` holds the
+shared Java-discovery + redirect-following downloader (the jadx cluster can
+reuse it). The text report → visual HTML renderer (banner + metadata tiles +
+colorized leak traces) lives in the pure `core/leakdetect.ts`; the same builder
+feeds the in-app `LeakReportModal` (kept at the App level so a run survives tab
+switches) and the standalone "Save report…" HTML file. Driven by the Monitor
+tab's **Detect leaks** button. Verified against real deps: all 12 Shark jars
+download and `shark.MainKt` loads+runs on the host JVM; the `am dumpheap`
+not-debuggable failure path is caught cleanly (this repo's test device has no
+debuggable apps, so a successful-analysis render is exercised via the parity
+tests on genuine Shark output, not live).
 
 **Inspector tab — COMPLETE** (`inspector.py`). Establishes the **binary-capture**
 pattern (`exec-out screencap -p` → base64 over IPC → `<img>`, reused by
@@ -400,8 +417,8 @@ the other full-width tabs) so the Enable toggle resets on re-entry while the pro
 keeps running in main — the service is the source of truth (re-enabling replaces
 it; app-close/device-switch stop it), mirroring the documented Location behavior.
 
-**Still pending** (each shows a "migrated in Phase 3" placeholder): memory-leak
-detection, plus Wi-Fi adb and Pull APK.
+**Still pending** (each shows a "migrated in Phase 3" placeholder): Wi-Fi adb and
+Pull APK. (Memory-leak detection is now ported — see the Monitor section above.)
 
 ### Phase 4 — QA, packaging, docs (PENDING)
 

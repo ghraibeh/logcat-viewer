@@ -561,6 +561,145 @@ button.adv-toggle.checked {
   color: var(--text-dim);
 }
 
+/* ---- Guided empty states (shared: Logs work area, DB panes, …) ---------- *
+ * One visual language for every "nothing here yet" pane — see EmptyState.tsx. */
+.empty-state {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  background: var(--bg);
+}
+.empty-state .glyph {
+  width: 74px;
+  height: 74px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--select-soft);
+  color: var(--accent-h);
+  border: 1px solid var(--border);
+  margin-bottom: 18px;
+}
+.empty-state .glyph.warn {
+  background: rgba(242, 90, 82, 0.12);
+  color: var(--red);
+}
+/* Streaming-but-idle: a green "listening" ring that gently pulses. */
+.empty-state .pulse-ring {
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--green);
+  border: 2px solid var(--green);
+  margin-bottom: 18px;
+  animation: emptyPulse 1.7s ease-out infinite;
+}
+@keyframes emptyPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(49, 201, 110, 0.35);
+  }
+  70% {
+    box-shadow: 0 0 0 16px rgba(49, 201, 110, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(49, 201, 110, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .empty-state .pulse-ring {
+    animation: none;
+  }
+}
+.empty-state .title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+.empty-state .body {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  max-width: 380px;
+  margin-top: 7px;
+}
+.empty-state .body b {
+  color: var(--text);
+  font-weight: 600;
+}
+.empty-state .actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 22px;
+}
+.empty-state button.primary {
+  background: var(--grad-accent);
+  border: none;
+  color: #fff;
+  font-weight: 600;
+  padding: 8px 18px;
+}
+.empty-state button.primary:hover:not(:disabled) {
+  background: var(--grad-accent-h);
+}
+.empty-state .hint {
+  margin-top: 18px;
+  font-size: 12px;
+  color: var(--text-dim);
+  opacity: 0.85;
+}
+
+/* Positioning shell that drops an <EmptyState> over a pane (canvas, tree,
+ * results, …). The pane it lives in must be position:relative. */
+.empty-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  background: var(--bg);
+}
+
+/* Compact variant — narrow side panels (e.g. the DB schema tree). */
+.empty-state.compact {
+  padding: 18px 14px;
+}
+.empty-state.compact .glyph,
+.empty-state.compact .pulse-ring {
+  width: 54px;
+  height: 54px;
+  margin-bottom: 13px;
+}
+.empty-state.compact .glyph {
+  border-radius: 15px;
+}
+.empty-state.compact .title {
+  font-size: 13.5px;
+}
+.empty-state.compact .body {
+  font-size: 12px;
+  max-width: 210px;
+  margin-top: 5px;
+}
+.empty-state.compact .actions {
+  margin-top: 15px;
+}
+.empty-state.compact button {
+  padding: 5px 11px;
+  font-size: 12px;
+}
+.empty-state.compact button.primary {
+  padding: 6px 13px;
+}
+
 /* ---- Status bar --------------------------------------------------------- */
 .status-bar {
   background: var(--surface);

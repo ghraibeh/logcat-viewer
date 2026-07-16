@@ -14,6 +14,20 @@ export const ICON_PATHS = {
   // --- view / mirror rail ---
   fullscreen: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
   contract: <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />,
+  // Detach into a separate window (two offset window panes).
+  popout: (
+    <>
+      <rect x="3" y="8" width="12" height="12" rx="2" />
+      <path d="M9 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2" />
+    </>
+  ),
+  // Re-attach the popout back into the app (arrow into a panel).
+  popin: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M15 12H8M11 9l-3 3 3 3" />
+    </>
+  ),
   film: (
     <>
       <rect x="3" y="7" width="12" height="10" rx="2" />

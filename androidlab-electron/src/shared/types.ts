@@ -6,17 +6,24 @@ import type { NotifItem } from '@core/toolbox'
 import type { Pref } from '@core/prefs'
 import type { CrashItem } from '@core/crash'
 import type { AppDetail, AppInfo } from '@core/appmgr'
+import type { IosAppInfo, IosProcess } from '@core/goios'
 import type { DisplayFlow } from '@core/intercept'
 
+/** Which backend a device is reached through: Android via adb, iOS via go-ios. */
+export type Platform = 'android' | 'ios'
+
 export interface Device {
+  /** adb serial (Android) or device UDID (iOS). */
   serial: string
-  /** "device", "offline", "unauthorized", ... */
+  /** "device", "offline", "unauthorized", ... (always "device" for iOS). */
   state: string
-  /** model / product info from `adb devices -l` */
+  /** model / product info from `adb devices -l`, or "<model> · iOS <ver>". */
   description: string
   online: boolean
-  /** "<serial> — <desc> [state]" (mirrors Device.label in adb.py) */
+  /** "<serial> — <desc> [state]" (mirrors Device.label in adb.py). */
   label: string
+  /** The backend this device talks to; drives per-platform feature gating. */
+  platform: Platform
 }
 
 /** One app entry for the picker. `clone` marks a VA-host clone package. */
@@ -64,6 +71,21 @@ export interface InspectResult {
 export interface MirrorFailed {
   kind: 'h264' | 'poller'
   message: string
+}
+
+/** State of the iOS mirror (macOS): a native AVFoundation + VideoToolbox helper
+ *  streams H.264 off the CoreMediaIO "iOS Device" screen — the QuickTime path. */
+export interface IosMirrorState {
+  mode: 'h264'
+  message: string
+}
+
+/** Which device the detached mirror window should mirror. The main window pushes
+ *  this to the popout on open and whenever the selected device changes, so the
+ *  standalone window (Android Studio-style) always tracks the active device. */
+export interface MirrorPopoutInfo {
+  serial: string | null
+  platform: Platform
 }
 
 // --- Database Inspector payloads (mirror dbinspect.py's worker signals) -------
@@ -201,6 +223,18 @@ export interface MockResult {
   message: string
 }
 
+// --- Memory-leak detection payload (mirrors leakdetect.py's LeakDetectWorker) -
+/** Terminal state of a leak-detection run (LeakDetectWorker.done). */
+export interface LeakDone {
+  ok: boolean
+  /** Shark's text report on success, else a user-facing error message. */
+  report: string
+  /** local path of the pulled .hprof ('' if capture never got that far). */
+  hprofPath: string
+  /** the package that was analyzed (for the report header + save filename). */
+  pkg: string
+}
+
 export type LogcatState = 'started' | 'stopped' | 'error'
 
 export type MenuAction =
@@ -269,6 +303,26 @@ export interface AppActionResult {
   ok: boolean
   message: string
 }
+// --- iOS App Manager payload (Apps tab, go-ios backend) -----------------------
+/** Result of listing an iOS device's installed apps (`ios apps --all`). */
+export interface IosAppListResult {
+  ok: boolean
+  apps: IosAppInfo[]
+  error: string
+}
+
+/** State of the iOS-17+ developer (userspace) tunnel launch/ps/kill ride on. */
+export interface TunnelStatus {
+  ready: boolean
+}
+
+/** Result of listing running processes via `ios ps` (developer tunnel). */
+export interface IosProcessListResult {
+  ok: boolean
+  processes: IosProcess[]
+  error: string
+}
+
 /** Result of fetching an app's real launcher icon (AppIconWorker.done). */
 export interface IconResult {
   /** base64 PNG/WebP data URL, or null (adaptive-only / no raster icon). */

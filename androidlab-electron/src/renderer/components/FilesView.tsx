@@ -29,6 +29,15 @@ import { Icon } from './Icon'
 type SortKey = 'name' | 'date' | 'type' | 'size'
 type ViewMode = 'details' | 'icons'
 
+// iOS nav-pane bookmarks — the app container is browsed '/'-rooted (the backend
+// maps '/' → the container root); the Android QUICK_ACCESS/LOCATIONS don't apply.
+const IOS_QUICK_ACCESS: Place[] = [
+  { label: 'Documents', path: '/Documents', needsApp: false },
+  { label: 'Library', path: '/Library', needsApp: false },
+  { label: 'tmp', path: '/tmp', needsApp: false }
+]
+const IOS_LOCATIONS: Place[] = [{ label: 'Container root', path: '/', needsApp: false }]
+
 interface MenuItem {
   label: string
   run: () => void
@@ -122,7 +131,10 @@ function sortEntries(list: FileEntry[], key: SortKey, desc: boolean): FileEntry[
 }
 
 export function FilesView({ c }: { c: Controller }) {
-  const [path, setPath] = useState(DEFAULT_PATH)
+  // iOS browses an app container ('/'-rooted); Android starts at /sdcard.
+  const ios = c.platform === 'ios'
+  const homePath = ios ? '/' : DEFAULT_PATH
+  const [path, setPath] = useState(homePath)
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
   const [anchor, setAnchor] = useState<number | null>(null)
@@ -136,7 +148,7 @@ export function FilesView({ c }: { c: Controller }) {
   const [history, setHistory] = useState<string[]>([])
   const [histIdx, setHistIdx] = useState(-1)
   const [editing, setEditing] = useState(false)
-  const [pathDraft, setPathDraft] = useState(DEFAULT_PATH)
+  const [pathDraft, setPathDraft] = useState(homePath)
   const [menu, setMenu] = useState<CtxMenu | null>(null)
   const [openMenu, setOpenMenu] = useState<'sort' | 'view' | null>(null)
   const [prompt, setPrompt] = useState<PromptState | null>(null)
@@ -253,23 +265,48 @@ export function FilesView({ c }: { c: Controller }) {
     listRef.current = list
   })
 
-  // Device change: reset to /sdcard, clear history, re-list.
+  // Clear the browsing view (entries/selection/search) so the previous device's
+  // or app's listing never lingers while the new one loads (or fails to).
+  const clearView = (): void => {
+    listSeqRef.current += 1 // invalidate any in-flight list from the old device
+    entriesRef.current = []
+    setEntries([])
+    selectedRef.current = new Set()
+    setSelected(new Set())
+    setAnchor(null)
+    setSearch('')
+    setListing(false)
+    setSavedMsg(null)
+  }
+
+  // Device change: empty the view, reset to the platform home (iOS container root
+  // / Android /sdcard), clear history, re-list.
   useEffect(() => {
+    clearView()
     historyRef.current = []
     histIdxRef.current = -1
     setHistory([])
     setHistIdx(-1)
-    pathRef.current = DEFAULT_PATH
-    setPath(DEFAULT_PATH)
-    listRef.current(DEFAULT_PATH, true)
+    pathRef.current = homePath
+    setPath(homePath)
+    setPathDraft(homePath)
+    listRef.current(homePath, true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [c.serial])
 
-  // App change: a private path belongs to the previous app — reset to /sdcard;
-  // otherwise just re-render (the App-data nav item enables/disables).
+  // App change: on iOS the whole container changes with the app → empty + reset;
+  // on Android only a private path belongs to the previous app.
   useEffect(() => {
     const p = pathRef.current
-    if (p === DATA_DATA || p.startsWith(DATA_DATA + '/')) listRef.current(DEFAULT_PATH, true)
+    if (ios) {
+      clearView()
+      pathRef.current = homePath
+      setPath(homePath)
+      setPathDraft(homePath)
+      listRef.current(homePath, true)
+    } else if (p === DATA_DATA || p.startsWith(DATA_DATA + '/')) {
+      listRef.current(homePath, true)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [c.appPkg])
 
@@ -679,10 +716,12 @@ export function FilesView({ c }: { c: Controller }) {
             </div>
           ) : null}
         </div>
-        <label className="checkbox" title="Run as root on a rooted device (reach otherwise-locked paths)">
-          <input type="checkbox" checked={rootMode} onChange={(e) => setRootMode(e.target.checked)} />
-          Root (su)
-        </label>
+        {!ios ? (
+          <label className="checkbox" title="Run as root on a rooted device (reach otherwise-locked paths)">
+            <input type="checkbox" checked={rootMode} onChange={(e) => setRootMode(e.target.checked)} />
+            Root (su)
+          </label>
+        ) : null}
       </div>
 
       {/* navigation / address bar */}
@@ -749,9 +788,9 @@ export function FilesView({ c }: { c: Controller }) {
       <div className="files-split">
         <div className="files-sidebar" onClick={(e) => e.stopPropagation()}>
           <div className="files-side-header">Quick access</div>
-          {QUICK_ACCESS.map(renderPlace)}
-          <div className="files-side-header">This device</div>
-          {LOCATIONS.map(renderPlace)}
+          {(ios ? IOS_QUICK_ACCESS : QUICK_ACCESS).map(renderPlace)}
+          <div className="files-side-header">{ios ? 'Container' : 'This device'}</div>
+          {(ios ? IOS_LOCATIONS : LOCATIONS).map(renderPlace)}
         </div>
 
         <div

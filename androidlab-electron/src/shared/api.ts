@@ -25,10 +25,15 @@ import type {
   InspectResult,
   InstallResult,
   IntentResult,
+  IosAppListResult,
+  IosMirrorState,
+  IosProcessListResult,
+  LeakDone,
   LogcatState,
   MappingLoadResult,
   MenuAction,
   MirrorFailed,
+  MirrorPopoutInfo,
   MockResult,
   MonkeyDone,
   NotifsResult,
@@ -38,7 +43,8 @@ import type {
   PrefsLoadResult,
   PrefsSaveResult,
   PresetMap,
-  SaveResult
+  SaveResult,
+  TunnelStatus
 } from './types'
 import type { FileKind } from '@core/files'
 import type { IntentSpec } from '@core/toolbox'
@@ -84,6 +90,17 @@ export interface AndroidLabApi {
     onSample(cb: (sample: Sample) => void): Unsubscribe
     onFailed(cb: (message: string) => void): Unsubscribe
   }
+  leak: {
+    /** Capture a debuggable app's heap + analyze it with Shark. Progress and
+     *  the terminal report arrive via onProgress / onDone. */
+    start(serial: string, pkg: string): Promise<boolean>
+    /** Cancel a running detection (kills the on-device dump / local analyzer). */
+    cancel(): Promise<boolean>
+    /** Save the visual report as a self-contained HTML file (save dialog). */
+    saveReport(html: string, pkg: string): Promise<SaveResult>
+    onProgress(cb: (message: string) => void): Unsubscribe
+    onDone(cb: (done: LeakDone) => void): Unsubscribe
+  }
   inspect: {
     capture(serial: string): Promise<InspectResult>
   }
@@ -117,6 +134,19 @@ export interface AndroidLabApi {
     onControlReady(cb: (ready: boolean) => void): Unsubscribe
     onFailed(cb: (failed: MirrorFailed) => void): Unsubscribe
     onRecordDone(cb: (result: SaveResult) => void): Unsubscribe
+    // --- detached mirror window (Android Studio-style pop-out) ---
+    /** Detach the mirror into its own OS window for the given device. */
+    openPopout(info: MirrorPopoutInfo): Promise<void>
+    /** Close the popout window; `redock` re-attaches it as the in-app dock. */
+    closePopout(redock: boolean): Promise<void>
+    /** Push the currently-selected device to an open popout window. */
+    updatePopout(info: MirrorPopoutInfo): Promise<void>
+    /** Popout window: read which device it should mirror (on first mount). */
+    popoutInfo(): Promise<MirrorPopoutInfo>
+    /** Popout window: the main window switched device. */
+    onPopoutInfo(cb: (info: MirrorPopoutInfo) => void): Unsubscribe
+    /** Main window: the popout was closed — re-dock the mirror. */
+    onPopoutClosed(cb: () => void): Unsubscribe
   }
   controls: {
     read(serial: string, pkg: string | null): Promise<{ ok: boolean; message: string; state: ControlsState | null }>
@@ -261,6 +291,41 @@ export interface AndroidLabApi {
     bulkPerms(serial: string, pkg: string, perms: string[], grant: boolean): Promise<AppActionResult>
     icon(serial: string, pkg: string, apkPath: string): Promise<IconResult>
     extractApk(serial: string, pkg: string): Promise<SaveResult>
+  }
+  /** iOS Apps tab (go-ios backend). `udid` is the device serial. */
+  ios: {
+    listApps(udid: string): Promise<IosAppListResult>
+    /** Open a file dialog for a signed .ipa; returns its path or null. */
+    chooseIpa(): Promise<string | null>
+    install(udid: string, ipaPath: string): Promise<AppActionResult>
+    uninstall(udid: string, bundleId: string): Promise<AppActionResult>
+    // Developer tier (iOS-17+ userspace tunnel — no sudo).
+    /** Is the developer tunnel currently active for this device? */
+    tunnelStatus(udid: string): Promise<TunnelStatus>
+    /** Bring the userspace tunnel up (spawns + waits); auto-invoked by launch/kill/processes too. */
+    tunnelStart(udid: string): Promise<AppActionResult>
+    /** Tear the managed tunnel down. */
+    tunnelStop(): Promise<boolean>
+    /** Running processes (`ios ps`); `appsOnly` filters to applications. */
+    processes(udid: string, appsOnly: boolean): Promise<IosProcessListResult>
+    /** Launch an app by bundle id. */
+    launch(udid: string, bundleId: string): Promise<AppActionResult>
+    /** Force-quit an app by bundle id. */
+    kill(udid: string, bundleId: string): Promise<AppActionResult>
+  }
+  /** iOS screen mirror (macOS, view-only). A native AVFoundation+VideoToolbox
+   *  helper streams H.264 off the CoreMediaIO "iOS Device" screen (the QuickTime
+   *  path); the renderer decodes it with WebCodecs — the Android mirror pipeline. */
+  iosMirror: {
+    /** Begin the H.264 feed for `udid`. */
+    start(udid: string): Promise<boolean>
+    /** Stop the feed + kill the capture helper. */
+    stop(): Promise<boolean>
+    /** Save a PNG the renderer grabbed from the mirror canvas to ~/Downloads. */
+    saveFrame(pngBase64: string): Promise<SaveResult>
+    onH264(cb: (chunk: Uint8Array) => void): Unsubscribe
+    onState(cb: (state: IosMirrorState) => void): Unsubscribe
+    onFailed(cb: (message: string) => void): Unsubscribe
   }
   intercept: {
     /** Wire the device + bind the proxy; result arrives via onStarted/onFailed. */

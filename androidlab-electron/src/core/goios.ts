@@ -1,0 +1,398 @@
+/**
+ * go-ios pure helpers — the iOS counterpart to core/appmgr.ts. Parsers and arg
+ * builders for `ios list` / `ios info` / `ios apps`, plus a JSON-loose reader
+ * that tolerates go-ios's structured log lines mixed onto stdout. DOM-/fs-/spawn-
+ * free so it is unit-tested directly; the device I/O lives in
+ * main/services/goios.ts.
+ *
+ * go-ios targets a device with a global `--udid <udid>` flag (the equivalent of
+ * adb's `-s <serial>`); every builder that needs a device embeds it. Unlike adb,
+ * the "serial" is the device UDID and there is no `shell` — each capability is a
+ * discrete go-ios sub-command.
+ */
+
+// The three application classes `ios apps --all` reports; anything else is unknown.
+export type IosAppType = 'User' | 'System' | 'Hidden' | 'Unknown'
+
+/** One installed iOS app, distilled from an `ios apps` Info.plist entry. */
+export interface IosAppInfo {
+  bundleId: string
+  name: string
+  /** CFBundleShortVersionString (the marketing version). */
+  version: string
+  /** CFBundleVersion (the build number). */
+  build: string
+  type: IosAppType
+  minOS: string
+  signer: string
+  path: string
+  /** Data-container path (present for User apps). */
+  container: string
+  /** [friendly label, description] of each declared NS*UsageDescription privacy
+   *  string — iOS's static declaration of what the app says it uses. */
+  usage: Array<[string, string]>
+}
+
+/** Fields read off `ios info` to describe a connected device. */
+export interface IosDeviceFields {
+  name: string
+  /** ProductType, e.g. "iPhone16,2". */
+  model: string
+  /** ProductVersion, e.g. "26.5.2". */
+  version: string
+}
+
+// --- JSON-loose reader --------------------------------------------------------
+/** Parse every JSON value on stdout. go-ios normally prints one JSON document,
+ *  but depending on log level it can prepend structured log lines; try the whole
+ *  buffer first, then fall back to scanning line-by-line and keeping what parses. */
+function jsonValues(stdout: string): unknown[] {
+  const text = (stdout ?? '').trim()
+  if (!text) return []
+  try {
+    return [JSON.parse(text)]
+  } catch {
+    /* mixed log lines — scan below */
+  }
+  const vals: unknown[] = []
+  for (const raw of text.split('\n')) {
+    const s = raw.trim()
+    if (!s || (s[0] !== '{' && s[0] !== '[')) continue
+    try {
+      vals.push(JSON.parse(s))
+    } catch {
+      /* skip non-JSON noise */
+    }
+  }
+  return vals
+}
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+}
+
+function str(o: Record<string, unknown>, key: string): string {
+  const v = o[key]
+  return typeof v === 'string' ? v : ''
+}
+
+// --- device parsers -----------------------------------------------------------
+/** UDIDs from `ios list` → {"deviceList":["udid", ...]}. */
+export function parseDeviceList(stdout: string): string[] {
+  for (const v of jsonValues(stdout)) {
+    if (isObj(v) && Array.isArray(v.deviceList)) {
+      return (v.deviceList as unknown[]).filter((x): x is string => typeof x === 'string')
+    }
+  }
+  return []
+}
+
+/** Distil an `ios info` document to the fields we label a device with. */
+export function parseInfo(stdout: string): IosDeviceFields | null {
+  for (const v of jsonValues(stdout)) {
+    if (isObj(v) && ('ProductVersion' in v || 'DeviceName' in v)) {
+      return { name: str(v, 'DeviceName'), model: str(v, 'ProductType'), version: str(v, 'ProductVersion') }
+    }
+  }
+  return null
+}
+
+/** Human label + description for a device, mirroring adb.ts's "<id> — <desc>". */
+export function deviceLabel(udid: string, f: IosDeviceFields | null): { label: string; description: string } {
+  if (!f) return { label: udid, description: '' }
+  const name = f.name || udid
+  const description = [f.model, f.version ? `iOS ${f.version}` : ''].filter(Boolean).join(' · ')
+  return { label: description ? `${name} — ${description}` : name, description }
+}
+
+// --- app parsers --------------------------------------------------------------
+// NS*UsageDescription Info.plist keys → a friendly capability label. This is the
+// app's *declared* (static) privacy footprint — iOS has no adb-style runtime
+// permission dump, so this is the closest honest analogue for the Info panel.
+const USAGE_LABELS: Record<string, string> = {
+  NSCameraUsageDescription: 'Camera',
+  NSMicrophoneUsageDescription: 'Microphone',
+  NSPhotoLibraryUsageDescription: 'Photos',
+  NSPhotoLibraryAddUsageDescription: 'Photos (add only)',
+  NSContactsUsageDescription: 'Contacts',
+  NSLocationWhenInUseUsageDescription: 'Location (in use)',
+  NSLocationAlwaysUsageDescription: 'Location (always)',
+  NSLocationAlwaysAndWhenInUseUsageDescription: 'Location (always)',
+  NSCalendarsUsageDescription: 'Calendars',
+  NSCalendarsFullAccessUsageDescription: 'Calendars',
+  NSRemindersUsageDescription: 'Reminders',
+  NSRemindersFullAccessUsageDescription: 'Reminders',
+  NSMotionUsageDescription: 'Motion & fitness',
+  NSFaceIDUsageDescription: 'Face ID',
+  NSBluetoothAlwaysUsageDescription: 'Bluetooth',
+  NSBluetoothPeripheralUsageDescription: 'Bluetooth',
+  NSLocalNetworkUsageDescription: 'Local network',
+  NSAppleMusicUsageDescription: 'Media library',
+  NSSpeechRecognitionUsageDescription: 'Speech recognition',
+  NSHealthShareUsageDescription: 'Health (read)',
+  NSHealthUpdateUsageDescription: 'Health (write)',
+  NSUserTrackingUsageDescription: 'Tracking (App Tracking Transparency)'
+}
+
+function parseUsage(o: Record<string, unknown>): Array<[string, string]> {
+  const out: Array<[string, string]> = []
+  const seen = new Set<string>()
+  for (const [key, label] of Object.entries(USAGE_LABELS)) {
+    if (typeof o[key] === 'string' && !seen.has(label)) {
+      seen.add(label)
+      out.push([label, (o[key] as string).trim()])
+    }
+  }
+  return out
+}
+
+function normType(t: unknown): IosAppType {
+  return t === 'User' || t === 'System' || t === 'Hidden' ? t : 'Unknown'
+}
+
+/** Parse an `ios apps [--all|--system]` array into sorted IosAppInfo rows. */
+export function parseApps(stdout: string): IosAppInfo[] {
+  let arr: unknown[] | null = null
+  for (const v of jsonValues(stdout)) {
+    if (Array.isArray(v)) {
+      arr = v
+      break
+    }
+  }
+  if (!arr) return []
+  const out: IosAppInfo[] = []
+  for (const item of arr) {
+    if (!isObj(item)) continue
+    const bundleId = str(item, 'CFBundleIdentifier')
+    if (!bundleId) continue
+    out.push({
+      bundleId,
+      name: str(item, 'CFBundleDisplayName') || str(item, 'CFBundleName') || bundleId,
+      version: str(item, 'CFBundleShortVersionString'),
+      build: str(item, 'CFBundleVersion'),
+      type: normType(item.ApplicationType),
+      minOS: str(item, 'MinimumOSVersion'),
+      signer: str(item, 'SignerIdentity'),
+      path: str(item, 'Path'),
+      container: str(item, 'Container'),
+      usage: parseUsage(item)
+    })
+  }
+  out.sort((a, b) => {
+    const la = a.name.toLowerCase()
+    const lb = b.name.toLowerCase()
+    return la < lb ? -1 : la > lb ? 1 : 0
+  })
+  return out
+}
+
+// --- command builders ---------------------------------------------------------
+export function listArgs(): string[] {
+  return ['list']
+}
+
+export function infoArgs(udid: string): string[] {
+  return ['info', '--udid', udid]
+}
+
+export function appsArgs(udid: string, kind: 'user' | 'system' | 'all' = 'all'): string[] {
+  const flags = kind === 'all' ? ['--all'] : kind === 'system' ? ['--system'] : []
+  return ['apps', ...flags, '--udid', udid]
+}
+
+export function installArgs(udid: string, ipaPath: string): string[] {
+  return ['install', `--path=${ipaPath}`, '--udid', udid]
+}
+
+export function uninstallArgs(udid: string, bundleId: string): string[] {
+  return ['uninstall', bundleId, '--udid', udid]
+}
+
+// The iOS Info sub-panel rows: [label, IosAppInfo key]. Mirrors appmgr INFO_ROWS.
+export const IOS_INFO_ROWS: Array<[string, keyof IosAppInfo]> = [
+  ['Name', 'name'],
+  ['Bundle ID', 'bundleId'],
+  ['Version', 'version'],
+  ['Build', 'build'],
+  ['Type', 'type'],
+  ['Min iOS', 'minOS'],
+  ['Signer', 'signer'],
+  ['Bundle path', 'path'],
+  ['Data container', 'container']
+]
+
+// --- developer tier: process control (needs the iOS-17+ userspace tunnel) -----
+/** One running process from `ios ps`. */
+export interface IosProcess {
+  pid: number
+  name: string
+  /** true for user/app processes (IsApplication), false for daemons/services. */
+  isApp: boolean
+  /** RealAppName (executable path or .app bundle path). */
+  path: string
+  /** ISO start time (StartDate), '' if absent. */
+  startDate: string
+}
+
+function num(o: Record<string, unknown>, ...keys: string[]): number {
+  for (const k of keys) {
+    const v = o[k]
+    if (typeof v === 'number') return v
+    if (typeof v === 'string' && /^\d+$/.test(v)) return parseInt(v, 10)
+  }
+  return 0
+}
+
+/** Parse `ios ps` output. The normal shape is an array of
+ *  {Pid, Name, IsApplication, RealAppName, StartDate}; an object map
+ *  (pid -> name) is tolerated as a fallback. */
+export function parseProcesses(stdout: string): IosProcess[] {
+  for (const v of jsonValues(stdout)) {
+    if (Array.isArray(v)) {
+      const out: IosProcess[] = []
+      for (const item of v) {
+        if (!isObj(item)) continue
+        const pid = num(item, 'Pid', 'pid', 'ProcessIdentifier')
+        const name = str(item, 'Name') || str(item, 'name') || str(item, 'ExecutableName')
+        if (!pid && !name) continue
+        out.push({
+          pid,
+          name,
+          isApp: item.IsApplication === true || item.isApplication === true,
+          path: str(item, 'RealAppName') || str(item, 'realAppName') || str(item, 'Path'),
+          startDate: str(item, 'StartDate') || str(item, 'startDate')
+        })
+      }
+      return out.sort((a, b) => a.pid - b.pid)
+    }
+    if (isObj(v)) {
+      // object map: { "77": "powerexceptionsd", ... }
+      const out: IosProcess[] = []
+      for (const [k, name] of Object.entries(v)) {
+        if (/^\d+$/.test(k) && typeof name === 'string') {
+          out.push({ pid: parseInt(k, 10), name, isApp: false, path: '', startDate: '' })
+        }
+      }
+      if (out.length) return out.sort((a, b) => a.pid - b.pid)
+    }
+  }
+  return []
+}
+
+/** True if `ios tunnel ls` reports an active tunnel for `udid`
+ *  (entries look like {address, rsdPort, udid, userspaceTun, ...}). */
+export function tunnelHasUdid(stdout: string, udid: string): boolean {
+  for (const v of jsonValues(stdout)) {
+    if (Array.isArray(v)) {
+      return v.some((e) => isObj(e) && str(e, 'udid') === udid)
+    }
+  }
+  return false
+}
+
+/** The local userspace-proxy port DVT services dial for `udid`'s tunnel, or null
+ *  if not listed / not a userspace tunnel. A tunnel can be *listed* yet have this
+ *  port dead (bind lost to a competing tunnel), which is why we probe it. */
+export function userspaceTunPort(stdout: string, udid: string): number | null {
+  for (const v of jsonValues(stdout)) {
+    if (Array.isArray(v)) {
+      const e = v.find((x) => isObj(x) && str(x, 'udid') === udid)
+      if (isObj(e)) {
+        const p = num(e, 'userspaceTunPort')
+        return p > 0 ? p : null
+      }
+    }
+  }
+  return null
+}
+
+export function psArgs(udid: string, appsOnly = false): string[] {
+  return ['ps', ...(appsOnly ? ['--apps'] : []), '--udid', udid]
+}
+
+export function launchArgs(udid: string, bundleId: string, killExisting = false): string[] {
+  return ['launch', bundleId, ...(killExisting ? ['--kill-existing'] : []), '--udid', udid]
+}
+
+export function killArgs(udid: string, bundleId: string): string[] {
+  return ['kill', bundleId, '--udid', udid]
+}
+
+/** Start a no-sudo userspace tunnel bound to one device (long-lived daemon). */
+export function tunnelStartArgs(udid: string): string[] {
+  return ['tunnel', 'start', '--userspace', '--udid', udid]
+}
+
+export function tunnelLsArgs(): string[] {
+  return ['tunnel', 'ls']
+}
+
+// --- Developer Disk Image mount + location simulation (DVT, needs tunnel) -----
+// The DDI must be mounted before any DVT service (simulate-location, WDA/ui).
+// Our patched go-ios fixes the TSS-94 that blocked `image auto` upstream (it now
+// applies the manifest's RestoreRequestRules → EPRO/ESEC=true). See the memory
+// note "go-ios DDI mount fix".
+
+export function imageListArgs(udid: string): string[] {
+  return ['image', 'list', '--udid', udid]
+}
+
+/** Auto-download (into basedir) + mount the matching Developer Disk Image. */
+export function imageAutoArgs(udid: string, basedir: string): string[] {
+  return ['image', 'auto', '--basedir', basedir, '--udid', udid]
+}
+
+/** `image list` prints the mounted image's signature when one is mounted, or a
+ *  lone "none" line when nothing is. */
+export function imageIsMounted(stdout: string): boolean {
+  return /"signature"\s*:/.test(stdout) || /image signature/i.test(stdout)
+}
+
+export function setLocationArgs(udid: string, lat: number, lon: number): string[] {
+  return ['setlocation', `--lat=${lat}`, `--lon=${lon}`, '--udid', udid]
+}
+
+export function resetLocationArgs(udid: string): string[] {
+  return ['resetlocation', '--udid', udid]
+}
+
+// --- app-container file access (house-arrest AFC via `ios fsync`, no tunnel) ---
+// Works for apps with UIFileSharingEnabled or your own dev-signed apps; used by
+// the iOS Files browser, DB inspector, and Prefs editor.
+export function fsyncTreeArgs(udid: string, bundleId: string, path = '.'): string[] {
+  return ['fsync', `--app=${bundleId}`, 'tree', `--path=${path}`, '--udid', udid]
+}
+export function fsyncPullArgs(udid: string, bundleId: string, remote: string, local: string): string[] {
+  return ['fsync', `--app=${bundleId}`, 'pull', `--srcPath=${remote}`, `--dstPath=${local}`, '--udid', udid]
+}
+export function fsyncPushArgs(udid: string, bundleId: string, local: string, remote: string): string[] {
+  return ['fsync', `--app=${bundleId}`, 'push', `--srcPath=${local}`, `--dstPath=${remote}`, '--udid', udid]
+}
+
+/** One entry from a parsed `fsync tree` listing (path relative to the tree root). */
+export interface ContainerEntry {
+  path: string
+  name: string
+  isDir: boolean
+  depth: number
+}
+
+/** Parse `ios fsync tree` ASCII output into entries with full relative paths.
+ *  Lines look like `|-Documents/`, `|  |-FPDB.sqlite`, `|  |  |-Backup/` — a
+ *  3-char `|  ` per depth level, directories suffixed with `/`. */
+export function parseFsyncTree(stdout: string): ContainerEntry[] {
+  const out: ContainerEntry[] = []
+  const stack: string[] = []
+  for (const raw of stdout.split('\n')) {
+    const m = /^((?:\|\s\s)*)\|-(.+)$/.exec(raw.replace(/\r$/, ''))
+    if (!m) continue
+    const depth = m[1].length / 3
+    const isDir = m[2].endsWith('/')
+    const name = isDir ? m[2].slice(0, -1) : m[2]
+    if (!name || name === '.') continue
+    stack[depth] = name
+    stack.length = depth + 1
+    out.push({ path: stack.join('/'), name, isDir, depth })
+  }
+  return out
+}
