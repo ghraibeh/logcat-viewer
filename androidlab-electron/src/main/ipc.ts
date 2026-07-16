@@ -196,8 +196,21 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle(
     IPC.monitorStart,
     (_e, serial: string, pkg: string | null, intervalMs: number) => {
+      if (!serial) return false
+      if (isIos(serial)) {
+        const bin = goios.findGoIos()
+        if (!bin) return false
+        void goios.monitorStart(
+          bin,
+          serial,
+          intervalMs,
+          (s) => send(IPC.monitorSample, s),
+          (m) => send(IPC.monitorFailed, m)
+        )
+        return true
+      }
       const adb = findAdb()
-      if (!adb || !serial) return false
+      if (!adb) return false
       ensureMonitor(adb).start(serial, pkg, intervalMs)
       return true
     }
@@ -205,6 +218,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   ipcMain.handle(IPC.monitorStop, () => {
     monitor?.stop()
+    goios.monitorStop()
     return true
   })
 
@@ -1158,6 +1172,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     iosDb?.shutdown()
     iosfiles.shutdown()
     goios.shutdownMock()
+    goios.monitorStop()
     goios.stopTunnel()
   })
 }

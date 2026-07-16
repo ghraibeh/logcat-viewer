@@ -18,8 +18,11 @@ import { app } from 'electron'
 import { parseIpsReport } from '@core/ipscrash'
 import { plistJsonToPrefs } from '@core/iosprefs'
 import type { CrashItem } from '@core/crash'
+import type { Battery, Sample } from '@core/monitor'
 import {
   appsArgs,
+  batteryCheckArgs,
+  batteryRegistryArgs,
   deviceLabel,
   fsyncPullArgs,
   fsyncTreeArgs,
@@ -35,9 +38,12 @@ import {
   parseDeviceList,
   parseFsyncTree,
   parseInfo,
+  parseIosBattery,
   parseProcesses,
+  parseSysmontapCpu,
   psArgs,
   setLocationArgs,
+  sysmontapCpuPercent,
   tunnelHasUdid,
   tunnelLsArgs,
   tunnelStartArgs,
@@ -430,6 +436,98 @@ export async function resetLocation(_bin: string, udid: string): Promise<MockRes
 export function shutdownMock(): void {
   stopMockProc()
   mockedUdid = null
+}
+
+// --- performance monitor (sysmontap CPU stream + battery poll) ----------------
+// `ios sysmontap` streams system CPU; battery comes from lockdown diagnostics.
+// Memory + per-app are not exposed by go-ios's sysmontap CLI (it discards the
+// per-process/physFootprint data), so those Sample fields stay null until a
+// deeper go-ios patch surfaces them.
+let monitorProc: ChildProcess | null = null
+let monitorBatteryTimer: ReturnType<typeof setInterval> | null = null
+
+/** Read the current battery (best-effort; null if unavailable). */
+async function readBattery(bin: string, udid: string): Promise<Battery | null> {
+  const [c, r] = await Promise.all([
+    run(bin, batteryCheckArgs(udid), 8000),
+    run(bin, batteryRegistryArgs(udid), 8000)
+  ])
+  return parseIosBattery(c.stdout || c.stderr, r.stdout || r.stderr)
+}
+
+/** Start the perf monitor: ensure the tunnel, stream sysmontap CPU, poll battery,
+ *  and emit a Sample (throttled to ~intervalMs) for the shared MonitorView. */
+export async function monitorStart(
+  bin: string,
+  udid: string,
+  intervalMs: number,
+  onSample: (s: Sample) => void,
+  onFailed: (message: string) => void
+): Promise<boolean> {
+  monitorStop()
+  const ens = await ensureTunnel(bin, udid)
+  if (!ens.ok) {
+    onFailed(ens.message)
+    return false
+  }
+
+  let battery: Battery | null = await readBattery(bin, udid).catch(() => null)
+  monitorBatteryTimer = setInterval(() => {
+    void readBattery(bin, udid)
+      .then((b) => {
+        if (b) battery = b
+      })
+      .catch(() => {})
+  }, 5000)
+
+  const proc = spawn(bin, ['sysmontap', '--udid', udid], { stdio: ['ignore', 'ignore', 'pipe'] })
+  monitorProc = proc
+  const throttle = Math.max(250, intervalMs)
+  let buf = ''
+  let lastEmit = 0
+  proc.stderr?.on('data', (d: Buffer) => {
+    buf += d.toString()
+    const lines = buf.split('\n')
+    buf = lines.pop() ?? '' // keep the partial last line
+    for (const line of lines) {
+      const s = parseSysmontapCpu(line)
+      if (!s) continue
+      const now = Date.now()
+      if (now - lastEmit < throttle) continue
+      lastEmit = now
+      onSample({
+        cpu: sysmontapCpuPercent(s.cpuTotalLoad, s.cpuCount),
+        mem: s.memTotalKb > 0 ? [s.memUsedKb, s.memTotalKb] : null,
+        load: null,
+        cores: s.cpuCount,
+        coresPct: s.perCpu.length > 0 ? s.perCpu : null,
+        battery,
+        gfx: null,
+        app: null
+      })
+    }
+  })
+  proc.on('exit', (code) => {
+    if (monitorProc === proc) monitorProc = null
+    if (code && code !== 0) onFailed('sysmontap stopped unexpectedly')
+  })
+  return true
+}
+
+/** Stop the perf monitor (SIGINT the stream + cancel the battery poll). */
+export function monitorStop(): void {
+  if (monitorProc) {
+    try {
+      monitorProc.kill('SIGINT')
+    } catch {
+      /* already gone */
+    }
+    monitorProc = null
+  }
+  if (monitorBatteryTimer) {
+    clearInterval(monitorBatteryTimer)
+    monitorBatteryTimer = null
+  }
 }
 
 // --- crash reports (no tunnel — CrashReportCopyMobile lockdown service) --------

@@ -11,6 +11,8 @@
  * discrete go-ios sub-command.
  */
 
+import type { Battery } from './monitor'
+
 // The three application classes `ios apps --all` reports; anything else is unknown.
 export type IosAppType = 'User' | 'System' | 'Hidden' | 'Unknown'
 
@@ -354,6 +356,83 @@ export function setLocationArgs(udid: string, lat: number, lon: number): string[
 
 export function resetLocationArgs(udid: string): string[] {
   return ['resetlocation', '--udid', udid]
+}
+
+// --- performance monitor (sysmontap CPU + battery; needs the tunnel for CPU) ---
+// go-ios's `sysmontap` streams one slog line per sample carrying the system CPU;
+// its memory/per-process data is requested but discarded by the CLI (would need
+// a deeper go-ios patch to surface — memory/per-app are left null for now).
+
+export function batteryCheckArgs(udid: string): string[] {
+  return ['batterycheck', '--udid', udid]
+}
+export function batteryRegistryArgs(udid: string): string[] {
+  return ['batteryregistry', '--udid', udid]
+}
+
+export interface SysmontapSample {
+  cpuCount: number
+  /** Summed across cores (100 == one fully-busy core). */
+  cpuTotalLoad: number
+  /** Per-core total load, each 0–100 (from our patched go-ios `per_cpu`). */
+  perCpu: number[]
+  /** Device RAM total / in-use, in KiB (our patched go-ios; 0 if unavailable). */
+  memTotalKb: number
+  memUsedKb: number
+}
+
+/** Parse one `sysmontap` line → a sample, or null if it isn't a CPU sample.
+ *  per_cpu/mem_* come from our patched go-ios (see scripts/build-goios.sh); an
+ *  unpatched binary simply yields empty per-core + zero memory. */
+export function parseSysmontapCpu(line: string): SysmontapSample | null {
+  const t = line.trim()
+  if (!t.startsWith('{')) return null
+  try {
+    const o = JSON.parse(t)
+    if (isObj(o) && o.msg === 'received CPU usage data' && typeof o.cpu_total_load === 'number') {
+      return {
+        cpuCount: typeof o.cpu_count === 'number' ? o.cpu_count : 0,
+        cpuTotalLoad: o.cpu_total_load,
+        perCpu: Array.isArray(o.per_cpu) ? o.per_cpu.filter((x): x is number => typeof x === 'number') : [],
+        memTotalKb: typeof o.mem_total_kb === 'number' ? o.mem_total_kb : 0,
+        memUsedKb: typeof o.mem_used_kb === 'number' ? o.mem_used_kb : 0
+      }
+    }
+  } catch {
+    /* partial chunk / non-JSON log line */
+  }
+  return null
+}
+
+/** System CPU as 0–100% (total load / cores, clamped). */
+export function sysmontapCpuPercent(cpuTotalLoad: number, cpuCount: number): number {
+  if (cpuCount <= 0) return 0
+  return Math.max(0, Math.min(100, cpuTotalLoad / cpuCount))
+}
+
+/** Battery {level, tempC, powered} from `batterycheck` + `batteryregistry` JSON. */
+export function parseIosBattery(checkJson: string, registryJson: string): Battery | null {
+  const parse = (s: string): Record<string, unknown> => {
+    try {
+      const o = JSON.parse(s.trim())
+      return isObj(o) ? o : {}
+    } catch {
+      return {}
+    }
+  }
+  const c = parse(checkJson)
+  const r = parse(registryJson)
+  const level =
+    typeof c.BatteryCurrentCapacity === 'number'
+      ? c.BatteryCurrentCapacity
+      : typeof r.CurrentCapacity === 'number'
+        ? r.CurrentCapacity
+        : null
+  if (level === null) return null
+  // batteryregistry Temperature is centi-°C (e.g. 3450 → 34.5 °C).
+  const tempC = typeof r.Temperature === 'number' ? r.Temperature / 100 : null
+  const powered = c.BatteryIsCharging === true || c.ExternalConnected === true || r.IsCharging === true
+  return { level, tempC, powered }
 }
 
 // --- app-container file access (house-arrest AFC via `ios fsync`, no tunnel) ---

@@ -5,8 +5,11 @@
 # Upstream go-ios (v1.2.0) sends EPRO/ESEC=false in its TSS personalization
 # request because it never evaluates the BuildManifest's RestoreRequestRules,
 # so Apple's TSS server rejects it with status 94 ("device isn't eligible").
-# patches/goios-restore-request-rules.patch ports pymobiledevice3's rule
+# patches/goios-androidlab.patch ports pymobiledevice3's rule
 # evaluation into ios/imagemounter (see the memory note "go-ios DDI mount fix").
+# The same patch also enriches `ios sysmontap` to emit per-core CPU + RAM
+# (per_cpu / mem_total_kb / mem_used_kb), which the CLI otherwise discards —
+# feeding the iOS Monitor tab.
 #
 # This clones go-ios, applies the patch, builds the `ios` binary for the host
 # platform, and drops it into node_modules/go-ios/dist/<triple>/ so findGoIos()
@@ -17,7 +20,7 @@ set -euo pipefail
 
 GOIOS_REF="${GOIOS_REF:-main}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-PATCH="$HERE/patches/goios-restore-request-rules.patch"
+PATCH="$HERE/patches/goios-androidlab.patch"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

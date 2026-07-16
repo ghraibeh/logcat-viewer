@@ -169,6 +169,11 @@ export function MonitorView({
   const [st, setSt] = useState<MonState>(() => initState(c.serial, c.appPkg))
   const pkgRef = useRef(c.appPkg)
   pkgRef.current = c.appPkg
+  // iOS (via our patched go-ios sysmontap) provides CPU, per-core and RAM +
+  // battery. UI-jank has no iOS equivalent and LeakCanary/Shark is Android-only,
+  // so that card + the Detect-leaks button stay hidden on iOS. Per-app overlays
+  // aren't available on iOS yet (sysmontap doesn't ship per-process values).
+  const ios = c.platform === 'ios'
 
   // Single sample subscription for the component's lifetime.
   useEffect(() => {
@@ -197,22 +202,24 @@ export function MonitorView({
       <div className="mon-head">
         <span className="mon-heading">Device Performance</span>
         <span className="grow" />
-        <button
-          disabled={!c.serial || !c.appPkg}
-          title={
-            !c.serial
-              ? 'Select a device first'
-              : !c.appPkg
-                ? 'Pick an app (left) — its heap is captured and analyzed for leaks'
-                : `Capture ${c.appPkg}'s heap and analyze it with LeakCanary/Shark (app must be debuggable)`
-          }
-          onClick={() => {
-            if (c.serial && c.appPkg) onDetectLeaks(c.serial, c.appPkg)
-          }}
-        >
-          <Icon name="search" size={15} />
-          Detect leaks
-        </button>
+        {!ios ? (
+          <button
+            disabled={!c.serial || !c.appPkg}
+            title={
+              !c.serial
+                ? 'Select a device first'
+                : !c.appPkg
+                  ? 'Pick an app (left) — its heap is captured and analyzed for leaks'
+                  : `Capture ${c.appPkg}'s heap and analyze it with LeakCanary/Shark (app must be debuggable)`
+            }
+            onClick={() => {
+              if (c.serial && c.appPkg) onDetectLeaks(c.serial, c.appPkg)
+            }}
+          >
+            <Icon name="search" size={15} />
+            Detect leaks
+          </button>
+        ) : null}
         <span className="label">Refresh</span>
         <select value={interval} onChange={(e) => setIntervalMs(Number(e.target.value))}>
           {INTERVALS.map(([label, ms]) => (
@@ -228,18 +235,18 @@ export function MonitorView({
           name="CPU"
           value={st.cpuValue}
           sub={st.cpuSub}
-          app={st.cpuApp}
+          app={ios ? '' : st.cpuApp}
           graph={
-            <SparkGraph values={st.cpuHist} appValues={st.cpuAppHist} color={PALETTE.ACCENT} appColor={APP_COLOR} />
+            <SparkGraph values={st.cpuHist} appValues={ios ? [] : st.cpuAppHist} color={PALETTE.ACCENT} appColor={APP_COLOR} />
           }
         />
         <Card
           name="Memory"
           value={st.memValue}
           sub={st.memSub}
-          app={st.memApp}
+          app={ios ? '' : st.memApp}
           graph={
-            <SparkGraph values={st.memHist} appValues={st.memAppHist} color={PALETTE.GREEN} appColor={APP_COLOR} />
+            <SparkGraph values={st.memHist} appValues={ios ? [] : st.memAppHist} color={PALETTE.GREEN} appColor={APP_COLOR} />
           }
         />
         <Card
@@ -249,13 +256,15 @@ export function MonitorView({
           app=""
           graph={<SparkGraph values={st.batHist} appValues={[]} color={PALETTE.GREEN_H} appColor={APP_COLOR} />}
         />
-        <Card
-          name="UI Rendering (jank)"
-          value={st.gfxValue}
-          sub={st.gfxSub}
-          app=""
-          graph={<SparkGraph values={st.gfxHist} appValues={[]} color={PALETTE.RED} appColor={APP_COLOR} />}
-        />
+        {!ios ? (
+          <Card
+            name="UI Rendering (jank)"
+            value={st.gfxValue}
+            sub={st.gfxSub}
+            app=""
+            graph={<SparkGraph values={st.gfxHist} appValues={[]} color={PALETTE.RED} appColor={APP_COLOR} />}
+          />
+        ) : null}
         <div className="mon-card span2">
           <div className="mon-caption">PER-CORE CPU</div>
           <div className="mon-graph">

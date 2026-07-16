@@ -138,3 +138,97 @@ index 488c537..f77444a 100644
  type response struct {
  	status        int
  	message       string
+diff --git a/ios/instruments/instruments_sysmontap.go b/ios/instruments/instruments_sysmontap.go
+index 9fe16fb..ae6bd9a 100644
+--- a/ios/instruments/instruments_sysmontap.go
++++ b/ios/instruments/instruments_sysmontap.go
+@@ -98,12 +98,18 @@ func (s *sysmontapService) ReceiveCPUUsage() chan SysmontapMessage {
+ 	go func() {
+ 		defer close(messages)
+ 
++		// SystemAttributes (the column order for the System memory tuple) is only
++		// sent in some messages; cache it so value-only samples can be decoded.
++		memCols := map[string]int{}
+ 		for msg := range s.msgDispatcher.messages {
+ 			sysmontapMessage, err := mapToCPUUsage(msg)
+ 			if err != nil {
+ 				golog.Debug("expected `sysmontapMessage` from global channel, but received different message", "module", logModule, "message", msg)
+ 				continue
+ 			}
++			if rm, e := extractResultMap(msg.Payload); e == nil {
++				enrichSysmontap(&sysmontapMessage, rm, memCols)
++			}
+ 
+ 			messages <- sysmontapMessage
+ 		}
+@@ -121,6 +127,56 @@ type SysmontapMessage struct {
+ 	EndMachAbsTime uint64
+ 	Type           uint64
+ 	SystemCPUUsage CPUUsage
++	// PerCPU is each core's total load (0-100). MemTotalKb/MemUsedKb are the
++	// device's physical RAM total and in-use (active+wired+compressed). All are
++	// best-effort — zero/empty when a sample doesn't carry them.
++	PerCPU     []float64
++	MemTotalKb uint64
++	MemUsedKb  uint64
++}
++
++// iOS sysmontap counts memory in 16 KiB pages (all 64-bit iOS devices since A9).
++const sysmontapPageKb = 16
++
++// enrichSysmontap pulls per-core CPU (PerCPUUsage) and system memory
++// (System, decoded via the cached SystemAttributes column order) out of a raw
++// sysmontap result map onto the message. Best-effort: leaves fields zero/empty
++// on any shape mismatch. memCols is updated in place when this sample carries
++// the SystemAttributes column list.
++func enrichSysmontap(msg *SysmontapMessage, rm map[string]interface{}, memCols map[string]int) {
++	if pc, ok := rm["PerCPUUsage"].([]interface{}); ok {
++		loads := make([]float64, 0, len(pc))
++		for _, e := range pc {
++			if m, ok := e.(map[string]interface{}); ok {
++				if v, ok := toFloat64(m["CPU_TotalLoad"]); ok {
++					loads = append(loads, v)
++				}
++			}
++		}
++		msg.PerCPU = loads
++	}
++	if sa, ok := rm["SystemAttributes"].([]interface{}); ok && len(sa) > 0 {
++		for k := range memCols {
++			delete(memCols, k)
++		}
++		for i, c := range sa {
++			if s, ok := c.(string); ok {
++				memCols[s] = i
++			}
++		}
++	}
++	if sys, ok := rm["System"].([]interface{}); ok && len(memCols) > 0 {
++		get := func(name string) uint64 {
++			if i, ok := memCols[name]; ok && i < len(sys) {
++				if v, ok := toUint64(sys[i]); ok {
++					return v
++				}
++			}
++			return 0
++		}
++		msg.MemTotalKb = get("physMemSize") * sysmontapPageKb
++		msg.MemUsedKb = (get("vmActiveCount") + get("vmWireCount") + get("vmCompressorPageCount")) * sysmontapPageKb
++	}
+ }
+ 
+ type CPUUsage struct {
+diff --git a/main.go b/main.go
+index d048316..5c22d68 100644
+--- a/main.go
++++ b/main.go
+@@ -621,6 +621,9 @@ func printSysmontapStats(device ios.DeviceEntry) {
+ 				"enabled_cpus", cpuUsageMsg.EnabledCPUs,
+ 				"end_time", cpuUsageMsg.EndMachAbsTime,
+ 				"cpu_total_load", cpuUsageMsg.SystemCPUUsage.CPU_TotalLoad,
++				"per_cpu", cpuUsageMsg.PerCPU,
++				"mem_total_kb", cpuUsageMsg.MemTotalKb,
++				"mem_used_kb", cpuUsageMsg.MemUsedKb,
+ 			)
+ 
+ 		case <-c:

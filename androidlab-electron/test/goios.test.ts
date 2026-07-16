@@ -213,3 +213,69 @@ describe('tunnelHasUdid', () => {
     expect(G.tunnelHasUdid('', '00008130-AAA')).toBe(false)
   })
 })
+
+describe('userspaceTunPort', () => {
+  const LS = JSON.stringify([
+    { address: 'fd3b::1', rsdPort: 61696, udid: 'UDID-A', userspaceTun: true, userspaceTunPort: 60106 }
+  ])
+  it('reads the proxy port for the udid', () => {
+    expect(G.userspaceTunPort(LS, 'UDID-A')).toBe(60106)
+  })
+  it('is null for an unknown udid or no port', () => {
+    expect(G.userspaceTunPort(LS, 'UDID-Z')).toBeNull()
+    expect(G.userspaceTunPort('[]', 'UDID-A')).toBeNull()
+  })
+})
+
+describe('parseSysmontapCpu + sysmontapCpuPercent', () => {
+  it('extracts cpu totals + per-core + memory from a sysmontap line', () => {
+    const line =
+      '{"time":"t","level":"INFO","msg":"received CPU usage data","cpu_count":6,"cpu_total_load":333.3,' +
+      '"per_cpu":[11.7,21.5,6,7.7,7.8,11.7],"mem_total_kb":5850512,"mem_used_kb":3180784}'
+    expect(G.parseSysmontapCpu(line)).toEqual({
+      cpuCount: 6,
+      cpuTotalLoad: 333.3,
+      perCpu: [11.7, 21.5, 6, 7.7, 7.8, 11.7],
+      memTotalKb: 5850512,
+      memUsedKb: 3180784
+    })
+  })
+  it('defaults per-core/memory when an unpatched binary omits them', () => {
+    const line = '{"msg":"received CPU usage data","cpu_count":6,"cpu_total_load":100}'
+    expect(G.parseSysmontapCpu(line)).toEqual({
+      cpuCount: 6,
+      cpuTotalLoad: 100,
+      perCpu: [],
+      memTotalKb: 0,
+      memUsedKb: 0
+    })
+  })
+  it('ignores non-sample / partial lines', () => {
+    expect(G.parseSysmontapCpu('{"msg":"starting to monitor"}')).toBeNull()
+    expect(G.parseSysmontapCpu('  {"cpu_count":6,')).toBeNull()
+    expect(G.parseSysmontapCpu('')).toBeNull()
+  })
+  it('normalizes total load to 0-100% per core (clamped)', () => {
+    expect(G.sysmontapCpuPercent(333.3, 6)).toBeCloseTo(55.55, 1)
+    expect(G.sysmontapCpuPercent(1200, 6)).toBe(100)
+    expect(G.sysmontapCpuPercent(50, 0)).toBe(0)
+  })
+})
+
+describe('parseIosBattery', () => {
+  it('merges batterycheck + batteryregistry (temp is centi-°C)', () => {
+    const check = '{"BatteryCurrentCapacity":97,"BatteryIsCharging":true,"ExternalConnected":true}'
+    const reg = '{"Temperature":3450,"IsCharging":true,"CurrentCapacity":97}'
+    expect(G.parseIosBattery(check, reg)).toEqual({ level: 97, tempC: 34.5, powered: true })
+  })
+  it('falls back to registry capacity + reports unplugged', () => {
+    expect(G.parseIosBattery('{}', '{"CurrentCapacity":80,"Temperature":3000,"IsCharging":false}')).toEqual({
+      level: 80,
+      tempC: 30,
+      powered: false
+    })
+  })
+  it('is null when no capacity is present', () => {
+    expect(G.parseIosBattery('{}', '{}')).toBeNull()
+  })
+})

@@ -18,7 +18,7 @@ export const TAB_SUPPORT: Record<string, Platform[]> = {
   databases: ['android', 'ios'],
   files: ['android', 'ios'],
   apps: ['android', 'ios'],
-  monitor: ['android'],
+  monitor: ['android', 'ios'],
   inspector: ['android'],
   controls: ['android'],
   toolbox: ['android'],
