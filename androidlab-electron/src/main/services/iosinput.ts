@@ -388,21 +388,24 @@ async function wdaReady(bin: string, udid: string, timeout = 8000): Promise<bool
   return r.code === 0 && /"ready"\s*:\s*true/i.test(r.stdout)
 }
 
-/** Ensure an input agent is up for this device, preferring DeviceKit (WebSocket +
- *  full-path gesture); fall back to WebDriverAgent (HTTP) when DeviceKit isn't
- *  installed/reachable. Sets `activeAgent` so the injection hot-path routes correctly. */
+/** Ensure an input agent is up for this device, preferring **WebDriverAgent**. Measured on
+ *  device: WDA types ~6× faster than the pinned DeviceKit 0.0.18 (whose `device.io.text` has a
+ *  ~1.8s fixed cost) AND supports Backspace/arrows via `/wda/keys`, with equivalent tap/drag
+ *  latency — so it's the better default across the board. DeviceKit stays as a fallback (its
+ *  WebSocket path is only a win if a newer DeviceKit with fast text/`device.io.keys` is
+ *  installed). Sets `activeAgent` so the injection hot-path routes correctly. */
 export async function ensureAgent(bin: string, udid: string, onProgress: (line: string) => void = () => {}): Promise<boolean> {
-  // Prefer DeviceKit. If it comes up, make sure any WDA runner is torn down (one XCUITest
-  // session at a time) and route to DeviceKit.
-  if (await devicekit.ensure(bin, udid, onProgress)) {
-    if (activeAgent === 'wda') stopAgent()
-    activeAgent = 'devicekit'
+  // Prefer WDA. If it comes up, make sure any DeviceKit runner is torn down (one XCUITest
+  // session at a time) and route to WDA.
+  if (await ensureWda(bin, udid, onProgress)) {
+    devicekit.stop()
+    activeAgent = 'wda'
     return true
   }
-  // Fallback: WebDriverAgent. Make sure DeviceKit is stopped first.
-  devicekit.stop()
-  const ok = await ensureWda(bin, udid, onProgress)
-  activeAgent = ok ? 'wda' : null
+  // Fallback: DeviceKit (WebSocket). Tear down any WDA runner first.
+  stopAgent()
+  const ok = await devicekit.ensure(bin, udid, onProgress)
+  activeAgent = ok ? 'devicekit' : null
   return ok
 }
 
