@@ -25,18 +25,18 @@ extraResources:
   # mirror (video + control) self-contained with no scrcpy install on the host.
   - from: resources/scrcpy-server
     to: scrcpy-server
-  # Native macOS iOS-screen capture helper (AVFoundation + VideoToolbox → H.264).
-  # Compiled from native/macos/iosscreen.swift via `npm run build:ioshelper`. Only
-  # meaningful on macOS; harmless elsewhere. Drives the iOS screen mirror.
-  - from: resources/iosscreen
-    to: iosscreen
-  # Native macOS AirPlay screen-mirror receiver (vendored RPiPlay core, GPL-3.0 —
-  # shipped as a separate subprocess binary). Compiled from native/macos/airplay/*
-  # via `npm run build:airplayhelper`. macOS-only; drives the Wi-Fi iOS mirror path.
-  # NOTE: currently links Homebrew openssl@3 + libplist by path — bundling/static-
-  # linking those dylibs for distribution to other Macs is a tracked follow-up.
-  - from: resources/airplayscreen
-    to: airplayscreen
+  # Native AirPlay screen-mirror receiver (vendored RPiPlay core, GPL-3.0). Built for
+  # macOS/Windows/Linux from native/macos/airplay/* via CMake (`npm run
+  # build:airplayhelper`); advertises itself over mDNS with no OS Bonjour/Avahi. The
+  # glob picks up whichever the current build produced: `airplayscreen` (mac/linux) or
+  # `airplayscreen.exe` (Windows). Drives the Wi-Fi iOS mirror path on every platform.
+  # NOTE: still links OpenSSL/libplist/fdk-aac dynamically — bundling/static-linking
+  # those for redistribution is a tracked follow-up.
+  - from: resources
+    to: .
+    filter:
+      - airplayscreen
+      - airplayscreen.exe
 mac:
   category: public.app-category.developer-tools
   target:
@@ -45,5 +45,10 @@ mac:
   darkModeSupport: true
   minimumSystemVersion: "12.0"
   identity: null
+  # The USB (CoreMediaIO) iOS-screen capture helper is macOS-only (no Windows/Linux
+  # equivalent), so it's bundled only in the mac target. Built via `build:ioshelper`.
+  extraResources:
+    - from: resources/iosscreen
+      to: iosscreen
 dmg:
   title: MobileLabKit

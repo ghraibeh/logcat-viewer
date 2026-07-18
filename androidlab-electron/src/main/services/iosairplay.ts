@@ -137,13 +137,14 @@ export class IosAirplayService {
     return this.mutedWanted
   }
 
-  /** Bring the receiver's actual mute state in line with the preference via SIGUSR2.
-   *  Gated on gotData so the signal never races a just-spawned process's handler. */
+  /** Bring the receiver's actual mute state in line with the preference. The receiver
+   *  toggles mute on each 'm' byte it reads on stdin (portable — no POSIX signals on
+   *  Windows). Gated on gotData so the write never races a just-spawned process. */
   private syncMute(): void {
     if (!this.proc || !this.alive || !this.gotData) return
     if (this.helperMuted === this.mutedWanted) return
     try {
-      this.proc.kill('SIGUSR2')
+      this.proc.stdin?.write('m')
       this.helperMuted = this.mutedWanted
     } catch {
       /* receiver vanished — the next spawn re-syncs */
@@ -167,10 +168,9 @@ export class IosAirplayService {
   }
 
   private async startReceiver(token: number): Promise<void> {
-    if (process.platform !== 'darwin') {
-      this.cb.onFailed('AirPlay mirroring is available on macOS only.')
-      return
-    }
+    // Cross-platform: the receiver binary (built from native/macos/airplay/* via CMake)
+    // runs on macOS, Windows and Linux — it advertises itself over mDNS with no OS
+    // Bonjour/Avahi (bonjour_shim) and decodes audio with fdk-aac + miniaudio.
     const helper = resolveHelper()
     if (!helper) {
       this.cb.onFailed('The AirPlay receiver (resources/airplayscreen) is missing from this build.')
@@ -182,7 +182,9 @@ export class IosAirplayService {
       message: `On your iPhone, open Control Center ▸ Screen Mirroring and pick “${AIRPLAY_NAME}”.`
     })
 
-    const proc = spawn(helper, [AIRPLAY_NAME, this.resKey], { stdio: ['ignore', 'pipe', 'pipe'] })
+    // stdin is piped so we can toggle mute with a portable 'm' command (the receiver
+    // has no POSIX signals on Windows); stdin EOF also tells it the parent is gone.
+    const proc = spawn(helper, [AIRPLAY_NAME, this.resKey], { stdio: ['pipe', 'pipe', 'pipe'] })
     this.proc = proc
     this.alive = true
     this.gotData = false
@@ -241,11 +243,13 @@ export class IosAirplayService {
   }
 }
 
-/** Locate the bundled `airplayscreen` receiver: packaged → resources/, dev → project. */
+/** Locate the bundled `airplayscreen` receiver: packaged → resources/, dev → project.
+ *  Windows carries a `.exe` suffix. */
 function resolveHelper(): string | null {
+  const bin = process.platform === 'win32' ? 'airplayscreen.exe' : 'airplayscreen'
   const cands = app.isPackaged
-    ? [join(process.resourcesPath, 'airplayscreen')]
-    : [join(app.getAppPath(), 'resources', 'airplayscreen'), join(process.cwd(), 'resources', 'airplayscreen')]
+    ? [join(process.resourcesPath, bin)]
+    : [join(app.getAppPath(), 'resources', bin), join(process.cwd(), 'resources', bin)]
   for (const c of cands) if (existsSync(c)) return c
   return null
 }

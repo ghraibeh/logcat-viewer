@@ -35,18 +35,26 @@
 #include "compat.h"
 #include "utils.h"
 
+#if !defined(USE_BUNDLED_MDNS)
 #include <dns_sd.h>
+#else
+#include "bonjour_shim.h"
+#endif
 
 #define MAX_DEVICEID 18
 #define MAX_SERVNAME 256
 
-#if defined(HAVE_LIBDL) && !defined(__APPLE__)
+/* The bundled mDNS advertiser (bonjour_shim) replaces the OS dns_sd entirely, so the
+ * dlopen/libdns_sd path must stay off even on platforms where HAVE_LIBDL is set. */
+#if defined(USE_BUNDLED_MDNS)
+# define USE_LIBDL 0
+#elif defined(HAVE_LIBDL) && !defined(__APPLE__)
 # define USE_LIBDL 1
 #else
 # define USE_LIBDL 0
 #endif
 
-#if defined(WIN32) || USE_LIBDL
+#if defined(WIN32) || USE_LIBDL || defined(USE_BUNDLED_MDNS)
 # ifdef WIN32
 #  include <stdint.h>
 #  if !defined(EFI32) && !defined(EFI64)
@@ -158,7 +166,16 @@ dnssd_init(const char* name, int name_len, const char* hw_addr, int hw_addr_len,
         return NULL;
     }
 
-#ifdef WIN32
+#if defined(USE_BUNDLED_MDNS)
+    /* Self-contained advertiser — no OS Bonjour/Avahi. See bonjour_shim.c. */
+    dnssd->DNSServiceRegister = (DNSServiceRegister_t)bshim_DNSServiceRegister;
+    dnssd->DNSServiceRefDeallocate = (DNSServiceRefDeallocate_t)bshim_DNSServiceRefDeallocate;
+    dnssd->TXTRecordCreate = (TXTRecordCreate_t)bshim_TXTRecordCreate;
+    dnssd->TXTRecordSetValue = (TXTRecordSetValue_t)bshim_TXTRecordSetValue;
+    dnssd->TXTRecordGetLength = (TXTRecordGetLength_t)bshim_TXTRecordGetLength;
+    dnssd->TXTRecordGetBytesPtr = (TXTRecordGetBytesPtr_t)bshim_TXTRecordGetBytesPtr;
+    dnssd->TXTRecordDeallocate = (TXTRecordDeallocate_t)bshim_TXTRecordDeallocate;
+#elif defined(WIN32)
     dnssd->module = LoadLibraryA("dnssd.dll");
 	if (!dnssd->module) {
 		if (error) *error = DNSSD_ERROR_LIBNOTFOUND;

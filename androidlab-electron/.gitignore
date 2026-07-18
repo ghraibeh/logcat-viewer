@@ -8,3 +8,6 @@ dist/
 
 # Debug capture artifacts (network intercept dumps)
 *.pcap
+
+# Native AirPlay receiver CMake build tree (out-of-source)
+native/macos/airplay-build/
