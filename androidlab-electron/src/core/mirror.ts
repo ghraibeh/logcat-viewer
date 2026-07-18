@@ -209,10 +209,19 @@ export class AnnexBDemuxer {
   private curHasVcl = false
   private curKey = false
   private codec: string | null = null
+  private lastSps: Uint8Array | null = null
+  private spsGen = 0
 
-  /** `avc1.PPCCLL` once an SPS has been seen, else null. */
+  /** `avc1.PPCCLL` from the most recent SPS, else null. */
   codecString(): string | null {
     return this.codec
+  }
+
+  /** Monotonic counter that bumps whenever the SPS changes — i.e. the video
+   *  resolution/orientation changed (a device rotation). Consumers re-init the
+   *  decoder on a change so new frames aren't decoded with stale geometry. */
+  spsGeneration(): number {
+    return this.spsGen
   }
 
   push(chunk: Uint8Array): AccessUnit[] {
@@ -292,8 +301,14 @@ export class AnnexBDemuxer {
       if (au) out.push(au)
     }
 
-    if (type === 7 && this.codec === null && payload.length >= 4) {
+    if (type === 7 && payload.length >= 4) {
+      // Refresh the codec string from the latest SPS, and bump the generation when the
+      // SPS bytes change (new resolution/orientation) so decoders can re-initialise.
       this.codec = `avc1.${hex2(payload[1])}${hex2(payload[2])}${hex2(payload[3])}`
+      if (this.lastSps === null || !bytesEqual(this.lastSps, payload)) {
+        this.lastSps = payload.slice()
+        this.spsGen++
+      }
     }
 
     this.curAU.push(nalWithSc)
@@ -328,6 +343,12 @@ function findStartCodes(data: Uint8Array): number[] {
     }
   }
   return idx
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {

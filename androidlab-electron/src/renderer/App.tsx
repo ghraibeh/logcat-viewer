@@ -13,6 +13,7 @@ import { LogWorkArea } from './components/LogWorkArea'
 import { MonitorView } from './components/MonitorView'
 import { DeviceInfoView } from './components/DeviceInfoView'
 import { LeakReportModal } from './components/LeakReportModal'
+import { IosInputSettingsModal } from './components/IosInputSettingsModal'
 import { InspectorView } from './components/InspectorView'
 import { ControlsView } from './components/ControlsView'
 import { LocationView } from './components/LocationView'
@@ -77,6 +78,7 @@ export default function App() {
   const [mirrorWidth, setMirrorWidth] = useState(360)
   const [secondaryReq, setSecondaryReq] = useState(0)
   const [leakReq, setLeakReq] = useState<{ serial: string; pkg: string } | null>(null)
+  const [iosInputOpen, setIosInputOpen] = useState(false)
 
   const searchRef = useRef<HTMLInputElement>(null)
   const selectionRef = useRef<ReadonlySet<number>>(selectedRows)
@@ -414,6 +416,7 @@ export default function App() {
         c={c}
         onAbout={() => setAbout(true)}
         onMirror={toggleMirror}
+        onIosInput={() => setIosInputOpen(true)}
         mirrorOpen={mirrorMode !== 'closed'}
         theme={theme}
         onToggleTheme={toggleTheme}
@@ -610,6 +613,10 @@ export default function App() {
               : showToast(`✗ ${r.message}`)
           }
         />
+      ) : null}
+
+      {iosInputOpen ? (
+        <IosInputSettingsModal serial={c.serial} isIos={c.platform === 'ios'} onClose={() => setIosInputOpen(false)} />
       ) : null}
 
       {about ? <AboutDialog onClose={() => setAbout(false)} /> : null}

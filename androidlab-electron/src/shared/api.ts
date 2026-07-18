@@ -48,6 +48,7 @@ import type {
 } from './types'
 import type { FileKind } from '@core/files'
 import type { IntentSpec } from '@core/toolbox'
+import type { IosInputConfig } from '@core/iosinput'
 import type { Pref } from '@core/prefs'
 import type { DisplayInfo } from '@core/mirror'
 import type { AndroidDeviceInfo } from '@core/deviceinfo'
@@ -65,6 +66,9 @@ export interface AndroidLabApi {
     forceCrash(serial: string, pkg: string, pids: number[]): Promise<string[]>
     /** Aggregated "About this device" info for the Device Info tab. */
     deviceInfo(serial: string): Promise<AndroidDeviceInfo | null>
+    /** Hotplug push: fires with the fresh device list whenever a device is
+     *  plugged in or unplugged (USB), so the picker updates without a refresh. */
+    onDevicesChanged(cb: (devices: Device[]) => void): Unsubscribe
   }
   logcat: {
     start(serial: string, clearFirst: boolean): Promise<boolean>
@@ -344,6 +348,50 @@ export interface AndroidLabApi {
     onH264(cb: (chunk: Uint8Array) => void): Unsubscribe
     onState(cb: (state: IosMirrorState) => void): Unsubscribe
     onFailed(cb: (message: string) => void): Unsubscribe
+  }
+  /** iOS touch/keyboard forwarding (macOS, go-ios). View-only until the user supplies
+   *  an App Store Connect signing identity and an on-device agent (WDA/DeviceKit) is
+   *  provisioned + installed. Then mouse/keyboard map to `ui tap/swipe/type`. */
+  iosInput: {
+    /** Persisted signing config (method + cert/profile or ASC key paths + agent). */
+    getConfig(): Promise<IosInputConfig>
+    /** Save config (identifiers + file paths only — never key bytes or the P12 password). */
+    setConfig(cfg: Partial<IosInputConfig>): Promise<IosInputConfig>
+    /** Pick a signing asset file (.p8 / .p12 / .mobileprovision); returns its path. */
+    chooseFile(kind: 'p8' | 'p12' | 'profile'): Promise<string | null>
+    /** Sign + install the agent (manual P12+profile, or ASC → P12+profile first) then
+     *  verify; progress via onProgress. Takes the live config so the P12 password is
+     *  passed through, never persisted. */
+    provision(udid: string, cfg: IosInputConfig): Promise<{ ok: boolean; message: string }>
+    /** Cancel a running provision. */
+    cancel(): Promise<boolean>
+    /** Is the agent installed + reachable (tunnel + `ui status`)? */
+    status(udid: string): Promise<boolean>
+    /** Device size in the points `tap`/`swipe` expect (for canvas → device mapping). */
+    size(udid: string): Promise<{ width: number; height: number } | null>
+    tap(udid: string, x: number, y: number): Promise<boolean>
+    swipe(udid: string, x1: number, y1: number, x2: number, y2: number, durationSec?: number): Promise<boolean>
+    /** A drag as the full captured finger path (device points + ms timestamps). On the
+     *  DeviceKit agent it's replayed as ONE `device.io.gesture` (press→moves→release) over
+     *  the live WebSocket, reproducing the real motion + momentum; WDA falls back to a
+     *  first→last swipe. */
+    gesture(udid: string, points: Array<{ x: number; y: number; t: number }>): Promise<boolean>
+    /** Streamed drag: inject gesture SEGMENTS during the drag (content moves before you
+     *  release). `start` at press, `move` as the finger moves (coalesced), `end` on release.
+     *  Best for scrolling — ~2-3 steps/sec (XCTest ~360ms floor), the finger lifts between
+     *  steps so it scrolls incrementally rather than dragging continuously. */
+    drag(udid: string, phase: 'start' | 'move' | 'end', x: number, y: number): Promise<boolean>
+    type(udid: string, text: string): Promise<boolean>
+    /** Forward one physical keystroke live. `domKey` is a DOM KeyboardEvent.key (a char, or
+     *  'Enter'/'Backspace'/'ArrowUp'/…); `modifiers` are held (command/control/option/shift/fn).
+     *  Special keys + ⌘/⌃ combos work on DeviceKit; WDA fallback handles plain keys. */
+    key(udid: string, domKey: string, modifiers: string[]): Promise<boolean>
+    /** Press a device button. `home` → homescreen; `appswitcher`/`history`/`recents`
+     *  → the App Switcher (emulated swipe-up-and-hold); anything else → WDA pressButton
+     *  (e.g. `volumeUp`/`volumeDown`). */
+    button(udid: string, name: string): Promise<boolean>
+    onProgress(cb: (line: string) => void): Unsubscribe
+    onDone(cb: (result: { ok: boolean; message: string }) => void): Unsubscribe
   }
   intercept: {
     /** Wire the device + bind the proxy; result arrives via onStarted/onFailed. */

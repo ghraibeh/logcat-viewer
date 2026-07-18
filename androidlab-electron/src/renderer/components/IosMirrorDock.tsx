@@ -25,6 +25,7 @@ class H264Engine {
   private demuxer = new AnnexBDemuxer()
   private decoder: VideoDecoder | null = null
   private configured = false
+  private lastSpsGen = -1
   private ts = 0
   private flushTimer: ReturnType<typeof setTimeout> | null = null
   private pending: { frame: VideoFrame; w: number; h: number } | null = null
@@ -79,6 +80,20 @@ class H264Engine {
   private feed(data: Uint8Array, key: boolean): void {
     const dec = this.ensureDecoder()
     if (!dec || dec.state === 'closed') return
+    // The SPS changed (device rotated → new resolution/orientation): re-init the
+    // decoder so frames aren't decoded with the old geometry (stretched / wrong way).
+    const gen = this.demuxer.spsGeneration()
+    if (gen !== this.lastSpsGen) {
+      this.lastSpsGen = gen
+      if (this.configured) {
+        try {
+          dec.reset()
+        } catch {
+          /* ignore */
+        }
+        this.configured = false
+      }
+    }
     if (this.configured && dec.decodeQueueSize > MAX_DECODE_QUEUE) {
       try {
         dec.reset()
@@ -267,6 +282,17 @@ export function IosMirrorDock({
   const [fullscreen, setFullscreen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [rotation, setRotation] = useState(0) // view rotation (0/90/180/270)
+  // Touch/keyboard forwarding (needs a provisioned agent — see IosInputSettingsModal).
+  const [inputOn, setInputOn] = useState(false)
+  const [inputMsg, setInputMsg] = useState<string | null>(null)
+  const [typing, setTyping] = useState(false)
+  const [typeText, setTypeText] = useState('')
+  const uiSizeRef = useRef<{ width: number; height: number } | null>(null)
+  const pressRef = useRef<{ x: number; y: number; t: number } | null>(null)
+  // A synthetic touch indicator that tracks the cursor INSTANTLY (client-side, zero
+  // latency) so a press/drag feels responsive even though the device injects on release.
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const dotRef = useRef<HTMLDivElement>(null)
 
   // Attach the canvas + present loop for the component's lifetime.
   useEffect(() => {
@@ -290,6 +316,10 @@ export function IosMirrorDock({
     setFailed(null)
     setHasFrame(false)
     setMessage('Connecting to device…')
+    // A new device needs its own agent check — drop input state.
+    setInputOn(false)
+    setInputMsg(null)
+    uiSizeRef.current = null
     engineRef.current.reset()
     engineRef.current.clear()
     void window.androidlab.iosMirror.start(serial)
@@ -328,6 +358,155 @@ export function IosMirrorDock({
     onCaptured(r)
   }, [onCaptured])
 
+  // --- touch/keyboard forwarding ------------------------------------------
+  // Toggle input: confirm the agent is reachable, then read the device size (the
+  // points `ui tap/swipe` expect) so canvas clicks can be mapped.
+  const toggleInput = useCallback(async () => {
+    if (inputOn) {
+      setInputOn(false)
+      setInputMsg(null)
+      return
+    }
+    if (!serial) return
+    setInputMsg('Checking touch agent…')
+    const up = await window.androidlab.iosInput.status(serial)
+    if (!up) {
+      setInputMsg('Touch agent not set up — open the ⚙ iOS touch input settings and provision it.')
+      return
+    }
+    const sz = await window.androidlab.iosInput.size(serial)
+    if (!sz) {
+      setInputMsg('Agent is up but the device size could not be read.')
+      return
+    }
+    uiSizeRef.current = sz
+    setInputOn(true)
+    setInputMsg(null)
+  }, [inputOn, serial])
+
+  // Canvas client point → device POINTS: invert the view rotation + scale to device
+  // PIXELS (same as the Android mapping), then scale pixels→points via `ui size`.
+  const toDevicePoints = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
+    const eng = engineRef.current
+    const canvas = canvasRef.current
+    const sz = uiSizeRef.current
+    if (!canvas || eng.srcW === 0 || !eng.scale || !sz) return null
+    const rect = canvas.getBoundingClientRect()
+    const X = clientX - (rect.left + rect.width / 2)
+    const Y = clientY - (rect.top + rect.height / 2)
+    const rad = (-eng.rotation * Math.PI) / 180
+    const c = Math.cos(rad)
+    const s = Math.sin(rad)
+    const ux = X * c - Y * s
+    const uy = X * s + Y * c
+    const pxX = ux / eng.scale + eng.srcW / 2
+    const pxY = uy / eng.scale + eng.srcH / 2
+    if (pxX < 0 || pxX >= eng.srcW || pxY < 0 || pxY >= eng.srcH) return null
+    return { x: (pxX * sz.width) / eng.srcW, y: (pxY * sz.height) / eng.srcH }
+  }, [])
+
+  // Touch indicator: a finger-sized ring positioned relative to the canvas wrapper.
+  // Driven straight through the DOM (no React re-render) so it tracks the cursor 1:1.
+  const TOUCH_DOT_R = 21
+  const moveDot = useCallback((clientX: number, clientY: number): void => {
+    const wrap = wrapRef.current
+    const dot = dotRef.current
+    if (!wrap || !dot) return
+    const rect = wrap.getBoundingClientRect()
+    dot.style.transform = `translate(${clientX - rect.left - TOUCH_DOT_R}px, ${clientY - rect.top - TOUCH_DOT_R}px)`
+  }, [])
+  const showDot = useCallback(
+    (clientX: number, clientY: number): void => {
+      moveDot(clientX, clientY)
+      const dot = dotRef.current
+      if (!dot) return
+      dot.classList.remove('press') // retrigger the press pulse
+      void dot.offsetWidth
+      dot.classList.add('show', 'press')
+    },
+    [moveDot]
+  )
+  const hideDot = useCallback((): void => dotRef.current?.classList.remove('show', 'press'), [])
+
+  const movedRef = useRef(false)
+  const onCanvasDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (!inputOn) return
+      const p = toDevicePoints(e.clientX, e.clientY)
+      pressRef.current = p ? { ...p, t: e.timeStamp } : null
+      movedRef.current = false
+      if (p) {
+        wrapRef.current?.focus() // capture the keyboard for live forwarding
+        showDot(e.clientX, e.clientY)
+        // Anchor the streamed drag at the press point (no injection until it moves).
+        if (serial) void window.androidlab.iosInput.drag(serial, 'start', p.x, p.y)
+      }
+    },
+    [inputOn, serial, toDevicePoints, showDot]
+  )
+  // Stream the move to XCTest as it happens (don't wait for release). The service
+  // coalesces + sends a scroll segment whenever the previous one finishes, so the
+  // content moves DURING the drag. The indicator follows the cursor instantly too.
+  const onCanvasMove = useCallback(
+    (e: React.MouseEvent) => {
+      if (!inputOn || !pressRef.current) return
+      moveDot(e.clientX, e.clientY)
+      const p = toDevicePoints(e.clientX, e.clientY)
+      if (!p) return
+      const press = pressRef.current
+      if (Math.abs(p.x - press.x) + Math.abs(p.y - press.y) >= 8) movedRef.current = true
+      if (serial) void window.androidlab.iosInput.drag(serial, 'move', p.x, p.y)
+    },
+    [inputOn, serial, toDevicePoints, moveDot]
+  )
+  // A short press (never moved) = tap; otherwise end the streamed drag at the release point.
+  const onCanvasUp = useCallback(
+    (e: React.MouseEvent) => {
+      hideDot()
+      if (!inputOn || !serial) return
+      const press = pressRef.current
+      const moved = movedRef.current
+      pressRef.current = null
+      movedRef.current = false
+      if (!press) return
+      const up = toDevicePoints(e.clientX, e.clientY) ?? { x: press.x, y: press.y }
+      const dist = Math.abs(up.x - press.x) + Math.abs(up.y - press.y)
+      if (!moved && dist < 8) {
+        void window.androidlab.iosInput.drag(serial, 'end', press.x, press.y) // clears anchor
+        void window.androidlab.iosInput.tap(serial, press.x, press.y)
+      } else {
+        void window.androidlab.iosInput.drag(serial, 'end', up.x, up.y)
+      }
+    },
+    [inputOn, serial, toDevicePoints, hideDot]
+  )
+
+  // Live keyboard forwarding: while the mirror is focused + touch is on, each physical
+  // keystroke goes to the device (chars, Enter/Backspace/arrows/…, and ⌘/⌃ combos).
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (!inputOn || !serial) return
+      if (typing) return // the on-screen type box owns the keyboard while it's open
+      const k = e.key
+      if (k === 'Shift' || k === 'Control' || k === 'Alt' || k === 'Meta' || k === 'CapsLock') return
+      const mods: string[] = []
+      if (e.metaKey) mods.push('command')
+      if (e.ctrlKey) mods.push('control')
+      if (e.altKey) mods.push('option')
+      if (e.shiftKey && k.length > 1) mods.push('shift') // a char already encodes its own case
+      e.preventDefault()
+      void window.androidlab.iosInput.key(serial, k, mods)
+    },
+    [inputOn, serial, typing]
+  )
+
+  const submitType = useCallback(() => {
+    const text = typeText
+    setTyping(false)
+    setTypeText('')
+    if (text && serial) void window.androidlab.iosInput.type(serial, text)
+  }, [typeText, serial])
+
   // Fullscreen: detached in its own window, drive the real OS-window fullscreen (a
   // separate window's "full screen" should fill the display, not just this pane).
   // Docked, expand the pane over the app window via the CSS overlay (.mirror-fs).
@@ -357,8 +536,18 @@ export function IosMirrorDock({
 
   return (
     <div className={`mirror-dock${fullscreen ? ' mirror-fs' : ''}`}>
-      <div className="mirror-canvas-wrap">
+      <div
+        ref={wrapRef}
+        className={`mirror-canvas-wrap${inputOn ? ' ios-input-on' : ''}`}
+        tabIndex={inputOn ? 0 : undefined}
+        onMouseDown={onCanvasDown}
+        onMouseMove={onCanvasMove}
+        onMouseUp={onCanvasUp}
+        onMouseLeave={onCanvasUp}
+        onKeyDown={onKeyDown}
+      >
         <canvas ref={canvasRef} className="ios-surface" />
+        {inputOn ? <div ref={dotRef} className="ios-touch-dot" aria-hidden /> : null}
         {failed ? (
           <div className="mirror-msg">{failed}</div>
         ) : !hasFrame ? (
@@ -370,6 +559,25 @@ export function IosMirrorDock({
           ) : (
             <div className="mirror-msg">{message}</div>
           )
+        ) : null}
+        {inputMsg ? <div className="ios-input-hint">{inputMsg}</div> : null}
+        {typing ? (
+          <div className="mirror-type" onMouseDown={(e) => e.stopPropagation()}>
+            <input
+              autoFocus
+              placeholder="Type into the focused field…"
+              value={typeText}
+              onChange={(e) => setTypeText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitType()
+                else if (e.key === 'Escape') {
+                  setTyping(false)
+                  setTypeText('')
+                }
+              }}
+            />
+            <button onClick={submitType}>Send</button>
+          </div>
         ) : null}
       </div>
 
@@ -398,6 +606,46 @@ export function IosMirrorDock({
           onClick={() => setRotation((r) => (r + 90) % 360)}
         >
           <Icon name="rotate" size={24} />
+        </button>
+
+        <div className="rail-div" />
+
+        <button
+          className={`rail-btn${inputOn ? ' active' : ''}`}
+          title={inputOn ? 'Touch forwarding ON — click to disable' : 'Forward touches to the device (needs a provisioned agent)'}
+          disabled={!hasFrame}
+          onClick={() => void toggleInput()}
+        >
+          <Icon name="touch" size={24} />
+        </button>
+        <button
+          className={`rail-btn${typing ? ' active' : ''}`}
+          title={inputOn ? 'Type text into the focused field' : 'Enable touch forwarding first'}
+          disabled={!inputOn}
+          onClick={() => setTyping((v) => !v)}
+        >
+          <Icon name="keyboard" size={24} />
+        </button>
+
+        <div className="rail-div" />
+
+        {/* navigation — home/switcher go through WebDriverAgent, which the main process
+            brings up on demand (no need to enable touch forwarding first). */}
+        <button
+          className="rail-btn"
+          title="Home — background all apps, go to the home screen"
+          disabled={!serial}
+          onClick={() => serial && void window.androidlab.iosInput.button(serial, 'home')}
+        >
+          <Icon name="home" size={24} />
+        </button>
+        <button
+          className="rail-btn"
+          title="App Switcher — show the running-app stack"
+          disabled={!serial}
+          onClick={() => serial && void window.androidlab.iosInput.button(serial, 'appswitcher')}
+        >
+          <Icon name="recents" size={24} />
         </button>
 
         <div className="rail-div" />

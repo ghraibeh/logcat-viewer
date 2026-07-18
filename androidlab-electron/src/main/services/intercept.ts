@@ -15,11 +15,14 @@
  *  bodies captured. A pinned/untrusting app that rejects our cert is remembered
  *  and its connections fall back to a blind byte relay so it stays online.
  *
- * Device wiring (CLAUDE.md hard rule #3): the device's original http_proxy is
- * snapshotted before wiring and restored on EVERY exit path; a device-side
- * watchdog (held-open adb shell trapping SIGHUP) self-heals the proxy if the
- * link drops without a clean teardown. shutdown() restores the proxy, removes
- * the reverse tunnel, and kills the watchdog + server.
+ * Device wiring is pluggable via DeviceWiring so ONE proxy/MITM engine serves
+ * both platforms. AndroidWiring (below) is the adb path — CLAUDE.md hard rule #3:
+ * the device's original http_proxy is snapshotted before wiring and restored on
+ * EVERY exit path; a device-side watchdog (held-open adb shell trapping SIGHUP)
+ * self-heals the proxy if the link drops without a clean teardown. IosWiring
+ * (services/interceptIos.ts) is the go-ios path: the CA ships as a config profile
+ * and the device is pointed at the Mac's LAN proxy manually (non-supervised iOS
+ * can't be force-proxied). shutdown() unwires + kills the server.
  */
 import net from 'node:net'
 import tls from 'node:tls'
@@ -92,6 +95,43 @@ export interface CertPushResult {
   ok: boolean
   message: string
   dir: string
+}
+
+/** Host CA material handed to a wiring so it can deliver the cert to the device. */
+export interface CaMaterial {
+  certPath: string
+  certPem: string
+  certDerBase64: string
+}
+
+/** Callbacks a wiring uses to surface a status line / a device drop to the engine. */
+export interface WiringCallbacks {
+  onStatus: (message: string) => void
+  onDisconnect: () => void
+}
+
+/**
+ * Per-platform device wiring — everything that differs between routing an Android
+ * device (adb reverse + global http_proxy + watchdog) and an iOS device (a CA
+ * config profile + a manual Wi-Fi proxy to the Mac). The proxy/MITM engine
+ * (InterceptService) is platform-agnostic and drives a DeviceWiring.
+ */
+export interface DeviceWiring {
+  readonly serial: string
+  /** Interface the proxy binds to: loopback (Android reverse tunnel) vs all
+   *  interfaces (iOS reaches the Mac over the LAN). */
+  readonly bindHost: string
+  /** Whether the engine auto-installs the CA on start (Android), or leaves it to
+   *  the explicit button (iOS — the user must also approve + trust it on-device). */
+  readonly autoInstallCertOnStart: boolean
+  /** Route the device through the host proxy on `port`. A non-empty `message` is
+   *  shown after "Intercept on" (e.g. the iOS manual-proxy instruction). */
+  wire(port: number): Promise<{ ok: boolean; message: string }>
+  /** Undo the wiring (best-effort; must never strand the device). */
+  unwire(): void
+  /** Deliver the CA to the device (Android: push .crt + open Settings; iOS:
+   *  install the mobileconfig via go-ios). */
+  installCert(ca: CaMaterial): Promise<CertPushResult>
 }
 
 function safeDestroy(s: Duplex | undefined | null): void {
@@ -378,10 +418,8 @@ export class InterceptService {
   private server: net.Server | null = null
   private running = false
   private decrypt = false
-  private activeSerial: string | null = null
+  private wiring: DeviceWiring | null = null
   private activePort = DEFAULT_PORT
-  private origProxy = ''
-  private watchdog: ChildProcessWithoutNullStreams | null = null
 
   private idCounter = 0
   private readonly flows: Flow[] = []
@@ -401,7 +439,7 @@ export class InterceptService {
   private readonly pinnedHosts = new Set<string>()
 
   constructor(
-    private readonly adb: string,
+    private readonly wiringFor: (serial: string) => DeviceWiring | null,
     private readonly cb: InterceptCallbacks
   ) {}
 
@@ -410,30 +448,36 @@ export class InterceptService {
   async start(serial: string, port: number, decrypt: boolean): Promise<void> {
     if (this.running) this.stop()
     this.decrypt = decrypt
-    this.activeSerial = serial
     this.activePort = port
 
-    // 1) snapshot the device's original proxy BEFORE we overwrite it.
-    this.origProxy = await this.readOriginalProxy(serial)
-
-    // 2) reverse tunnel — never set the proxy if this fails (would strand it).
-    const rev = await run(this.adb, null, reverseArgs(serial, port), 8000)
-    if (rev.code !== 0) {
-      const msg = (rev.stderr || rev.stdout || '').trim().split('\n').filter(Boolean).pop()
-      this.cb.onFailed('adb reverse failed: ' + (msg || 'needs Android 5+ / a connected device'))
+    const wiring = this.wiringFor(serial)
+    if (!wiring) {
+      this.cb.onFailed('No adb / go-ios backend for this device')
       return
     }
-    await run(this.adb, null, setProxyArgs(serial, port), 8000)
+    this.wiring = wiring
 
-    // 3) device-side watchdog self-heals the proxy if the link drops.
-    this.startWatchdog(serial)
+    // 1) wire the device (Android: reverse + proxy + watchdog; iOS: manual-proxy hint).
+    let wired: { ok: boolean; message: string }
+    try {
+      wired = await wiring.wire(port)
+    } catch (e) {
+      this.wiring = null
+      this.cb.onFailed(`device wiring failed: ${e instanceof Error ? e.message : String(e)}`)
+      return
+    }
+    if (!wired.ok) {
+      this.wiring = null
+      this.cb.onFailed(wired.message)
+      return
+    }
 
-    // 4) bind the proxy (CA is generated lazily below when decrypt is on).
+    // 2) bind the proxy (CA is generated lazily here when decrypt is on).
     try {
       if (decrypt) this.ensureCa()
     } catch (e) {
-      this.teardownProxy()
-      this.stopWatchdog()
+      wiring.unwire()
+      this.wiring = null
       this.cb.onFailed(`CA generation failed: ${e instanceof Error ? e.message : String(e)}`)
       return
     }
@@ -442,43 +486,43 @@ export class InterceptService {
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (!this.running) {
         // failed to bind — undo the device wiring so nothing dangles.
-        this.teardownProxy()
-        this.stopWatchdog()
+        wiring.unwire()
+        this.wiring = null
         this.cb.onFailed(`port ${port} unavailable (${err.message})`)
       }
     })
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, wiring.bindHost, () => {
       this.running = true
       this.server = server
       this.cb.onStarted(port)
       this.cb.onStatus(
         `Intercept on — ${decrypt ? 'decrypting HTTPS' : 'capturing'} · port ${port} · ${serial}`
       )
-      if (decrypt) this.maybePromptCert(serial)
+      if (wired.message) this.cb.onStatus(wired.message)
+      if (decrypt && wiring.autoInstallCertOnStart) this.maybePromptCert(serial)
     })
   }
 
   /** Toggle HTTPS decryption on the running session (new connections honor it). */
   setDecrypt(on: boolean): void {
     this.decrypt = on
-    if (this.running) {
+    if (this.running && this.wiring) {
       if (on) {
         try {
           this.ensureCa()
         } catch {
           /* surfaced on first handshake */
         }
-        this.maybePromptCert(this.activeSerial ?? '')
+        if (this.wiring.autoInstallCertOnStart) this.maybePromptCert(this.wiring.serial)
       }
       this.cb.onStatus(
-        `Intercept on — ${on ? 'decrypting HTTPS' : 'capturing'} · port ${this.activePort} · ${this.activeSerial}`
+        `Intercept on — ${on ? 'decrypting HTTPS' : 'capturing'} · port ${this.activePort} · ${this.wiring.serial}`
       )
     }
   }
 
-  /** Stop capture + synchronously restore the device proxy + drop the tunnel. */
+  /** Stop capture + unwire the device (restore proxy / drop tunnel, per platform). */
   stop(): void {
-    const was = this.running
     this.running = false
     if (this.server) {
       try {
@@ -488,8 +532,10 @@ export class InterceptService {
       }
       this.server = null
     }
-    this.stopWatchdog()
-    if (was && this.activeSerial) this.teardownProxy()
+    if (this.wiring) {
+      this.wiring.unwire()
+      this.wiring = null
+    }
     if (this.flushTimer) {
       clearTimeout(this.flushTimer)
       this.flushTimer = null
@@ -499,66 +545,6 @@ export class InterceptService {
   /** App-close hook — no dangling proxy may outlive the app (CLAUDE.md #3). */
   shutdown(): void {
     this.stop()
-  }
-
-  // --- device wiring --------------------------------------------------------
-  private async readOriginalProxy(serial: string): Promise<string> {
-    const r = await run(this.adb, null, getProxyArgs(serial), 8000)
-    return (r.stdout || '').trim()
-  }
-
-  /** Restore the original proxy + remove the reverse tunnel (best-effort). */
-  private teardownProxy(): void {
-    const serial = this.activeSerial
-    const port = this.activePort
-    if (!this.adb || !serial) return
-    for (const args of [restoreProxyArgs(serial, this.origProxy), reverseRemoveArgs(serial, port)]) {
-      void run(this.adb, null, args, 5000).catch(() => {
-        /* ignore */
-      })
-    }
-  }
-
-  private startWatchdog(serial: string): void {
-    this.stopWatchdog()
-    if (!this.adb || !serial) return
-    const wd = spawn(this.adb, ['-s', serial, 'shell', proxyWatchdogScript(this.origProxy)])
-    wd.on('close', () => {
-      // Reached only when the watchdog dies on its own (device dropped). Its
-      // on-device trap has already restored the proxy; stop cleanly.
-      if (this.watchdog === wd) {
-        this.watchdog = null
-        if (this.running) {
-          this.cb.onStatus('Device disconnected — intercept stopped; device proxy restored on-device')
-          this.stop()
-        }
-      }
-    })
-    wd.on('error', () => {
-      /* watchdog couldn't spawn — non-fatal */
-    })
-    this.watchdog = wd
-  }
-
-  private stopWatchdog(): void {
-    const wd = this.watchdog
-    this.watchdog = null
-    if (!wd) return
-    wd.removeAllListeners('close') // deliberate stop → not a disconnect
-    try {
-      wd.stdin.write('\n') // release the on-device `read` → trap disarmed, no restore
-      wd.stdin.end()
-    } catch {
-      /* ignore */
-    }
-    const killTimer = setTimeout(() => {
-      try {
-        wd.kill('SIGKILL')
-      } catch {
-        /* ignore */
-      }
-    }, 1500)
-    wd.on('close', () => clearTimeout(killTimer))
   }
 
   // --- Tier-2 CA + leaf certs (node-forge) ----------------------------------
@@ -1067,32 +1053,94 @@ export class InterceptService {
     }
   }
 
-  /** Push the CA cert to the device's Download folder + open Security settings. */
+  /** Deliver the CA to the device via its wiring (per platform), remembering the
+   *  device so decrypt sessions don't re-nag. */
   async installCert(serial: string): Promise<CertPushResult> {
-    if (!this.adb || !serial) return { ok: false, message: 'Select a device first', dir: '' }
+    if (!serial) return { ok: false, message: 'Select a device first', dir: '' }
+    const wiring = this.wiring && this.wiring.serial === serial ? this.wiring : this.wiringFor(serial)
+    if (!wiring) return { ok: false, message: 'No adb / go-ios backend for this device', dir: '' }
+    let ca: CaMaterial
     try {
-      this.ensureCa()
+      ca = this.caMaterial()
     } catch (e) {
       return { ok: false, message: `Couldn't generate the CA cert: ${e instanceof Error ? e.message : String(e)}`, dir: '' }
     }
-    const certPath = this.caCertPath()
+    const r = await wiring.installCert(ca)
+    if (r.ok) {
+      try {
+        mkdirSync(this.caDir(), { recursive: true })
+        writeFileSync(this.certMarkerPath(serial), 'installed\n', 'utf8')
+      } catch {
+        /* ignore */
+      }
+    }
+    return r
+  }
+
+  /** The host CA as paths + PEM + base64 DER (for whichever delivery a wiring uses). */
+  private caMaterial(): CaMaterial {
+    this.ensureCa()
+    const ca = this.ca
+    if (!ca) throw new Error('CA not ready')
+    const der = forge.asn1.toDer(forge.pki.certificateToAsn1(ca.cert)).getBytes()
+    return { certPath: this.caCertPath(), certPem: ca.certPem, certDerBase64: forge.util.encode64(der) }
+  }
+}
+
+/**
+ * Android device wiring: an adb reverse tunnel + the global http_proxy, plus a
+ * device-side watchdog that self-heals the proxy on an unclean drop
+ * (CLAUDE.md #3). The original proxy is snapshotted on wire() and restored on
+ * unwire(). installCert pushes the CA to /sdcard/Download and opens Settings.
+ */
+export class AndroidWiring implements DeviceWiring {
+  readonly bindHost = '127.0.0.1'
+  readonly autoInstallCertOnStart = true
+  private origProxy = ''
+  private port = DEFAULT_PORT
+  private watchdog: ChildProcessWithoutNullStreams | null = null
+
+  constructor(
+    private readonly adb: string,
+    readonly serial: string,
+    private readonly cb: WiringCallbacks
+  ) {}
+
+  async wire(port: number): Promise<{ ok: boolean; message: string }> {
+    this.port = port
+    // snapshot the device's original proxy BEFORE we overwrite it.
+    this.origProxy = (await run(this.adb, null, getProxyArgs(this.serial), 8000)).stdout.trim()
+    // reverse tunnel — never set the proxy if this fails (would strand it).
+    const rev = await run(this.adb, null, reverseArgs(this.serial, port), 8000)
+    if (rev.code !== 0) {
+      const msg = (rev.stderr || rev.stdout || '').trim().split('\n').filter(Boolean).pop()
+      return { ok: false, message: 'adb reverse failed: ' + (msg || 'needs Android 5+ / a connected device') }
+    }
+    await run(this.adb, null, setProxyArgs(this.serial, port), 8000)
+    this.startWatchdog()
+    return { ok: true, message: '' }
+  }
+
+  unwire(): void {
+    this.stopWatchdog()
+    for (const args of [restoreProxyArgs(this.serial, this.origProxy), reverseRemoveArgs(this.serial, this.port)]) {
+      void run(this.adb, null, args, 5000).catch(() => {
+        /* ignore */
+      })
+    }
+  }
+
+  async installCert(ca: CaMaterial): Promise<CertPushResult> {
     for (const name of ['androidlab-ca.cer', 'androidlab-ca.crt']) {
-      const r = await run(this.adb, null, ['-s', serial, 'push', certPath, `/sdcard/Download/${name}`], 20000)
+      const r = await run(this.adb, null, ['-s', this.serial, 'push', ca.certPath, `/sdcard/Download/${name}`], 20000)
       if (r.code !== 0) {
         const blob = (r.stderr || r.stdout || '').trim().split('\n').filter(Boolean).pop()
         return { ok: false, message: 'adb push failed: ' + (blob || 'unknown'), dir: '' }
       }
     }
-    // Remember this device so we don't re-nag on future runs.
-    try {
-      mkdirSync(this.caDir(), { recursive: true })
-      writeFileSync(this.certMarkerPath(serial), 'installed\n', 'utf8')
-    } catch {
-      /* ignore */
-    }
     // Jump the device to Security settings to speed up the manual install.
-    void run(this.adb, serial, ['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'], 6000).catch(() => {})
-    void run(this.adb, serial, ['shell', 'am', 'start', '-a', 'android.settings.SECURITY_SETTINGS'], 8000).catch(
+    void run(this.adb, this.serial, ['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'], 6000).catch(() => {})
+    void run(this.adb, this.serial, ['shell', 'am', 'start', '-a', 'android.settings.SECURITY_SETTINGS'], 8000).catch(
       () => {}
     )
     return {
@@ -1100,6 +1148,46 @@ export class InterceptService {
       message: 'Pushed androidlab-ca.cer to the device Download folder — install it as a user CA in Settings',
       dir: '/sdcard/Download'
     }
+  }
+
+  private startWatchdog(): void {
+    this.stopWatchdog()
+    if (!this.adb || !this.serial) return
+    const wd = spawn(this.adb, ['-s', this.serial, 'shell', proxyWatchdogScript(this.origProxy)])
+    wd.on('close', () => {
+      // Reached only when the watchdog dies on its own (device dropped). Its
+      // on-device trap has already restored the proxy; tell the engine to stop.
+      if (this.watchdog === wd) {
+        this.watchdog = null
+        this.cb.onStatus('Device disconnected — intercept stopped; device proxy restored on-device')
+        this.cb.onDisconnect()
+      }
+    })
+    wd.on('error', () => {
+      /* watchdog couldn't spawn — non-fatal */
+    })
+    this.watchdog = wd
+  }
+
+  private stopWatchdog(): void {
+    const wd = this.watchdog
+    this.watchdog = null
+    if (!wd) return
+    wd.removeAllListeners('close') // deliberate stop → not a disconnect
+    try {
+      wd.stdin.write('\n') // release the on-device `read` → trap disarmed, no restore
+      wd.stdin.end()
+    } catch {
+      /* ignore */
+    }
+    const killTimer = setTimeout(() => {
+      try {
+        wd.kill('SIGKILL')
+      } catch {
+        /* ignore */
+      }
+    }, 1500)
+    wd.on('close', () => clearTimeout(killTimer))
   }
 }
 

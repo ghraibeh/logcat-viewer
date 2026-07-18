@@ -7,6 +7,8 @@ export const IPC = {
   adbResolvePids: 'adb:resolve-pids',
   adbForceCrash: 'adb:force-crash',
   adbDeviceInfo: 'adb:device-info',
+  // hotplug: main pushes the fresh device list on USB attach/detach (no refresh)
+  devicesChanged: 'adb:devices-changed',
 
   // logcat stream control (invoke/handle)
   logcatStart: 'logcat:start',
@@ -179,6 +181,25 @@ export const IPC = {
   iosMirrorH264: 'ios-mirror:h264', // event: raw Annex-B H.264 bytes (main -> renderer)
   iosMirrorState: 'ios-mirror:state', // event: status message
   iosMirrorFailed: 'ios-mirror:failed', // event: feed could not produce frames
+
+  // iOS touch/keyboard forwarding (WebDriverAgent/DeviceKit via go-ios)
+  iosInputGetConfig: 'iosinput:get-config', // read persisted signing config
+  iosInputSetConfig: 'iosinput:set-config', // save signing config (paths + ids, no key material)
+  iosInputChooseKey: 'iosinput:choose-key', // file picker for the ASC .p8 private key
+  iosInputProvision: 'iosinput:provision', // sign + install the agent (long-running)
+  iosInputCancel: 'iosinput:cancel', // cancel a running provision
+  iosInputStatus: 'iosinput:status', // is the agent installed + reachable?
+  iosInputSize: 'iosinput:size', // device points (for canvas -> device mapping)
+  iosInputTap: 'iosinput:tap',
+  iosInputSwipe: 'iosinput:swipe',
+  iosInputGesture: 'iosinput:gesture', // full captured finger path (live-ish drag)
+  iosInputDrag: 'iosinput:drag', // streamed drag segments during the drag (start/move/end)
+  iosInputType: 'iosinput:type',
+  iosInputKey: 'iosinput:key', // one physical keystroke forwarded live (char / special / combo)
+  iosInputButton: 'iosinput:button',
+  // iosinput events (main -> renderer)
+  iosInputProgress: 'iosinput:progress', // provisioning progress line
+  iosInputDone: 'iosinput:done', // provisioning finished (ok + message)
 
   // network HTTP intercept (control invoke/handle + event streams)
   interceptStart: 'intercept:start',

@@ -13,6 +13,7 @@ export function Toolbar({
   c,
   onAbout,
   onMirror,
+  onIosInput,
   mirrorOpen,
   theme,
   onToggleTheme
@@ -20,12 +21,14 @@ export function Toolbar({
   c: Controller
   onAbout: () => void
   onMirror: () => void
+  onIosInput: () => void
   mirrorOpen: boolean
   theme: ThemeMode
   onToggleTheme: () => void
 }) {
   const noAdb = c.adbReady && !c.adbPath
   const hasDevice = !!c.serial
+  const isIos = c.platform === 'ios'
 
   return (
     <div className="toolbar">
@@ -67,6 +70,11 @@ export function Toolbar({
         >
           Mirror
         </button>
+        {isIos ? (
+          <button className="toggle" title="iOS touch input — signing settings" onClick={onIosInput}>
+            <Icon name="gear" size={16} />
+          </button>
+        ) : null}
         <button
           className="toggle"
           title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}

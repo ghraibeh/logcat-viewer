@@ -92,6 +92,14 @@ export const ICON_PATHS = {
     </>
   ),
   close: <path d="M6 6l12 12M18 6 6 18" />,
+  // Touch / tap-to-inject (a pointing hand).
+  touch: (
+    <>
+      <path d="M9 11.5V6a1.7 1.7 0 0 1 3.4 0v5" />
+      <path d="M12.4 11V9.2a1.6 1.6 0 0 1 3.2 0V11.5" />
+      <path d="M15.6 11.5v-.6a1.5 1.5 0 0 1 3 0V15a5 5 0 0 1-5 5h-1.3a4 4 0 0 1-3-1.35l-2.5-2.85a1.6 1.6 0 0 1 2.4-2.1l1.3 1.3" />
+    </>
+  ),
   // Rotate the mirror view 90° (portrait <-> landscape): a circular arrow.
   rotate: (
     <>
@@ -101,6 +109,12 @@ export const ICON_PATHS = {
   ),
 
   // --- chrome / actions ---
+  gear: (
+    <>
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M12 2.4v3.2M12 18.4v3.2M4.6 4.6l2.3 2.3M17.1 17.1l2.3 2.3M2.4 12h3.2M18.4 12h3.2M4.6 19.4l2.3-2.3M17.1 6.9l2.3-2.3" />
+    </>
+  ),
   refresh: (
     <>
       <path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1" />

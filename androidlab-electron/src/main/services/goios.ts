@@ -16,7 +16,8 @@ import { tmpdir } from 'node:os'
 import { basename, delimiter, join } from 'node:path'
 import { app } from 'electron'
 import { parseIpsReport } from '@core/ipscrash'
-import { plistJsonToPrefs } from '@core/iosprefs'
+import { parsePlist } from '@core/bplist'
+import { plistValueToPrefs } from '@core/iosprefs'
 import { parseDeviceInfo, type IosDeviceInfo } from '@core/iosdeviceinfo'
 import type { CrashItem } from '@core/crash'
 import type { Battery, Sample } from '@core/monitor'
@@ -262,26 +263,142 @@ async function tunnelHealthy(bin: string, udid: string): Promise<boolean> {
   return portOpen(port)
 }
 
+// go-ios binds ONE fixed local port for its tunnel-info server. Only a single
+// tunnel process can hold it, so a leftover `ios tunnel start` from a prior app
+// session (often for a device since unplugged) squats it and every new tunnel
+// then dies with "bind: address already in use" — the failure that used to make
+// us tell the user to stop the stale tunnel. We self-heal instead: sweep any
+// go-ios tunnel we don't own before spawning. Mirrors the mirror's
+// `pkill screenrecord` cleanup ethos (CLAUDE.md Rule 3/4).
+const TUNNEL_INFO_PORT = 60105
+
+/** True if a process with this pid exists (signal 0 = existence probe). */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** PIDs of host processes running go-ios `tunnel start` (best-effort, cross-
+ *  platform). Matches the go-ios command line so unrelated processes are never
+ *  touched; resolves [] on any failure. */
+function listGoIosTunnelPids(bin: string): Promise<number[]> {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      const q =
+        'Get-CimInstance Win32_Process | ' +
+        "Where-Object { $_.CommandLine -match 'tunnel\\s+start' -and $_.CommandLine -match 'go-ios' } | " +
+        'ForEach-Object { $_.ProcessId }'
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', q],
+        { timeout: 6000 },
+        (_e, out) =>
+          resolve(
+            (out ?? '')
+              .split(/\r?\n/)
+              .map((s) => parseInt(s.trim(), 10))
+              .filter((n) => Number.isFinite(n) && n > 0)
+          )
+      )
+      return
+    }
+    // macOS/Linux: `ps -axww` prints full, untruncated command lines.
+    execFile('ps', ['-axww', '-o', 'pid=,command='], { timeout: 6000 }, (_e, out) => {
+      const pids: number[] = []
+      for (const line of (out ?? '').split('\n')) {
+        const m = /^\s*(\d+)\s+(.*)$/.exec(line)
+        if (!m) continue
+        const cmd = m[2]
+        if (/tunnel\s+start/.test(cmd) && (cmd.includes(bin) || cmd.includes('go-ios'))) {
+          pids.push(parseInt(m[1], 10))
+        }
+      }
+      resolve(pids)
+    })
+  })
+}
+
+/** Kill every go-ios tunnel process we don't currently own, then wait (bounded)
+ *  for the fixed tunnel port to be released so a fresh spawn can bind it. */
+async function sweepStaleTunnels(bin: string): Promise<number> {
+  const own = tunnelProc?.pid
+  const stale = (await listGoIosTunnelPids(bin)).filter((p) => p !== own && p !== process.pid)
+  if (stale.length === 0) return 0
+  console.error(`[go-ios] clearing ${stale.length} orphaned tunnel process(es): ${stale.join(', ')}`)
+  for (const pid of stale) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      /* already gone or not ours to signal */
+    }
+  }
+  // Wait for them to exit AND the fixed port to free up before we respawn.
+  for (let i = 0; i < 20; i++) {
+    if (!stale.some(pidAlive) && !(await portOpen(TUNNEL_INFO_PORT, 400))) break
+    await delay(150)
+  }
+  return stale.length
+}
+
+/** Spawn the tunnel daemon and adopt it as `tunnelProc`. stderr is piped so an
+ *  early exit (e.g. a port clash that raced the sweep) is visible in the log and
+ *  the poll loop can react. Returns non-ok only on a synchronous spawn failure. */
+function spawnTunnel(bin: string, udid: string): AppActionResult {
+  try {
+    const child = spawn(bin, tunnelStartArgs(udid), { stdio: ['ignore', 'ignore', 'pipe'] })
+    tunnelProc = child
+    let stderr = ''
+    child.stderr?.on('data', (b: Buffer) => {
+      stderr += b.toString('utf8')
+      if (stderr.length > 8192) stderr = stderr.slice(-8192)
+    })
+    child.on('error', () => {
+      if (tunnelProc === child) tunnelProc = null
+    })
+    child.on('exit', () => {
+      if (tunnelProc === child) tunnelProc = null
+      if (/address already in use/i.test(stderr)) {
+        console.error('[go-ios] tunnel exited: fixed port in use (a stale tunnel raced the spawn)')
+      }
+    })
+    return { ok: true, message: '' }
+  } catch (e) {
+    return { ok: false, message: `Could not start developer tunnel: ${errMsg(e)}` }
+  }
+}
+
 /** Ensure a HEALTHY userspace tunnel is up for `udid`; spawn one and wait if
  *  needed. Respawns if an existing tunnel is listed but its proxy port is dead. */
 async function ensureTunnel(bin: string, udid: string): Promise<AppActionResult> {
   if (await tunnelHealthy(bin, udid)) return { ok: true, message: 'tunnel active' }
-  // No healthy tunnel — tear down ours (wrong device, or listed-but-broken) and
-  // spawn a fresh one.
+  // No healthy tunnel for this device. Drop our own handle, then self-heal: two
+  // attempts, each preceded by a sweep of orphaned tunnels (a prior session's, or
+  // one bound to another device) that would otherwise squat the fixed port. The
+  // second attempt only fires if the spawn died early — a tunnel racing us onto
+  // the port — so a genuine device issue (locked / untrusted / Dev Mode off)
+  // still fails after one ~10s wait rather than two.
   stopTunnel()
-  try {
-    tunnelProc = spawn(bin, tunnelStartArgs(udid), { stdio: 'ignore' })
-    tunnelProc.on('exit', () => {
-      tunnelProc = null
-    })
-  } catch (e) {
-    return { ok: false, message: `Could not start developer tunnel: ${errMsg(e)}` }
-  }
-  // Userspace negotiation takes ~1–2s; poll until the proxy port is live (not
-  // just listed), so DVT services can actually connect once we return.
-  for (let i = 0; i < 20; i++) {
-    await delay(500)
-    if (await tunnelHealthy(bin, udid)) return { ok: true, message: 'tunnel started' }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await sweepStaleTunnels(bin)
+    const spawned = spawnTunnel(bin, udid)
+    if (!spawned.ok) return spawned
+    // Userspace negotiation takes ~1–2s; poll until the proxy port is live (not
+    // just listed), so DVT services can actually connect once we return.
+    let died = false
+    for (let i = 0; i < 20; i++) {
+      await delay(500)
+      if (await tunnelHealthy(bin, udid)) return { ok: true, message: 'tunnel started' }
+      if (tunnelProc === null) {
+        died = true // spawn exited early (very likely a port clash) — re-sweep & retry
+        break
+      }
+    }
+    stopTunnel() // tear down an unhealthy/leftover spawn before retrying or giving up
+    if (!died) break // stayed up but never got healthy → not a port clash; retrying won't help
   }
   return {
     ok: false,
@@ -717,19 +834,6 @@ export async function containerPull(
   return existsSync(file) ? file : null
 }
 
-/** Convert a (possibly binary) plist to JSON via macOS plutil. '' on failure.
- *  Note: the format specifier is `json` (not `json1`). */
-function plutilToJson(localPath: string): Promise<string> {
-  return new Promise((resolve) => {
-    execFile(
-      '/usr/bin/plutil',
-      ['-convert', 'json', '-o', '-', localPath],
-      { maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' },
-      (err, stdout) => resolve(err ? '' : (stdout ?? ''))
-    )
-  })
-}
-
 // --- iOS SharedPreferences analogue: NSUserDefaults plists --------------------
 /** List an app's Library/Preferences/*.plist (the NSUserDefaults files). The
  *  scoped tree can report the plist at a non-zero depth, so extract .plist
@@ -754,9 +858,13 @@ export async function iosPrefsLoad(
   try {
     const inner = await containerPull(bin, udid, bundleId, `Library/Preferences/${fname}`, dir)
     if (!inner) return { ok: false, error: `Couldn't read ${fname} from the device`, fname, prefs: [] }
-    const json = await plutilToJson(inner)
-    if (!json) return { ok: false, error: `Couldn't decode ${fname} (plutil convert failed)`, fname, prefs: [] }
-    return { ok: true, error: '', fname, prefs: plistJsonToPrefs(json) }
+    let prefs
+    try {
+      prefs = plistValueToPrefs(parsePlist(readFileSync(inner)))
+    } catch (e) {
+      return { ok: false, error: `Couldn't decode ${fname}: ${errMsg(e)}`, fname, prefs: [] }
+    }
+    return { ok: true, error: '', fname, prefs }
   } catch (e) {
     return { ok: false, error: errMsg(e), fname, prefs: [] }
   } finally {

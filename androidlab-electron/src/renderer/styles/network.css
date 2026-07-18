@@ -181,6 +181,19 @@
   position: static;
   flex: 1;
 }
+/* iOS setup steps in the empty flow table */
+.net-empty-steps {
+  text-align: left;
+  max-width: 460px;
+  line-height: 1.55;
+}
+.net-empty-steps ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+.net-empty-steps li {
+  margin: 4px 0;
+}
 
 /* ---- detail pane -------------------------------------------------------- */
 .net-summary {

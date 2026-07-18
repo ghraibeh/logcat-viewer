@@ -15,7 +15,7 @@ export const TAB_SUPPORT: Record<string, Platform[]> = {
   deviceinfo: ['android', 'ios'],
   logs: ['android', 'ios'],
   location: ['android', 'ios'],
-  network: ['android'],
+  network: ['android', 'ios'],
   // On iOS both the file browser and the database inspector reach an app's own
   // sandbox container (via go-ios house-arrest/AFC), not a device-wide store — so
   // neither is a top-level tab on iOS; they live as the "Files"/"Databases" sub-tabs

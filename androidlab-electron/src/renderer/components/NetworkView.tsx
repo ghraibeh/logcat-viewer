@@ -56,6 +56,19 @@ function AndroidGlyph() {
   )
 }
 
+/** An Apple glyph for the source column when the device is an iPhone. */
+function AppleGlyph() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M11.2 8.4c0-1.5 1.2-2.2 1.3-2.3-.7-1-1.8-1.2-2.2-1.2-.9-.1-1.8.5-2.3.5s-1.2-.5-2-.5c-1 0-2 .6-2.5 1.5-1.1 1.9-.3 4.6.8 6.1.5.7 1.1 1.5 1.9 1.5.8 0 1-.5 2-.5s1.1.5 2 .5c.8 0 1.4-.7 1.9-1.4.6-.9.8-1.7.8-1.8 0 0-1.6-.6-1.6-2.4z"
+        fill="var(--text-dim)"
+      />
+      <path d="M9.6 4.1c.4-.5.7-1.2.6-1.9-.6 0-1.4.4-1.8.9-.4.4-.7 1.1-.6 1.8.7.1 1.4-.3 1.8-.8z" fill="var(--text-dim)" />
+    </svg>
+  )
+}
+
 function JsonTreeView({ nodes }: { nodes: JsonTreeNode[] }) {
   return (
     <ul className="net-json">
@@ -160,6 +173,7 @@ function Section({ title, headers, body, isJson }: SectionProps) {
 }
 
 export function NetworkView({ c }: { c: Controller }) {
+  const isIos = c.platform === 'ios'
   const store = useMemo(() => new FlowStore(), [])
   const version = useSyncExternalStore(store.subscribe, store.getSnapshot)
 
@@ -248,7 +262,11 @@ export function NetworkView({ c }: { c: Controller }) {
     if (enabledRef.current) {
       void window.androidlab.intercept.stop()
       setEnabled(false)
-      setStatusText('Device changed — intercept stopped; device proxy restored')
+      setStatusText(
+        isIos
+          ? 'Device changed — intercept stopped; turn off the Wi-Fi proxy on the iPhone'
+          : 'Device changed — intercept stopped; device proxy restored'
+      )
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [c.serial])
@@ -258,7 +276,11 @@ export function NetworkView({ c }: { c: Controller }) {
     if (enabled) {
       void window.androidlab.intercept.stop()
       setEnabled(false)
-      setStatusText('Intercept off — device proxy restored')
+      setStatusText(
+        isIos
+          ? 'Intercept off — turn OFF the Wi-Fi proxy on the iPhone (Settings ▸ Wi-Fi ▸ (i) ▸ Configure Proxy ▸ Off)'
+          : 'Intercept off — device proxy restored'
+      )
       return
     }
     if (!c.serial) {
@@ -266,9 +288,9 @@ export function NetworkView({ c }: { c: Controller }) {
       return
     }
     setBusy(true)
-    setStatusText('Wiring device proxy…')
+    setStatusText(isIos ? 'Starting proxy…' : 'Wiring device proxy…')
     void window.androidlab.intercept.start(c.serial, port, decrypt)
-  }, [enabled, c.serial, port, decrypt, showToast])
+  }, [enabled, c.serial, port, decrypt, showToast, isIos])
 
   const onDecryptToggle = useCallback(() => {
     setDecrypt((prev) => {
@@ -418,9 +440,7 @@ export function NetworkView({ c }: { c: Controller }) {
                     <div className="net-col status" style={{ color: statusColor(f.status), fontWeight: 700 }}>
                       {f.status === null ? '' : f.status}
                     </div>
-                    <div className="net-col source">
-                      <AndroidGlyph />
-                    </div>
+                    <div className="net-col source">{isIos ? <AppleGlyph /> : <AndroidGlyph />}</div>
                     <div className="net-col host">{f.host}</div>
                     <div className="net-col path">{f.path}</div>
                   </div>
@@ -429,9 +449,20 @@ export function NetworkView({ c }: { c: Controller }) {
             </div>
             {rowCount === 0 ? (
               <div className="net-empty">
-                {enabled
-                  ? 'Capturing… drive traffic on the device to see requests.'
-                  : 'Enable Intercept and route the device through this proxy to capture traffic.'}
+                {enabled ? (
+                  'Capturing… drive traffic on the device to see requests.'
+                ) : isIos ? (
+                  <div className="net-empty-steps">
+                    <div>To intercept an iPhone (same Wi-Fi as this Mac):</div>
+                    <ol>
+                      <li>Enable Intercept — the status bar shows the proxy address.</li>
+                      <li>Set the iPhone's Wi-Fi proxy to that address (Wi-Fi ▸ ⓘ ▸ Configure Proxy ▸ Manual).</li>
+                      <li>Install &amp; Trust CA, then trust it (Settings ▸ General ▸ About ▸ Certificate Trust Settings).</li>
+                    </ol>
+                  </div>
+                ) : (
+                  'Enable Intercept and route the device through this proxy to capture traffic.'
+                )}
               </div>
             ) : null}
           </div>
@@ -506,8 +537,16 @@ export function NetworkView({ c }: { c: Controller }) {
         >
           Decrypt HTTPS
         </button>
-        <button className="net-toggle" title="Push the CA cert to the device to install it" onClick={installCert}>
-          Install CA Cert
+        <button
+          className="net-toggle"
+          title={
+            isIos
+              ? 'Send the AndroidLab CA to the iPhone as a profile (then approve + trust it in Settings)'
+              : 'Push the CA cert to the device to install it'
+          }
+          onClick={installCert}
+        >
+          {isIos ? 'Install & Trust CA' : 'Install CA Cert'}
         </button>
         <span className="grow" />
         <span className="net-status">{statusText}</span>

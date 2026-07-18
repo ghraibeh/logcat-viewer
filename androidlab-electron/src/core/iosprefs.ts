@@ -2,13 +2,14 @@
  * iOS NSUserDefaults → the SAME `Pref` shape the Android SharedPreferences editor
  * (`PrefsView`) renders, so that view is reused unchanged for iOS. An app's
  * defaults live in `Library/Preferences/<bundleId>.plist`; the main process pulls
- * it via fsync and converts it with macOS `plutil -convert json1`, then this pure
- * helper flattens the top-level dictionary to typed rows. DOM-/fs-free.
+ * it via fsync and decodes it with the pure-JS `core/bplist` reader (no macOS
+ * `plutil`), then this pure helper flattens the top-level dictionary to typed rows.
+ * DOM-/fs-free.
  *
- * Types are inferred from the JSON (plutil collapses int/real to numbers, data →
- * base64 string, date → ISO string). Nested arrays/dicts are shown read-only as a
- * compact JSON string under the `set` type (which PrefsView already treats as a
- * non-editable flattened view).
+ * Types are inferred from the decoded values (int/real → numbers, data → base64
+ * string, date → ISO string — see core/bplist). Nested arrays/dicts are shown
+ * read-only as a compact JSON string under the `set` type (which PrefsView already
+ * treats as a non-editable flattened view).
  */
 import type { Pref } from './prefs'
 
@@ -20,14 +21,9 @@ function prefFor(key: string, v: unknown): Pref {
   return { key, type: 'set', value: JSON.stringify(v) }
 }
 
-/** Flatten the top-level dict of a `plutil -convert json1` document to Pref[]. */
-export function plistJsonToPrefs(jsonText: string): Pref[] {
-  let root: unknown
-  try {
-    root = JSON.parse(jsonText)
-  } catch {
-    return []
-  }
+/** Flatten a parsed plist's top-level dict to sorted Pref[]. Values must be
+ *  JSON-ready (see `core/bplist` parsePlist: dates→ISO string, data→base64). */
+export function plistValueToPrefs(root: unknown): Pref[] {
   if (!root || typeof root !== 'object' || Array.isArray(root)) return []
   const out: Pref[] = []
   for (const [key, v] of Object.entries(root as Record<string, unknown>)) {
@@ -39,4 +35,14 @@ export function plistJsonToPrefs(jsonText: string): Pref[] {
     return la < lb ? -1 : la > lb ? 1 : 0
   })
   return out
+}
+
+/** Back-compat wrapper: flatten a JSON-string document (kept for existing callers
+ *  and tests). New code should decode with `core/bplist` and use plistValueToPrefs. */
+export function plistJsonToPrefs(jsonText: string): Pref[] {
+  try {
+    return plistValueToPrefs(JSON.parse(jsonText))
+  } catch {
+    return []
+  }
 }

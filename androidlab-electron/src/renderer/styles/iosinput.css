@@ -1,0 +1,222 @@
+/* iOS Touch Input settings modal (App Store Connect signing identity). */
+
+.ios-input-modal {
+  display: flex;
+  flex-direction: column;
+  width: 560px;
+  max-width: 92vw;
+  max-height: 88vh;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.iim-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.iim-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.iim-bar .grow {
+  flex: 1;
+}
+
+.iim-body {
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.iim-methods {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  align-self: flex-start;
+}
+.iim-method {
+  padding: 6px 14px;
+  font-size: 12px;
+  border: none;
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.iim-method + .iim-method {
+  border-left: 1px solid var(--border);
+}
+.iim-method.active {
+  background: var(--select-soft, rgba(90, 150, 250, 0.18));
+  color: var(--accent-h, var(--accent));
+  font-weight: 600;
+}
+
+.iim-warn {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(242, 180, 80, 0.14);
+  border: 1px solid rgba(242, 180, 80, 0.4);
+  color: var(--text);
+  font-size: 12px;
+}
+.iim-help {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+.iim-help i {
+  color: var(--text);
+  font-style: normal;
+  font-weight: 500;
+}
+
+.iim-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+}
+.iim-row > span:first-child {
+  flex: 0 0 92px;
+  color: var(--text-dim);
+}
+.iim-row input,
+.iim-row select {
+  flex: 1;
+  min-width: 0;
+}
+.iim-file {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.iim-filename {
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.iim-filename.dim {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.iim-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+.iim-badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+.iim-badge.ok {
+  color: var(--green);
+  background: rgba(80, 200, 120, 0.14);
+}
+.iim-badge.bad {
+  color: var(--red);
+  background: rgba(242, 90, 82, 0.14);
+}
+
+.iim-log {
+  margin-top: 4px;
+  border-radius: 8px;
+  background: var(--surface-2, var(--surface));
+  border: 1px solid var(--border);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.iim-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.iim-log-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.iim-copy {
+  padding: 3px 12px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid var(--border-2);
+  background: var(--surface-2, var(--surface));
+  color: var(--text);
+  cursor: pointer;
+}
+.iim-copy:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-h, var(--accent));
+}
+.iim-copy:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.iim-log-body {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.iim-log-line {
+  color: var(--text-dim);
+}
+.iim-result.ok {
+  color: var(--green);
+  font-weight: 600;
+}
+.iim-result.bad {
+  color: var(--red);
+  font-weight: 600;
+}
+.iim-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  border-top-color: var(--accent);
+  animation: iim-spin 0.8s linear infinite;
+}
+@keyframes iim-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

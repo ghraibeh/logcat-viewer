@@ -17,6 +17,7 @@ import './styles/apps.css'
 import './styles/network.css'
 import './styles/leak.css'
 import './styles/deviceinfo.css'
+import './styles/iosinput.css'
 import { initTheme } from './theme'
 
 // Apply the persisted (or OS-preferred) theme before the first paint so there's

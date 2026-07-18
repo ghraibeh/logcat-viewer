@@ -98,6 +98,7 @@ class MirrorEngine {
   private demuxer = new AnnexBDemuxer()
   private decoder: VideoDecoder | null = null
   private configured = false
+  private lastSpsGen = -1
   private ts = 0
   private flushTimer: ReturnType<typeof setTimeout> | null = null
   private lastImage: HTMLImageElement | null = null
@@ -246,6 +247,20 @@ class MirrorEngine {
   private feed(data: Uint8Array, key: boolean): void {
     const dec = this.ensureDecoder()
     if (!dec || dec.state === 'closed') return
+    // The SPS changed (device rotated → new resolution/orientation): re-init the
+    // decoder so frames aren't decoded with the old geometry (stretched / wrong way).
+    const gen = this.demuxer.spsGeneration()
+    if (gen !== this.lastSpsGen) {
+      this.lastSpsGen = gen
+      if (this.configured) {
+        try {
+          dec.reset()
+        } catch {
+          /* ignore */
+        }
+        this.configured = false
+      }
+    }
     // Backpressure — the real low-latency knob. If the decoder can't drain as
     // fast as frames arrive, its queue (and therefore latency) grows until the
     // pipeline stalls, which reads as "smooth, then lagging, then frozen".

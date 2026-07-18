@@ -10,6 +10,7 @@ import { IPC } from '@shared/ipc'
 import type { Device, MirrorPopoutInfo, PresetMap } from '@shared/types'
 import { MirrorWindowManager } from './mirrorWindow'
 import { findAdb, listDevices, listApps, resolvePids, forceCrash } from './services/adb'
+import { DeviceWatcher } from './services/devicewatch'
 import { readDeviceInfo } from './services/deviceinfo'
 import * as goios from './services/goios'
 import * as iosfiles from './services/iosfiles'
@@ -20,6 +21,8 @@ import { LeakDetectService } from './services/leakdetect'
 import { captureInspect } from './services/inspector'
 import { MirrorService } from './services/mirror'
 import { IosMirrorService } from './services/iosmirror'
+import * as iosinput from './services/iosinput'
+import type { IosInputConfig } from '@core/iosinput'
 import { readControlsState, applyControls } from './services/controls'
 import { enableWirelessDebug } from './services/wireless'
 import { MockLocationService } from './services/mocklocation'
@@ -30,7 +33,8 @@ import { ToolboxService } from './services/toolbox'
 import { PrefsService } from './services/prefs'
 import { CrashService } from './services/crash'
 import { AppMgrService } from './services/appmgr'
-import { InterceptService } from './services/intercept'
+import { InterceptService, AndroidWiring, type DeviceWiring, type WiringCallbacks } from './services/intercept'
+import { IosWiring } from './services/interceptIos'
 import { installApks } from './services/apk'
 import { deviceImage } from './services/deviceimage'
 import { writeFileSync } from 'node:fs'
@@ -96,16 +100,58 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   ipcMain.handle(IPC.adbFind, () => ({ path: findAdb() }))
 
-  ipcMain.handle(IPC.adbListDevices, async () => {
-    // The app's device list is the union of adb (Android) + go-ios (iOS). Either
-    // backend being absent just contributes an empty list.
+  // The app's device list is the union of adb (Android) + go-ios (iOS). Either
+  // backend being absent just contributes an empty list.
+  const buildDeviceList = async (): Promise<Device[]> => {
     const adb = findAdb()
     const android = adb ? await listDevices(adb) : []
     const iosBin = goios.findGoIos()
     const ios = iosBin ? await goios.listDevices(iosBin).catch(() => []) : []
-    lastDevices = [...android, ...ios]
+    return [...android, ...ios]
+  }
+
+  ipcMain.handle(IPC.adbListDevices, async () => {
+    lastDevices = await buildDeviceList()
     return lastDevices
   })
+
+  // --- hotplug: push the device list on USB attach/detach (no manual refresh) --
+  const deviceSig = (list: Device[]): string =>
+    list
+      .map((d) => `${d.serial}:${d.state}:${d.online}`)
+      .sort()
+      .join('|')
+
+  // Serialise rebuilds (a build can outlast the next trigger) and re-run once more
+  // if another change arrived mid-build, so we never miss or overlap.
+  let building = false
+  let pending = false
+  const rebuildDevices = async (): Promise<void> => {
+    if (building) {
+      pending = true
+      return
+    }
+    building = true
+    try {
+      do {
+        pending = false
+        const list = await buildDeviceList()
+        if (deviceSig(list) !== deviceSig(lastDevices)) {
+          lastDevices = list
+          send(IPC.devicesChanged, list)
+        }
+      } while (pending)
+    } finally {
+      building = false
+    }
+  }
+
+  const deviceWatcher = new DeviceWatcher({
+    findAdb,
+    findGoIos: goios.findGoIos,
+    onChange: () => void rebuildDevices()
+  })
+  deviceWatcher.start()
 
   ipcMain.handle(IPC.adbListApps, async (_e, serial: string) => {
     const adb = findAdb()
@@ -1081,10 +1127,89 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     }
   })
 
+  // --- iOS touch/keyboard forwarding (WebDriverAgent/DeviceKit via go-ios) ---
+  ipcMain.handle(IPC.iosInputGetConfig, () => iosinput.loadConfig())
+  ipcMain.handle(IPC.iosInputSetConfig, (_e, cfg: Partial<IosInputConfig>) => iosinput.saveConfig(cfg))
+  ipcMain.handle(IPC.iosInputChooseKey, (_e, kind: 'p8' | 'p12' | 'profile') => iosinput.chooseFile(getWindow(), kind))
+  ipcMain.handle(IPC.iosInputProvision, async (_e, udid: string, cfg: IosInputConfig) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return { ok: false, message: 'go-ios or device unavailable' }
+    const result = await iosinput.provision(bin, udid, cfg, (line) => send(IPC.iosInputProgress, line))
+    send(IPC.iosInputDone, result)
+    return result
+  })
+  ipcMain.handle(IPC.iosInputCancel, () => {
+    iosinput.cancelProvision()
+    return true
+  })
+  ipcMain.handle(IPC.iosInputStatus, async (_e, udid: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return false
+    return iosinput.status(bin, udid)
+  })
+  ipcMain.handle(IPC.iosInputSize, async (_e, udid: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return null
+    return iosinput.size(bin, udid)
+  })
+  ipcMain.handle(IPC.iosInputTap, (_e, udid: string, x: number, y: number) => {
+    const bin = goios.findGoIos()
+    if (bin && udid) iosinput.tap(bin, udid, x, y)
+    return true
+  })
+  ipcMain.handle(IPC.iosInputSwipe, (_e, udid: string, x1: number, y1: number, x2: number, y2: number, durationSec?: number) => {
+    const bin = goios.findGoIos()
+    if (bin && udid) iosinput.swipe(bin, udid, x1, y1, x2, y2, durationSec)
+    return true
+  })
+  ipcMain.handle(IPC.iosInputGesture, (_e, udid: string, points: Array<{ x: number; y: number; t: number }>) => {
+    const bin = goios.findGoIos()
+    if (bin && udid && Array.isArray(points)) iosinput.gesture(bin, udid, points)
+    return true
+  })
+  ipcMain.handle(IPC.iosInputDrag, (_e, udid: string, phase: 'start' | 'move' | 'end', x: number, y: number) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return true
+    if (phase === 'start') iosinput.dragStart(bin, udid, x, y)
+    else if (phase === 'move') iosinput.dragMove(bin, udid, x, y)
+    else iosinput.dragEnd(bin, udid, x, y)
+    return true
+  })
+  ipcMain.handle(IPC.iosInputType, (_e, udid: string, text: string) => {
+    const bin = goios.findGoIos()
+    if (bin && udid) iosinput.type(bin, udid, text)
+    return true
+  })
+  ipcMain.handle(IPC.iosInputKey, (_e, udid: string, domKey: string, modifiers: string[]) => {
+    const bin = goios.findGoIos()
+    if (bin && udid && domKey) iosinput.key(bin, udid, domKey, Array.isArray(modifiers) ? modifiers : [])
+    return true
+  })
+  ipcMain.handle(IPC.iosInputButton, (_e, udid: string, name: string) => {
+    const bin = goios.findGoIos()
+    if (bin && udid) iosinput.button(bin, udid, name)
+    return true
+  })
+
   // --- network HTTP intercept ---------------------------------------------
-  const ensureIntercept = (adb: string): InterceptService => {
+  // Per-device wiring: adb (Android) vs go-ios (iOS). The proxy/MITM engine is
+  // shared; only the DeviceWiring differs. Resolved per serial at start().
+  const wiringFor = (serial: string): DeviceWiring | null => {
+    const cb: WiringCallbacks = {
+      onStatus: (message) => send(IPC.interceptStatus, message),
+      onDisconnect: () => intercept?.stop()
+    }
+    if (isIos(serial)) {
+      const bin = goios.findGoIos()
+      return bin ? new IosWiring(bin, serial, cb) : null
+    }
+    const adb = findAdb()
+    return adb ? new AndroidWiring(adb, serial, cb) : null
+  }
+
+  const ensureIntercept = (): InterceptService => {
     if (!intercept) {
-      intercept = new InterceptService(adb, {
+      intercept = new InterceptService(wiringFor, {
         onFlows: (flows) => send(IPC.interceptFlows, flows),
         onStarted: (port) => send(IPC.interceptStarted, port),
         onStatus: (message) => send(IPC.interceptStatus, message),
@@ -1095,12 +1220,11 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   }
 
   ipcMain.handle(IPC.interceptStart, async (_e, serial: string, port: number, decrypt: boolean) => {
-    const adb = findAdb()
-    if (!adb || !serial) {
+    if (!serial) {
       send(IPC.interceptFailed, 'No device selected')
       return false
     }
-    await ensureIntercept(adb).start(serial, port, decrypt)
+    await ensureIntercept().start(serial, port, decrypt)
     return true
   })
 
@@ -1115,23 +1239,20 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   })
 
   ipcMain.handle(IPC.interceptInstallCert, async (_e, serial: string) => {
-    const adb = findAdb()
-    if (!adb || !serial) return { ok: false, message: 'No device selected', dir: '' }
-    return await ensureIntercept(adb).installCert(serial)
+    if (!serial) return { ok: false, message: 'No device selected', dir: '' }
+    return await ensureIntercept().installCert(serial)
   })
 
   ipcMain.handle(IPC.interceptDetail, (_e, id: number) => {
-    const adb = findAdb()
-    return ensureIntercept(adb ?? '').detail(id)
+    return ensureIntercept().detail(id)
   })
 
   ipcMain.handle(IPC.interceptSaveBody, async (_e, id: number) => {
     const win = getWindow()
-    const adb = findAdb()
     if (!win || !intercept) return { ok: false, message: 'Intercept not running', dir: '' }
     const res = await dialog.showSaveDialog(win, {
       title: 'Save response body',
-      defaultPath: join(homedir(), 'Downloads', ensureIntercept(adb ?? '').bodyFileName(id))
+      defaultPath: join(homedir(), 'Downloads', ensureIntercept().bodyFileName(id))
     })
     if (res.canceled || !res.filePath) return { ok: false, message: 'cancelled', dir: '' }
     return intercept.saveBody(id, res.filePath)
@@ -1139,11 +1260,10 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   ipcMain.handle(IPC.interceptDownloadFlow, async (_e, id: number) => {
     const win = getWindow()
-    const adb = findAdb()
     if (!win || !intercept) return { ok: false, message: 'Intercept not running', dir: '' }
     const res = await dialog.showSaveDialog(win, {
       title: 'Download request + response',
-      defaultPath: join(homedir(), 'Downloads', ensureIntercept(adb ?? '').exportFileName(id)),
+      defaultPath: join(homedir(), 'Downloads', ensureIntercept().exportFileName(id)),
       filters: [
         { name: 'Text', extensions: ['txt'] },
         { name: 'All files', extensions: ['*'] }
@@ -1178,6 +1298,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   const win = getWindow()
   win?.on('closed', () => {
     mirrorWin.destroy()
+    deviceWatcher.stop()
     reader?.stop()
     for (const s of shellSessions.values()) s.shutdown()
     shellSessions.clear()
@@ -1189,6 +1310,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     mockloc?.shutdown()
     mirrorSvc?.shutdown()
     iosMirrorSvc?.shutdown()
+    iosinput.shutdown()
     intercept?.shutdown()
     iosDb?.shutdown()
     iosfiles.shutdown()

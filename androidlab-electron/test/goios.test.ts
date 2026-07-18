@@ -327,3 +327,53 @@ describe('syslogToThreadtime', () => {
     expect(G.syslogToThreadtime('')).toBeNull()
   })
 })
+
+describe('configuration-profile helpers (CA delivery)', () => {
+  it('builds profile list/add/remove arg vectors', () => {
+    expect(G.profileListArgs('UDID')).toEqual(['profile', 'list', '--udid', 'UDID'])
+    expect(G.profileAddArgs('UDID', '/tmp/ca.mobileconfig')).toEqual(['profile', 'add', '/tmp/ca.mobileconfig', '--udid', 'UDID'])
+    expect(G.profileRemoveArgs('UDID', 'com.x.y')).toEqual(['profile', 'remove', 'com.x.y', '--udid', 'UDID'])
+  })
+
+  it('parses `profile list` JSON into identifier + display name', () => {
+    const out = JSON.stringify([
+      {
+        Identifier: 'com.androidlabkit.ca',
+        Metadata: { PayloadDisplayName: 'AndroidLabKit CA' }
+      },
+      { Identifier: 'other.profile', Metadata: { PayloadDisplayName: 'Other' } }
+    ])
+    const rows = G.parseProfileList(out)
+    expect(rows).toEqual([
+      { identifier: 'com.androidlabkit.ca', displayName: 'AndroidLabKit CA' },
+      { identifier: 'other.profile', displayName: 'Other' }
+    ])
+  })
+
+  it('parse tolerates go-ios log lines prepended on stdout', () => {
+    const out = ['{"level":"info","msg":"connecting"}', JSON.stringify([{ Identifier: 'x', Metadata: {} }])].join('\n')
+    expect(G.parseProfileList(out)).toEqual([{ identifier: 'x', displayName: '' }])
+  })
+
+  it('findCaProfile matches by identifier or display name, else null', () => {
+    const byId = JSON.stringify([{ Identifier: G.CA_PROFILE_IDENTIFIER, Metadata: {} }])
+    expect(G.findCaProfile(byId)).toBe(G.CA_PROFILE_IDENTIFIER)
+    // MCInstall sometimes reports its own hash identifier — match on the name then.
+    const byName = JSON.stringify([{ Identifier: 'deadbeefhash', Metadata: { PayloadDisplayName: G.CA_PROFILE_NAME } }])
+    expect(G.findCaProfile(byName)).toBe('deadbeefhash')
+    expect(G.findCaProfile(JSON.stringify([{ Identifier: 'nope', Metadata: { PayloadDisplayName: 'Nope' } }]))).toBeNull()
+    expect(G.findCaProfile('')).toBeNull()
+  })
+
+  it('caMobileconfig embeds the DER as a root-CA payload with our identifier', () => {
+    const der = 'QUJDRA==' // base64("ABCD")
+    const mc = G.caMobileconfig(der)
+    expect(mc).toContain('<?xml version="1.0"')
+    expect(mc).toContain('<key>PayloadType</key><string>com.apple.security.root</string>')
+    expect(mc).toContain(`<data>${der}</data>`)
+    expect(mc).toContain(`<string>${G.CA_PROFILE_IDENTIFIER}</string>`)
+    expect(mc).toContain(`<string>${G.CA_PROFILE_NAME}</string>`)
+    // top-level payload wraps the cert payload
+    expect(mc).toContain('<key>PayloadType</key><string>Configuration</string>')
+  })
+})

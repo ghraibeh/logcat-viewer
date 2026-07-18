@@ -144,14 +144,23 @@ let encodeCallback: VTCompressionOutputCallback = { _, _, status, _, sampleBuffe
 
 final class FrameHandler: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     var session: VTCompressionSession?
-    var configured = false
+    var encW = 0
+    var encH = 0
     var frames = 0
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         if frames == 0 { log("first frame received") }
-        if !configured { setup(pixel) }
+        // The capture buffer's size changes when the device rotates (portrait <->
+        // landscape). The encoder is fixed to one resolution, so a stale session would
+        // squash the new frames into the old aspect (stretched, wrong orientation) —
+        // recreate it at the new size and emit a fresh keyframe so the decoder re-inits.
+        let w = CVPixelBufferGetWidth(pixel)
+        let h = CVPixelBufferGetHeight(pixel)
+        if session == nil || w != encW || h != encH {
+            configureEncoder(w, h)
+        }
         guard let s = session else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         var props: CFDictionary? = nil
@@ -165,9 +174,11 @@ final class FrameHandler: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         frames += 1
     }
 
-    func setup(_ pixel: CVPixelBuffer) {
-        let w = CVPixelBufferGetWidth(pixel)
-        let h = CVPixelBufferGetHeight(pixel)
+    func configureEncoder(_ w: Int, _ h: Int) {
+        if let old = session {
+            VTCompressionSessionInvalidate(old)
+            session = nil
+        }
         var s: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: nil, width: Int32(w), height: Int32(h),
             codecType: kCMVideoCodecType_H264, encoderSpecification: nil, imageBufferAttributes: nil,
@@ -176,11 +187,22 @@ final class FrameHandler: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+        // Tag the stream as BT.709 so the WebCodecs decoder does the right YCbCr->RGB
+        // conversion. Without explicit color info the SPS carries no VUI, the decoder
+        // guesses, and the picture comes out washed-out / milky (raised blacks, low
+        // contrast). VideoToolbox converts the P3 screen buffers into this space.
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ColorPrimaries, value: kCVImageBufferColorPrimaries_ITU_R_709_2)
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_TransferFunction, value: kCVImageBufferTransferFunction_ITU_R_709_2)
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_YCbCrMatrix, value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: 8_000_000 as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(sess)
         session = sess
-        configured = true
+        encW = w
+        encH = h
+        // A brand-new session must lead with SPS/PPS + an IDR so the WebCodecs decoder
+        // re-initialises at the new dimensions rather than reusing the old geometry.
+        forceKeyframe = true
         log("encoder ready: \(w)x\(h)")
     }
 }

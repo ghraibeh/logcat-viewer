@@ -541,3 +541,96 @@ export function parseFsyncTree(stdout: string): ContainerEntry[] {
   }
   return out
 }
+
+// --- configuration profiles (MCInstall — classic tier, no developer tunnel) ---
+// Used by the iOS network-intercept CA delivery: install our MITM root CA as a
+// config profile the user approves + trusts on-device. `profile list`/`remove`
+// take/return the profile's Identifier (its top-level PayloadIdentifier).
+
+/** The fixed identifier + display name of the CA profile we install (constant so
+ *  a re-install replaces rather than duplicates, and removal can target it). */
+export const CA_PROFILE_IDENTIFIER = 'com.androidlabkit.ca'
+export const CA_PROFILE_NAME = 'AndroidLabKit CA'
+
+export function profileListArgs(udid: string): string[] {
+  return ['profile', 'list', '--udid', udid]
+}
+export function profileAddArgs(udid: string, file: string): string[] {
+  return ['profile', 'add', file, '--udid', udid]
+}
+export function profileRemoveArgs(udid: string, identifier: string): string[] {
+  return ['profile', 'remove', identifier, '--udid', udid]
+}
+
+export interface InstalledProfile {
+  identifier: string
+  displayName: string
+}
+
+/** Parse `ios profile list` (a JSON array) → identifier + display name rows. */
+export function parseProfileList(stdout: string): InstalledProfile[] {
+  for (const v of jsonValues(stdout)) {
+    if (!Array.isArray(v)) continue
+    const out: InstalledProfile[] = []
+    for (const item of v) {
+      if (!isObj(item)) continue
+      const meta = isObj(item.Metadata) ? item.Metadata : {}
+      out.push({
+        identifier: str(item, 'Identifier'),
+        displayName: str(meta, 'PayloadDisplayName')
+      })
+    }
+    return out
+  }
+  return []
+}
+
+/** Find our CA profile's installed Identifier (matched by identifier OR the
+ *  display name), or null if it isn't present. */
+export function findCaProfile(stdout: string): string | null {
+  for (const p of parseProfileList(stdout)) {
+    if (p.identifier === CA_PROFILE_IDENTIFIER || p.displayName === CA_PROFILE_NAME) {
+      return p.identifier || CA_PROFILE_IDENTIFIER
+    }
+  }
+  return null
+}
+
+/** A minimal .mobileconfig that installs a DER-encoded cert as a trusted root
+ *  CA (`com.apple.security.root`). `derBase64` is the cert's DER bytes, base64.
+ *  The user still approves the profile (Settings ▸ VPN & Device Management) and
+ *  enables trust (Settings ▸ General ▸ About ▸ Certificate Trust Settings) —
+ *  iOS never auto-trusts a non-MDM root. Fixed UUIDs → idempotent re-install. */
+export function caMobileconfig(derBase64: string): string {
+  const CERT_UUID = 'A11DAB00-0000-4000-8000-000000000001'
+  const ROOT_UUID = 'A11DAB00-0000-4000-8000-000000000002'
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    '  <key>PayloadContent</key>',
+    '  <array>',
+    '    <dict>',
+    '      <key>PayloadType</key><string>com.apple.security.root</string>',
+    '      <key>PayloadVersion</key><integer>1</integer>',
+    `      <key>PayloadIdentifier</key><string>${CA_PROFILE_IDENTIFIER}.cert</string>`,
+    `      <key>PayloadUUID</key><string>${CERT_UUID}</string>`,
+    `      <key>PayloadDisplayName</key><string>${CA_PROFILE_NAME}</string>`,
+    '      <key>PayloadCertificateFileName</key><string>androidlabkit-ca.cer</string>',
+    '      <key>PayloadContent</key>',
+    `      <data>${derBase64}</data>`,
+    '    </dict>',
+    '  </array>',
+    '  <key>PayloadType</key><string>Configuration</string>',
+    '  <key>PayloadVersion</key><integer>1</integer>',
+    `  <key>PayloadIdentifier</key><string>${CA_PROFILE_IDENTIFIER}</string>`,
+    `  <key>PayloadUUID</key><string>${ROOT_UUID}</string>`,
+    `  <key>PayloadDisplayName</key><string>${CA_PROFILE_NAME}</string>`,
+    '  <key>PayloadDescription</key><string>Installs the AndroidLabKit HTTPS-decryption certificate for network inspection.</string>',
+    '  <key>PayloadRemovalDisallowed</key><false/>',
+    '</dict>',
+    '</plist>',
+    ''
+  ].join('\n')
+}

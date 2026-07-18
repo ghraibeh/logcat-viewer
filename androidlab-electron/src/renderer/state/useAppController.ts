@@ -363,21 +363,38 @@ export function useAppController() {
     [reloadApps, clearAppSelection]
   )
 
+  // Apply a device list (from a manual refresh OR the hotplug push). Keeps the
+  // current selection if that device is still present; otherwise picks the first
+  // online one. Only reloads apps when the selected device actually changed
+  // (`force` overrides — used by the manual refresh) so hotplug events for other
+  // devices don't churn the app list.
+  const applyDeviceList = useCallback(
+    (list: Device[], force: boolean) => {
+      setDevices(list)
+      devicesRef.current = list
+      const prior = serialRef.current
+      let pick: string | null = null
+      if (list.length > 0) {
+        if (prior && list.some((d) => d.serial === prior)) pick = prior
+        else pick = (list.find((d) => d.online) ?? list[0]).serial
+      }
+      const changed = pick !== prior
+      if (changed) clearAppSelection()
+      serialRef.current = pick
+      setSerialState(pick)
+      if (changed || force) void reloadApps()
+    },
+    [reloadApps, clearAppSelection]
+  )
+
   const refreshDevices = useCallback(async () => {
-    const list = await window.androidlab.adb.listDevices()
-    setDevices(list)
-    devicesRef.current = list
-    const prior = serialRef.current
-    let pick: string | null = null
-    if (list.length > 0) {
-      if (prior && list.some((d) => d.serial === prior)) pick = prior
-      else pick = (list.find((d) => d.online) ?? list[0]).serial
-    }
-    if (pick !== prior) clearAppSelection()
-    serialRef.current = pick
-    setSerialState(pick)
-    void reloadApps()
-  }, [reloadApps, clearAppSelection])
+    applyDeviceList(await window.androidlab.adb.listDevices(), true)
+  }, [applyDeviceList])
+
+  // Hotplug: main pushes a fresh list on USB attach/detach — update with no refresh.
+  useEffect(() => {
+    return window.androidlab.adb.onDevicesChanged((list) => applyDeviceList(list, false))
+  }, [applyDeviceList])
 
   // --- init: adb path + devices + presets --------------------------------
   useEffect(() => {

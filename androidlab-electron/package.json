@@ -28,7 +28,8 @@
     "go-ios": "^1.2.0",
     "node-forge": "^1.4.0",
     "node-pty": "^1.1.0",
-    "sql.js": "^1.14.1"
+    "sql.js": "^1.14.1",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.6.1",
@@ -37,6 +38,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/sql.js": "^1.4.11",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.3",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",

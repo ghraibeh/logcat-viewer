@@ -8,6 +8,7 @@ import { IPC } from '@shared/ipc'
 import type { AndroidLabApi, Unsubscribe } from '@shared/api'
 import type {
   BugreportDone,
+  Device,
   FlowBatch,
   IosMirrorState,
   LeakDone,
@@ -39,7 +40,8 @@ const api: AndroidLabApi = {
     listApps: (serial) => ipcRenderer.invoke(IPC.adbListApps, serial),
     resolvePids: (serial, pkg) => ipcRenderer.invoke(IPC.adbResolvePids, serial, pkg),
     forceCrash: (serial, pkg, pids) => ipcRenderer.invoke(IPC.adbForceCrash, serial, pkg, pids),
-    deviceInfo: (serial) => ipcRenderer.invoke(IPC.adbDeviceInfo, serial)
+    deviceInfo: (serial) => ipcRenderer.invoke(IPC.adbDeviceInfo, serial),
+    onDevicesChanged: (cb) => subscribe<[Device[]]>(IPC.devicesChanged, cb)
   },
   logcat: {
     start: (serial, clearFirst) => ipcRenderer.invoke(IPC.logcatStart, serial, clearFirst),
@@ -219,6 +221,25 @@ const api: AndroidLabApi = {
     onH264: (cb) => subscribe<[Uint8Array]>(IPC.iosMirrorH264, cb),
     onState: (cb) => subscribe<[IosMirrorState]>(IPC.iosMirrorState, cb),
     onFailed: (cb) => subscribe<[string]>(IPC.iosMirrorFailed, cb)
+  },
+  iosInput: {
+    getConfig: () => ipcRenderer.invoke(IPC.iosInputGetConfig),
+    setConfig: (cfg) => ipcRenderer.invoke(IPC.iosInputSetConfig, cfg),
+    chooseFile: (kind) => ipcRenderer.invoke(IPC.iosInputChooseKey, kind),
+    provision: (udid, cfg) => ipcRenderer.invoke(IPC.iosInputProvision, udid, cfg),
+    cancel: () => ipcRenderer.invoke(IPC.iosInputCancel),
+    status: (udid) => ipcRenderer.invoke(IPC.iosInputStatus, udid),
+    size: (udid) => ipcRenderer.invoke(IPC.iosInputSize, udid),
+    tap: (udid, x, y) => ipcRenderer.invoke(IPC.iosInputTap, udid, x, y),
+    swipe: (udid, x1, y1, x2, y2, durationSec) =>
+      ipcRenderer.invoke(IPC.iosInputSwipe, udid, x1, y1, x2, y2, durationSec),
+    gesture: (udid, points) => ipcRenderer.invoke(IPC.iosInputGesture, udid, points),
+    drag: (udid, phase, x, y) => ipcRenderer.invoke(IPC.iosInputDrag, udid, phase, x, y),
+    type: (udid, text) => ipcRenderer.invoke(IPC.iosInputType, udid, text),
+    key: (udid, domKey, modifiers) => ipcRenderer.invoke(IPC.iosInputKey, udid, domKey, modifiers),
+    button: (udid, name) => ipcRenderer.invoke(IPC.iosInputButton, udid, name),
+    onProgress: (cb) => subscribe<[string]>(IPC.iosInputProgress, cb),
+    onDone: (cb) => subscribe<[{ ok: boolean; message: string }]>(IPC.iosInputDone, cb)
   },
   intercept: {
     start: (serial, port, decrypt) => ipcRenderer.invoke(IPC.interceptStart, serial, port, decrypt),
