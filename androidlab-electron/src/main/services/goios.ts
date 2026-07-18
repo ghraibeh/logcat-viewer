@@ -39,7 +39,7 @@ import {
   launchArgs,
   listArgs,
   parseApps,
-  parseDeviceList,
+  parseDeviceListDetails,
   parseFsyncTree,
   parseInfo,
   parseNetworkInfo,
@@ -56,6 +56,8 @@ import {
   tunnelStartArgs,
   uninstallArgs,
   userspaceTunPort,
+  wifiConnectionsArgs,
+  parseWifiConnections,
   type ContainerEntry,
   type IosNetworkInfo
 } from '@core/goios'
@@ -68,6 +70,7 @@ import type {
   MockResult,
   PrefsListResult,
   PrefsLoadResult,
+  Transport,
   TunnelStatus
 } from '@shared/types'
 
@@ -160,16 +163,93 @@ function lastLine(stderr: string, stdout: string, fallback: string): string {
   return lines[lines.length - 1] ?? fallback
 }
 
-/** `ios list` + a per-device `ios info` → Device[] tagged platform:'ios'. */
+/** Pull a human-readable message out of go-ios's slog output. go-ios logs one
+ *  JSON object per line ({"level":"ERROR","msg":…,"err":…}); surfacing that raw
+ *  line as an error reads like a stack trace. Prefer the last ERROR/FATAL line's
+ *  err/msg field; fall back to lastLine for plain output. */
+function goiosError(stderr: string, stdout: string, fallback: string): string {
+  let best = ''
+  for (const raw of `${stderr}\n${stdout}`.split('\n')) {
+    const s = raw.trim()
+    if (!s.startsWith('{')) continue
+    try {
+      const o = JSON.parse(s) as Record<string, unknown>
+      const level = typeof o.level === 'string' ? o.level.toUpperCase() : ''
+      if (level !== 'ERROR' && level !== 'FATAL') continue
+      const msg = [o.err, o.msg].find((v) => typeof v === 'string' && v) as string | undefined
+      if (msg) best = msg
+    } catch {
+      /* not a log line */
+    }
+  }
+  return best || lastLine(stderr, stdout, fallback)
+}
+
+/** usbmux HIDES the Wi-Fi (Network) entry while a device is on USB, so a cabled
+ *  device shows only 'usb' in `ios list`. But if it has "Show when on Wi-Fi"
+ *  enabled it is still reachable wirelessly — so we probe that lockdown value and
+ *  synthesize a 'wifi' transport, making the picker always list the Wi-Fi option
+ *  alongside USB (the mirror uses the AirPlay path over it; unplugging switches
+ *  the rest). A device already reported over Network needs no probe. */
+async function resolveTransports(bin: string, udid: string, transports: Transport[]): Promise<Transport[]> {
+  const t: Transport[] = transports.length ? [...transports] : ['usb']
+  if (t.includes('usb') && !t.includes('wifi')) {
+    try {
+      const wc = await run(bin, wifiConnectionsArgs(udid, 'get'), 8000)
+      if (parseWifiConnections(wc.stdout) === true) t.push('wifi')
+    } catch {
+      /* probe failed — leave transports as reported */
+    }
+  }
+  return t
+}
+
+/** `ios list --details` + a per-device `ios info` → Device[] tagged
+ *  platform:'ios'. --details carries each usbmuxd entry's transport; a cabled but
+ *  Wi-Fi-enrolled device also gets a synthesized 'wifi' transport (see
+ *  resolveTransports) so the picker offers both USB and Wi-Fi. */
 export async function listDevices(bin: string): Promise<Device[]> {
-  const udids = parseDeviceList((await run(bin, listArgs(), 10000)).stdout)
+  const entries = parseDeviceListDetails((await run(bin, listArgs(), 15000)).stdout)
   const devices: Device[] = []
-  for (const udid of udids) {
-    const info = parseInfo((await run(bin, infoArgs(udid), 10000)).stdout)
+  for (const { udid, transports } of entries) {
+    const [info, resolved] = await Promise.all([
+      run(bin, infoArgs(udid), 10000).then((r) => parseInfo(r.stdout)),
+      resolveTransports(bin, udid, transports)
+    ])
     const { label, description } = deviceLabel(udid, info)
-    devices.push({ serial: udid, state: 'device', description, online: true, label, platform: 'ios' })
+    devices.push({
+      serial: udid,
+      state: 'device',
+      description,
+      online: true,
+      label,
+      platform: 'ios',
+      transports: resolved
+    })
   }
   return devices
+}
+
+/** Read / flip the "Show this device when on Wi-Fi" lockdown value (Finder's
+ *  checkbox; our patched go-ios `wificonnections`). Enabling makes usbmuxd
+ *  discover the paired device on the local network, so every go-ios feature
+ *  keeps working after the cable is unplugged. */
+export async function wifiConnections(
+  bin: string,
+  udid: string,
+  op: 'get' | 'enable' | 'disable'
+): Promise<{ ok: boolean; enabled: boolean; message: string }> {
+  const r = await run(bin, wifiConnectionsArgs(udid, op), 20000)
+  const enabled = parseWifiConnections(r.stdout)
+  if (enabled === null) {
+    const raw = goiosError(r.stderr, r.stdout, 'Wi-Fi connection command failed')
+    // The signature failure over Wi-Fi: the device left the network mid-command.
+    const message = /not found|no ios device/i.test(raw)
+      ? 'Device unreachable — it may have dropped off Wi-Fi. Reconnect it (or plug in over USB) and try again.'
+      : raw
+    return { ok: false, enabled: false, message }
+  }
+  return { ok: true, enabled, message: '' }
 }
 
 /** All installed apps (`ios apps --all`); the renderer filters User/System/Hidden. */
@@ -224,7 +304,14 @@ export async function deviceIp(bin: string, udid: string): Promise<IosNetworkInf
 // launch / kill / ps go through go-ios's DVT (instruments) services, which on
 // iOS 17+ are only reachable over a RemoteXPC tunnel. The `--userspace` tunnel
 // needs no root, so the main process spawns and owns it like any other worker.
-let tunnelProc: ChildProcess | null = null
+//
+// MULTI-DEVICE: we run ONE shared go-ios tunnel AGENT (no `--udid`) that manages
+// a tunnel for every connected device at once — go-ios's agent loops the device
+// list and assigns each device its own userspace RSD port, all served from the
+// single fixed info port (60105). So a second iPhone no longer tears down the
+// first's tunnel; ensureTunnel(udid) just waits for that device's entry to appear
+// in `tunnel ls`. (Our patch also lets the agent tunnel Wi-Fi devices.)
+let agentProc: ChildProcess | null = null
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -325,7 +412,7 @@ function listGoIosTunnelPids(bin: string): Promise<number[]> {
 /** Kill every go-ios tunnel process we don't currently own, then wait (bounded)
  *  for the fixed tunnel port to be released so a fresh spawn can bind it. */
 async function sweepStaleTunnels(bin: string): Promise<number> {
-  const own = tunnelProc?.pid
+  const own = agentProc?.pid
   const stale = (await listGoIosTunnelPids(bin)).filter((p) => p !== own && p !== process.pid)
   if (stale.length === 0) return 0
   console.error(`[go-ios] clearing ${stale.length} orphaned tunnel process(es): ${stale.join(', ')}`)
@@ -344,25 +431,32 @@ async function sweepStaleTunnels(bin: string): Promise<number> {
   return stale.length
 }
 
-/** Spawn the tunnel daemon and adopt it as `tunnelProc`. stderr is piped so an
- *  early exit (e.g. a port clash that raced the sweep) is visible in the log and
- *  the poll loop can react. Returns non-ok only on a synchronous spawn failure. */
-function spawnTunnel(bin: string, udid: string): AppActionResult {
+/** Spawn the shared tunnel agent and adopt it as `agentProc`. stderr is piped so
+ *  an early exit (e.g. a port clash that raced the sweep) is visible in the log
+ *  and the caller can react. Returns non-ok only on a synchronous spawn failure. */
+function spawnAgent(bin: string): AppActionResult {
   try {
-    const child = spawn(bin, tunnelStartArgs(udid), { stdio: ['ignore', 'ignore', 'pipe'] })
-    tunnelProc = child
+    // GOIOS_NETWORK_TUNNEL lets our patched go-ios bring the developer tunnel up
+    // over Wi-Fi (a "Network" usbmux device) — upstream skips those. This makes
+    // dev-tier features (process control, MJPEG mirror, monitor, mock location)
+    // work cable-free, matching the auto-switch-to-Wi-Fi flow. Verified on-device.
+    const child = spawn(bin, tunnelStartArgs(), {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: { ...process.env, GOIOS_NETWORK_TUNNEL: '1' }
+    })
+    agentProc = child
     let stderr = ''
     child.stderr?.on('data', (b: Buffer) => {
       stderr += b.toString('utf8')
       if (stderr.length > 8192) stderr = stderr.slice(-8192)
     })
     child.on('error', () => {
-      if (tunnelProc === child) tunnelProc = null
+      if (agentProc === child) agentProc = null
     })
     child.on('exit', () => {
-      if (tunnelProc === child) tunnelProc = null
+      if (agentProc === child) agentProc = null
       if (/address already in use/i.test(stderr)) {
-        console.error('[go-ios] tunnel exited: fixed port in use (a stale tunnel raced the spawn)')
+        console.error('[go-ios] tunnel agent exited: fixed port in use (a stale agent raced the spawn)')
       }
     })
     return { ok: true, message: '' }
@@ -371,34 +465,49 @@ function spawnTunnel(bin: string, udid: string): AppActionResult {
   }
 }
 
-/** Ensure a HEALTHY userspace tunnel is up for `udid`; spawn one and wait if
- *  needed. Respawns if an existing tunnel is listed but its proxy port is dead. */
-async function ensureTunnel(bin: string, udid: string): Promise<AppActionResult> {
-  if (await tunnelHealthy(bin, udid)) return { ok: true, message: 'tunnel active' }
-  // No healthy tunnel for this device. Drop our own handle, then self-heal: two
-  // attempts, each preceded by a sweep of orphaned tunnels (a prior session's, or
-  // one bound to another device) that would otherwise squat the fixed port. The
-  // second attempt only fires if the spawn died early — a tunnel racing us onto
-  // the port — so a genuine device issue (locked / untrusted / Dev Mode off)
-  // still fails after one ~10s wait rather than two.
+/** Ensure the shared tunnel agent is running with its info server accepting
+ *  connections. Idempotent: reuses a live agent, else sweeps orphans (a prior
+ *  session's, which would squat the fixed port) and spawns a fresh one. */
+async function ensureAgent(bin: string): Promise<AppActionResult> {
+  if (agentProc && (await portOpen(TUNNEL_INFO_PORT, 800))) return { ok: true, message: 'agent active' }
+  // Our handle is gone or the info server isn't answering — start clean. Two
+  // attempts, each preceded by a sweep of orphaned agents that would otherwise
+  // hold the fixed port; the second only fires if the spawn died early (a port
+  // race), so a genuine failure still returns after one bounded wait.
   stopTunnel()
   for (let attempt = 0; attempt < 2; attempt++) {
     await sweepStaleTunnels(bin)
-    const spawned = spawnTunnel(bin, udid)
+    const spawned = spawnAgent(bin)
     if (!spawned.ok) return spawned
-    // Userspace negotiation takes ~1–2s; poll until the proxy port is live (not
-    // just listed), so DVT services can actually connect once we return.
-    let died = false
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 16; i++) {
       await delay(500)
-      if (await tunnelHealthy(bin, udid)) return { ok: true, message: 'tunnel started' }
-      if (tunnelProc === null) {
-        died = true // spawn exited early (very likely a port clash) — re-sweep & retry
-        break
-      }
+      if (agentProc && (await portOpen(TUNNEL_INFO_PORT, 500))) return { ok: true, message: 'agent started' }
+      if (agentProc === null) break // died early (likely a port clash) — re-sweep & retry
     }
-    stopTunnel() // tear down an unhealthy/leftover spawn before retrying or giving up
-    if (!died) break // stayed up but never got healthy → not a port clash; retrying won't help
+    stopTunnel()
+  }
+  return { ok: false, message: 'Developer tunnel agent did not start (fixed port busy?).' }
+}
+
+/** Ensure a HEALTHY tunnel is up for `udid`. Brings the shared agent up (once),
+ *  then waits for THIS device's tunnel — the agent creates one per connected
+ *  device on its own loop, so we just poll `tunnel ls` until this udid's entry is
+ *  listed and its userspace proxy port is live. Other devices' tunnels are
+ *  untouched (multi-device). */
+async function ensureTunnel(bin: string, udid: string): Promise<AppActionResult> {
+  if (await tunnelHealthy(bin, udid)) return { ok: true, message: 'tunnel active' }
+  const agent = await ensureAgent(bin)
+  if (!agent.ok) return agent
+  // The agent's device loop + userspace negotiation take a couple seconds per
+  // device; poll until this device's proxy port is live (not just listed).
+  for (let i = 0; i < 24; i++) {
+    await delay(500)
+    if (await tunnelHealthy(bin, udid)) return { ok: true, message: 'tunnel started' }
+    // If the agent itself died, try to bring it back once before giving up.
+    if (agentProc === null) {
+      const restart = await ensureAgent(bin)
+      if (!restart.ok) return restart
+    }
   }
   return {
     ok: false,
@@ -406,15 +515,16 @@ async function ensureTunnel(bin: string, udid: string): Promise<AppActionResult>
   }
 }
 
-/** Kill the managed tunnel (called on window close). */
+/** Kill the shared tunnel agent, stopping every device's tunnel (called on the
+ *  explicit "stop tunnel" action and on window close). */
 export function stopTunnel(): void {
-  if (tunnelProc) {
+  if (agentProc) {
     try {
-      tunnelProc.kill()
+      agentProc.kill()
     } catch {
       /* already gone */
     }
-    tunnelProc = null
+    agentProc = null
   }
 }
 

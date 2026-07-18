@@ -7,6 +7,12 @@
 // raw Annex-B elementary stream to stdout (SPS/PPS emitted before each keyframe) —
 // byte-compatible with the app's existing WebCodecs decoder.
 //
+// The device's AUDIO is captured too (same CoreMediaIO mechanism QuickTime uses)
+// and played straight on the Mac's default audio output via
+// AVCaptureAudioPreviewOutput — it never touches stdout, so the video byte stream
+// is unchanged. SIGUSR2 toggles mute. Audio is best-effort: no route -> silent
+// mirror, video streams regardless.
+//
 // Usage: iosscreen [<device-name-substring>]   (picks the first "iOS Device" that
 // matches the name, or the first one if no name is given). Logs go to stderr;
 // stdout carries ONLY H.264 bytes. Stop with SIGINT/SIGTERM.
@@ -22,6 +28,15 @@ func log(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .u
 // frame to be a keyframe so a freshly-mounted decoder in the other window can
 // configure + paint immediately instead of waiting for the next periodic IDR.
 var forceKeyframe = false
+
+// The device-audio route (nil until attached). SIGUSR2 toggles its volume 1<->0.
+// Audio lives in its OWN AVCaptureSession (liveAudioSession), never in the video
+// session: a session that contains an audio device switches its master clock to the
+// audio hardware clock and re-times video delivery against it, which shows up as
+// flicker/judder in a live mirror that paints frames on arrival. Keeping the video
+// session audio-free keeps its clock and its graph exactly as they were pre-audio.
+var liveAudioPreview: AVCaptureAudioPreviewOutput? = nil
+var liveAudioSession: AVCaptureSession? = nil
 
 // Enable the iOS screen-capture CMIO devices (QuickTime's own switch). Unprivileged.
 func enableScreenCaptureDevices() {
@@ -211,6 +226,59 @@ final class FrameHandler: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
 }
 
+// --- device audio → Mac speakers ----------------------------------------------
+// Route the iPhone's audio to the Mac's default output — in a DEDICATED session
+// (see liveAudioSession above: audio in the video session would switch that
+// session's master clock to the audio device and re-time video delivery, which
+// reads as flicker on a paint-on-arrival mirror; a failed attach here can never
+// disturb the video graph either). The screen device is muxed (video + audio) on
+// most macOS builds, so its own input feeds the preview; some builds publish the
+// audio side as a SEPARATE CoreAudio capture device carrying the same name — use
+// that instead. The audio side often publishes a beat after the screen device (and
+// the first mic-TCC prompt resolves asynchronously), so failed attempts retry.
+func attachAudio(screenDevice: AVCaptureDevice, attempt: Int = 0) {
+    if liveAudioPreview != nil { return }
+    let session = AVCaptureSession()
+    let preview = AVCaptureAudioPreviewOutput()
+    preview.volume = 1.0
+    guard session.canAddOutput(preview) else { log("audio: preview output rejected"); return }
+    session.addOutput(preview)
+    // The muxed screen device itself (a second input for it is fine on DAL devices)…
+    do {
+        let ain = try AVCaptureDeviceInput(device: screenDevice)
+        if session.canAddInput(ain) { session.addInput(ain) }
+    } catch {
+        log("audio: screen-device input error: \(error)")
+    }
+    // …or a stand-alone audio device published under the same name.
+    if preview.connections.isEmpty {
+        let disc = AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external],
+                                                    mediaType: .audio, position: .unspecified)
+        if let adev = disc.devices.first(where: { $0.localizedName == screenDevice.localizedName }) {
+            do {
+                let ain = try AVCaptureDeviceInput(device: adev)
+                if session.canAddInput(ain) { session.addInput(ain) }
+            } catch {
+                log("audio: input error (microphone permission?): \(error)")
+            }
+        }
+    }
+    if preview.connections.isEmpty {
+        if attempt < 5 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                attachAudio(screenDevice: screenDevice, attempt: attempt + 1)
+            }
+        } else {
+            log("audio: no route found — mirror stays silent; mic-auth \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue) (3=ok)")
+        }
+        return
+    }
+    session.startRunning()
+    liveAudioSession = session
+    liveAudioPreview = preview
+    log("audio: playing device audio on the Mac's default output")
+}
+
 // --- main --------------------------------------------------------------------
 let nameArg = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : nil
 
@@ -253,6 +321,9 @@ func startCapture(_ device: AVCaptureDevice) {
     liveSession = session
     liveHandler = handler
     log("session running")
+    // Audio starts AFTER video is rolling, in its own session — it can neither delay
+    // the first frame nor touch the video graph.
+    attachAudio(screenDevice: device)
 }
 
 func tryFindAndStart() {
@@ -295,11 +366,11 @@ RunLoop.main.add(timer, forMode: .common)
 
 // Clean shutdown on SIGINT/SIGTERM.
 let sigsrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-sigsrc.setEventHandler { liveSession?.stopRunning(); exit(0) }
+sigsrc.setEventHandler { liveAudioSession?.stopRunning(); liveSession?.stopRunning(); exit(0) }
 sigsrc.resume()
 signal(SIGINT, SIG_IGN)
 let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-sigterm.setEventHandler { liveSession?.stopRunning(); exit(0) }
+sigterm.setEventHandler { liveAudioSession?.stopRunning(); liveSession?.stopRunning(); exit(0) }
 sigterm.resume()
 signal(SIGTERM, SIG_IGN)
 
@@ -309,6 +380,16 @@ let sigusr = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
 sigusr.setEventHandler { forceKeyframe = true }
 sigusr.resume()
 signal(SIGUSR1, SIG_IGN)
+
+// SIGUSR2 → toggle playing the device audio on the Mac (the app's mute button).
+let sigmute = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+sigmute.setEventHandler {
+    guard let ap = liveAudioPreview else { return }
+    ap.volume = ap.volume > 0 ? 0 : 1
+    log("audio: \(ap.volume > 0 ? "unmuted" : "muted")")
+}
+sigmute.resume()
+signal(SIGUSR2, SIG_IGN)
 
 log("waiting for iOS screen device…")
 RunLoop.main.run()

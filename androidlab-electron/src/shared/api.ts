@@ -6,6 +6,7 @@ import type {
   AppDetailResult,
   AppList,
   AppListResult,
+  AppSettings,
   BugreportDone,
   CertResult,
   CrashScanResult,
@@ -167,8 +168,18 @@ export interface AndroidLabApi {
     apply(serial: string, argvs: string[][], label: string): Promise<{ ok: boolean; message: string }>
   }
   wireless: {
-    /** Flip the current USB device to Wi-Fi: tcpip 5555 + connect to its wlan IP. */
+    /** Android: flip the current USB device to Wi-Fi adb (tcpip 5555 + connect). */
     enable(serial: string): Promise<{ ok: boolean; message: string; address?: string }>
+    /** iOS: read the "Show this device when on Wi-Fi" lockdown state. */
+    iosGet(udid: string): Promise<{ ok: boolean; enabled: boolean; message: string }>
+    /** iOS: enable/disable Wi-Fi connections; returns the resulting state. */
+    iosSet(udid: string, enabled: boolean): Promise<{ ok: boolean; enabled: boolean; message: string }>
+  }
+  settings: {
+    /** Read persisted app settings. */
+    get(): Promise<AppSettings>
+    /** Merge a partial patch and persist; returns the merged settings. */
+    patch(patch: Partial<AppSettings>): Promise<AppSettings>
   }
   mockloc: {
     /** Install the helper APK if absent + grant the mock-location app-op. */
@@ -335,17 +346,30 @@ export interface AndroidLabApi {
     /** Force-quit an app by bundle id. */
     kill(udid: string, bundleId: string): Promise<AppActionResult>
   }
-  /** iOS screen mirror (macOS, view-only). A native AVFoundation+VideoToolbox
-   *  helper streams H.264 off the CoreMediaIO "iOS Device" screen (the QuickTime
-   *  path); the renderer decodes it with WebCodecs — the Android mirror pipeline. */
+  /** iOS screen mirror (macOS, view-only). Two feeds share one WebCodecs decoder:
+   *  'usb' — a native AVFoundation+VideoToolbox helper streams H.264 off the
+   *  CoreMediaIO "iOS Device" screen (the QuickTime path); 'airplay' — the device
+   *  AirPlay-mirrors over Wi-Fi to a bundled receiver. USB is the default. */
   iosMirror: {
-    /** Begin the H.264 feed for `udid`. */
-    start(udid: string): Promise<boolean>
+    /** Begin a feed. `mode` 'usb' (default, needs the cabled `udid`) or 'airplay'
+     *  (Wi-Fi; the user picks "AndroidLab" in Control Center on the phone).
+     *  `resolution` (AirPlay only) sets the advertised display size the phone mirrors
+     *  at — larger is sharper. Ignored on the USB path (always native resolution). */
+    start(
+      udid: string,
+      mode?: 'usb' | 'airplay',
+      resolution?: { width: number; height: number }
+    ): Promise<boolean>
     /** Stop the feed + kill the capture helper. `immediate` tears down now (a genuine
      *  close); the default defers briefly so a dock<->popout hand-off can cancel it. */
     stop(immediate?: boolean): Promise<boolean>
     /** Save a PNG the renderer grabbed from the mirror canvas to ~/Downloads. */
     saveFrame(pngBase64: string): Promise<SaveResult>
+    /** Mute/unmute the device audio the helper plays on this Mac. Returns the
+     *  effective preference (kept in main, so it survives dock<->popout remounts). */
+    setMuted(muted: boolean): Promise<boolean>
+    /** Read the current mute preference (for a freshly mounted mirror view). */
+    getMuted(): Promise<boolean>
     onH264(cb: (chunk: Uint8Array) => void): Unsubscribe
     onState(cb: (state: IosMirrorState) => void): Unsubscribe
     onFailed(cb: (message: string) => void): Unsubscribe

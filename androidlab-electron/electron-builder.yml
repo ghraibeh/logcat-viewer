@@ -30,6 +30,13 @@ extraResources:
   # meaningful on macOS; harmless elsewhere. Drives the iOS screen mirror.
   - from: resources/iosscreen
     to: iosscreen
+  # Native macOS AirPlay screen-mirror receiver (vendored RPiPlay core, GPL-3.0 —
+  # shipped as a separate subprocess binary). Compiled from native/macos/airplay/*
+  # via `npm run build:airplayhelper`. macOS-only; drives the Wi-Fi iOS mirror path.
+  # NOTE: currently links Homebrew openssl@3 + libplist by path — bundling/static-
+  # linking those dylibs for distribution to other Macs is a tracked follow-up.
+  - from: resources/airplayscreen
+    to: airplayscreen
 mac:
   category: public.app-category.developer-tools
   target:

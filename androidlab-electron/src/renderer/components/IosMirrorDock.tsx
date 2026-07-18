@@ -4,9 +4,10 @@
  * The main process streams raw Annex-B H.264 from the native capture helper (the
  * QuickTime/CoreMediaIO path — see services/iosmirror.ts). This decodes it with
  * WebCodecs exactly like the Android scrcpy mirror: AnnexBDemuxer → VideoDecoder →
- * canvas, with a rAF present loop and keyframe-resync backpressure. View-only (no
- * input injection on iOS without WebDriverAgent); rail = full screen, screenshot,
- * close, plus a status chip.
+ * canvas, with a rAF present loop and keyframe-resync backpressure. The helper also
+ * plays the device audio on this Mac (rail has a mute toggle; the preference lives
+ * in main so it survives dock<->popout). View-only without a provisioned agent;
+ * rail = full screen, rotate, touch/type, nav, volume, mute, screenshot, close.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnnexBDemuxer } from '@core/mirror'
@@ -16,6 +17,27 @@ import { Icon } from './Icon'
 
 const HAS_WEBCODECS = typeof (globalThis as { VideoDecoder?: unknown }).VideoDecoder !== 'undefined'
 const MAX_DECODE_QUEUE = 6
+
+// AirPlay advertised-display presets (the phone mirrors at up to this resolution).
+// The device's own screen is the ceiling, so "Max" just asks for as much as it sends.
+type Resolution = { label: string; width: number; height: number }
+const RES_PRESETS: Resolution[] = [
+  { label: '720p', width: 1280, height: 720 },
+  { label: '1080p', width: 1920, height: 1080 },
+  { label: '1440p', width: 2560, height: 1440 },
+  { label: 'Max (4K)', width: 3840, height: 2160 }
+]
+const RES_STORAGE_KEY = 'ios-airplay-resolution'
+function loadResolution(): Resolution {
+  try {
+    const w = Number(localStorage.getItem(RES_STORAGE_KEY))
+    const found = RES_PRESETS.find((r) => r.width === w)
+    if (found) return found
+  } catch {
+    /* ignore */
+  }
+  return RES_PRESETS[1] // 1080p default
+}
 
 type Fit = { x: number; y: number; w: number; h: number }
 
@@ -288,18 +310,28 @@ class H264Engine {
 
 export function IosMirrorDock({
   serial,
+  connection,
   onClose,
   onCaptured,
   onPopout,
-  popped = false
+  popped = false,
+  receiver = false
 }: {
   serial: string | null
+  /** How the device is reached. A Wi-Fi-only device can't be captured over USB
+   *  CoreMediaIO, so the mirror defaults to the AirPlay path (shows the connect
+   *  hint) instead of a USB spinner that would never resolve. */
+  connection?: 'usb' | 'wifi'
   onClose: () => void
   onCaptured: (result: SaveResult) => void
   /** Detach into a separate window (docked) or re-dock (popped). Hidden if absent. */
   onPopout?: () => void
   /** True when rendered inside the detached window. */
   popped?: boolean
+  /** Standalone AirPlay-receiver mode (top-bar toggle): always the AirPlay path,
+   *  independent of any selected device — the USB toggle is hidden and no serial is
+   *  needed. Any phone that picks "AndroidLab" on the network shows up here. */
+  receiver?: boolean
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engineRef = useRef<H264Engine>(new H264Engine())
@@ -310,6 +342,26 @@ export function IosMirrorDock({
   const [fullscreen, setFullscreen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [rotation, setRotation] = useState(0) // view rotation (0/90/180/270)
+  // Feed path: 'usb' (CoreMediaIO, low-latency, supports touch) or 'airplay' (Wi-Fi,
+  // phone-initiated, view-only). Toggled on the rail; changing it restarts the feed.
+  // Default from the transport: a cable-free (Wi-Fi) device has no USB screen device
+  // to capture, so start it on AirPlay — showing the connect hint, not a dead spinner.
+  // Receiver mode is always AirPlay (there's no device to capture over USB).
+  const [mode, setMode] = useState<'usb' | 'airplay'>(() =>
+    receiver || connection === 'wifi' ? 'airplay' : 'usb'
+  )
+  const [waiting, setWaiting] = useState(false) // airplay: advertised, phone not yet connected
+  // AirPlay stream resolution (persisted). Changing it restarts the receiver.
+  const [resolution, setResolution] = useState<Resolution>(loadResolution)
+  const [streamSettingsOpen, setStreamSettingsOpen] = useState(false)
+  // The popover is positioned `fixed` to the viewport (anchored to the gear) so the
+  // rail's `overflow-y:auto` — which also clips horizontally — can't hide it.
+  const gearRef = useRef<HTMLButtonElement>(null)
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null)
+  // Device-audio mute. The preference lives in the main process (the helper plays
+  // audio on the Mac's output), so a freshly mounted view reads it back — a dock<->
+  // popout remount must not silently flip the sound back on.
+  const [muted, setMuted] = useState(false)
   // Touch/keyboard forwarding (needs a provisioned agent — see IosInputSettingsModal).
   const [inputOn, setInputOn] = useState(false)
   const [inputMsg, setInputMsg] = useState<string | null>(null)
@@ -349,27 +401,42 @@ export function IosMirrorDock({
     return () => ro.disconnect()
   }, [])
 
-  // (Re)start the feed whenever the device changes.
+  // On a device switch (or a transport change — e.g. the cable is unplugged but the
+  // device stays reachable over Wi-Fi), reset the feed path to the transport default.
+  // A manual rail toggle sticks because this only re-runs when serial/connection change.
+  // Receiver mode is pinned to AirPlay regardless.
   useEffect(() => {
-    if (!serial) {
+    setMode(receiver || connection === 'wifi' ? 'airplay' : 'usb')
+  }, [serial, connection, receiver])
+
+  // (Re)start the feed whenever the device — or the feed path (USB/AirPlay) — changes.
+  // AirPlay is phone-initiated and doesn't need a cabled serial, so it can start
+  // without one; USB requires the selected device.
+  useEffect(() => {
+    if (mode === 'usb' && !serial) {
       setMessage('No device selected')
       return
     }
     setFailed(null)
     setHasFrame(false)
-    setMessage('Connecting to device…')
-    // A new device needs its own agent check — drop input state.
+    setWaiting(mode === 'airplay')
+    setMessage(mode === 'airplay' ? 'Starting AirPlay receiver…' : 'Connecting to device…')
+    // A new device/path needs its own agent check — drop input state.
     setInputOn(false)
     setInputMsg(null)
     uiSizeRef.current = null
     engineRef.current.reset()
     engineRef.current.clear()
-    void window.androidlab.iosMirror.start(serial)
+    void window.androidlab.iosMirror.start(
+      serial ?? '',
+      mode,
+      mode === 'airplay' ? { width: resolution.width, height: resolution.height } : undefined
+    )
     return () => {
       void window.androidlab.iosMirror.stop()
       engineRef.current.reset()
     }
-  }, [serial])
+  }, [serial, mode, resolution])
 
   // IPC subscriptions.
   useEffect(() => {
@@ -379,17 +446,56 @@ export function IosMirrorDock({
       setHasFrame(true)
       setFailed(null)
     })
-    const unState = window.androidlab.iosMirror.onState((s: IosMirrorState) => setMessage(s.message))
+    const unState = window.androidlab.iosMirror.onState((s: IosMirrorState) => {
+      setMessage(s.message)
+      setWaiting(Boolean(s.waiting))
+    })
     const unFail = window.androidlab.iosMirror.onFailed((m) => {
       setFailed(m)
       setHasFrame(false)
     })
+    void window.androidlab.iosMirror.getMuted().then(setMuted)
     return () => {
       unH264()
       unState()
       unFail()
     }
   }, [])
+
+  const toggleMute = useCallback(() => {
+    void window.androidlab.iosMirror.setMuted(!muted).then(setMuted)
+  }, [muted])
+
+  const pickResolution = useCallback((r: Resolution) => {
+    setResolution(r)
+    setStreamSettingsOpen(false)
+    try {
+      localStorage.setItem(RES_STORAGE_KEY, String(r.width))
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const toggleStreamSettings = useCallback(() => {
+    setStreamSettingsOpen((v) => {
+      if (!v && gearRef.current) {
+        const r = gearRef.current.getBoundingClientRect()
+        setMenuPos({ top: r.top, right: window.innerWidth - r.left + 8 })
+      }
+      return !v
+    })
+  }, [])
+
+  // Close the stream-settings popover on any outside click.
+  useEffect(() => {
+    if (!streamSettingsOpen) return
+    const onDown = (e: MouseEvent): void => {
+      const t = e.target as HTMLElement
+      if (!t.closest('.stream-settings') && !t.closest('.rail-gear')) setStreamSettingsOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [streamSettingsOpen])
 
   const doScreenshot = useCallback(async () => {
     const dataUrl = engineRef.current.snapshot()
@@ -436,14 +542,14 @@ export function IosMirrorDock({
   // attempt per device so a manual disable isn't fought, and re-armed on device switch.
   const autoTriedRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!serial || !hasFrame || inputOn) return
+    if (mode === 'airplay' || !serial || !hasFrame || inputOn) return
     if (autoTriedRef.current === serial) return
     autoTriedRef.current = serial
     void (async () => {
       const cfg = await window.androidlab.iosInput.getConfig()
       if (cfg?.provisioned) void enableInput()
     })()
-  }, [serial, hasFrame, inputOn, enableInput])
+  }, [serial, hasFrame, inputOn, enableInput, mode])
 
   // Canvas client point → device POINTS: invert the view rotation + scale to device
   // PIXELS (same as the Android mapping), then scale pixels→points via `ui size`. With
@@ -636,7 +742,12 @@ export function IosMirrorDock({
         {failed ? (
           <div className="mirror-msg">{failed}</div>
         ) : !hasFrame ? (
-          serial ? (
+          mode === 'airplay' && waiting ? (
+            <div className="mirror-loading ios-airplay-wait">
+              <Icon name="airplay" size={40} />
+              <div className="mirror-loading-tx">{message}</div>
+            </div>
+          ) : mode === 'airplay' || serial ? (
             <div className="mirror-loading">
               <div className="mirror-spinner" />
               <div className="mirror-loading-tx">{message}</div>
@@ -692,13 +803,65 @@ export function IosMirrorDock({
         >
           <Icon name="rotate" size={24} />
         </button>
+        {receiver ? null : (
+          <button
+            className={`rail-btn${mode === 'airplay' ? ' active' : ''}`}
+            title={
+              mode === 'airplay'
+                ? 'AirPlay (Wi-Fi) — click for USB capture'
+                : 'Mirror over Wi-Fi via AirPlay (view-only; the phone connects to “AndroidLab”)'
+            }
+            onClick={() => setMode((m) => (m === 'airplay' ? 'usb' : 'airplay'))}
+          >
+            <Icon name="airplay" size={24} />
+          </button>
+        )}
+        <button
+          ref={gearRef}
+          className={`rail-btn rail-gear${streamSettingsOpen ? ' active' : ''}`}
+          title="Stream settings (resolution)"
+          onClick={toggleStreamSettings}
+        >
+          <Icon name="settings" size={24} />
+        </button>
+        {streamSettingsOpen ? (
+          <div
+            className="stream-settings"
+            style={menuPos ? { top: menuPos.top, right: menuPos.right } : undefined}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="stream-settings-hd">Resolution</div>
+            {mode === 'airplay' ? (
+              RES_PRESETS.map((r) => (
+                <button
+                  key={r.label}
+                  className={`stream-opt${r.width === resolution.width ? ' sel' : ''}`}
+                  onClick={() => pickResolution(r)}
+                >
+                  <span>{r.label}</span>
+                  <span className="stream-opt-dim">
+                    {r.width}×{r.height}
+                  </span>
+                </button>
+              ))
+            ) : (
+              <div className="stream-note">USB mirrors at the device’s native resolution.</div>
+            )}
+          </div>
+        ) : null}
 
         <div className="rail-div" />
 
         <button
           className={`rail-btn${inputOn ? ' active' : ''}`}
-          title={inputOn ? 'Touch forwarding ON — click to disable' : 'Forward touches to the device (needs a provisioned agent)'}
-          disabled={!hasFrame}
+          title={
+            mode === 'airplay'
+              ? 'Touch forwarding needs the USB path (switch off AirPlay)'
+              : inputOn
+                ? 'Touch forwarding ON — click to disable'
+                : 'Forward touches to the device (needs a provisioned agent)'
+          }
+          disabled={!hasFrame || mode === 'airplay'}
           onClick={() => void toggleInput()}
         >
           <Icon name="touch" size={24} />
@@ -719,7 +882,7 @@ export function IosMirrorDock({
         <button
           className="rail-btn"
           title="Home — background all apps, go to the home screen"
-          disabled={!serial}
+          disabled={!serial || mode === 'airplay'}
           onClick={() => serial && void window.androidlab.iosInput.button(serial, 'home')}
         >
           <Icon name="home" size={24} />
@@ -727,7 +890,7 @@ export function IosMirrorDock({
         <button
           className="rail-btn"
           title="App Switcher — show the running-app stack"
-          disabled={!serial}
+          disabled={!serial || mode === 'airplay'}
           onClick={() => serial && void window.androidlab.iosInput.button(serial, 'appswitcher')}
         >
           <Icon name="recents" size={24} />
@@ -739,7 +902,7 @@ export function IosMirrorDock({
         <button
           className="rail-btn"
           title="Volume up"
-          disabled={!serial}
+          disabled={!serial || mode === 'airplay'}
           onClick={() => serial && void window.androidlab.iosInput.button(serial, 'volumeup')}
         >
           <Icon name="volUp" size={24} />
@@ -747,10 +910,21 @@ export function IosMirrorDock({
         <button
           className="rail-btn"
           title="Volume down"
-          disabled={!serial}
+          disabled={!serial || mode === 'airplay'}
           onClick={() => serial && void window.androidlab.iosInput.button(serial, 'volumedown')}
         >
           <Icon name="volDown" size={24} />
+        </button>
+        <button
+          className={`rail-btn${muted ? ' active' : ''}`}
+          title={
+            muted
+              ? 'Unmute — play the device audio on this Mac'
+              : 'Mute the device audio played on this Mac'
+          }
+          onClick={toggleMute}
+        >
+          <Icon name={muted ? 'muted' : 'sound'} size={24} />
         </button>
 
         <div className="rail-div" />

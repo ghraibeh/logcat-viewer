@@ -111,7 +111,13 @@ const api: AndroidLabApi = {
     apply: (serial, argvs, label) => ipcRenderer.invoke(IPC.controlsApply, serial, argvs, label)
   },
   wireless: {
-    enable: (serial) => ipcRenderer.invoke(IPC.wirelessEnable, serial)
+    enable: (serial) => ipcRenderer.invoke(IPC.wirelessEnable, serial),
+    iosGet: (udid) => ipcRenderer.invoke(IPC.wirelessIosGet, udid),
+    iosSet: (udid, enabled) => ipcRenderer.invoke(IPC.wirelessIosSet, udid, enabled)
+  },
+  settings: {
+    get: () => ipcRenderer.invoke(IPC.settingsGet),
+    patch: (patch) => ipcRenderer.invoke(IPC.settingsSet, patch)
   },
   mockloc: {
     setup: (serial) => ipcRenderer.invoke(IPC.mocklocSetup, serial),
@@ -215,9 +221,11 @@ const api: AndroidLabApi = {
     kill: (udid, bundleId) => ipcRenderer.invoke(IPC.iosKill, udid, bundleId)
   },
   iosMirror: {
-    start: (udid) => ipcRenderer.invoke(IPC.iosMirrorStart, udid),
+    start: (udid, mode, resolution) => ipcRenderer.invoke(IPC.iosMirrorStart, udid, mode, resolution),
     stop: (immediate) => ipcRenderer.invoke(IPC.iosMirrorStop, immediate),
     saveFrame: (pngBase64) => ipcRenderer.invoke(IPC.iosMirrorSaveFrame, pngBase64),
+    setMuted: (muted) => ipcRenderer.invoke(IPC.iosMirrorSetMuted, muted),
+    getMuted: () => ipcRenderer.invoke(IPC.iosMirrorGetMuted),
     onH264: (cb) => subscribe<[Uint8Array]>(IPC.iosMirrorH264, cb),
     onState: (cb) => subscribe<[IosMirrorState]>(IPC.iosMirrorState, cb),
     onFailed: (cb) => subscribe<[string]>(IPC.iosMirrorFailed, cb)

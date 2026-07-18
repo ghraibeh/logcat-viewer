@@ -90,14 +90,54 @@ function str(o: Record<string, unknown>, key: string): string {
 }
 
 // --- device parsers -----------------------------------------------------------
-/** UDIDs from `ios list` → {"deviceList":["udid", ...]}. */
-export function parseDeviceList(stdout: string): string[] {
+/** Transport a usbmuxd entry reaches the device over. 'wifi' entries appear once
+ *  the device's "Show when on Wi-Fi" lockdown value is enabled (see
+ *  wifiConnectionsArgs) and it's on the same network as this host. */
+export type IosConnection = 'usb' | 'wifi'
+
+export interface IosDeviceEntry {
+  udid: string
+  /** Every transport this UDID is currently listed on ('usb' before 'wifi'). */
+  transports: IosConnection[]
+}
+
+/** Entries from `ios list --details` → {"deviceList":[{Udid, ConnectionType, …}]}.
+ *  A device visible over both cable and Wi-Fi shows one usbmuxd entry per
+ *  transport (ConnectionType "USB" + "Network"); we group them by UDID and
+ *  collect the transports so the picker can offer both (USB listed first). */
+export function parseDeviceListDetails(stdout: string): IosDeviceEntry[] {
+  const byUdid = new Map<string, Set<IosConnection>>()
+  const order: string[] = []
   for (const v of jsonValues(stdout)) {
-    if (isObj(v) && Array.isArray(v.deviceList)) {
-      return (v.deviceList as unknown[]).filter((x): x is string => typeof x === 'string')
+    if (!isObj(v) || !Array.isArray(v.deviceList)) continue
+    for (const e of v.deviceList as unknown[]) {
+      if (!isObj(e)) continue
+      const udid = str(e, 'Udid')
+      if (!udid) continue
+      const conn: IosConnection = str(e, 'ConnectionType') === 'Network' ? 'wifi' : 'usb'
+      if (!byUdid.has(udid)) {
+        byUdid.set(udid, new Set())
+        order.push(udid)
+      }
+      byUdid.get(udid)!.add(conn)
     }
   }
-  return []
+  return order.map((udid) => {
+    const set = byUdid.get(udid)!
+    const transports: IosConnection[] = []
+    if (set.has('usb')) transports.push('usb')
+    if (set.has('wifi')) transports.push('wifi')
+    return { udid, transports }
+  })
+}
+
+/** `ios wificonnections` output → the resulting EnableWifiConnections state
+ *  ({"EnableWifiConnections": bool}), or null if the command failed. */
+export function parseWifiConnections(stdout: string): boolean | null {
+  for (const v of jsonValues(stdout)) {
+    if (isObj(v) && typeof v.EnableWifiConnections === 'boolean') return v.EnableWifiConnections
+  }
+  return null
 }
 
 /** Distil an `ios info` document to the fields we label a device with. */
@@ -211,8 +251,16 @@ export function parseApps(stdout: string): IosAppInfo[] {
 }
 
 // --- command builders ---------------------------------------------------------
+/** `--details` carries each entry's ConnectionType (USB vs Wi-Fi) — see
+ *  parseDeviceListDetails. */
 export function listArgs(): string[] {
-  return ['list']
+  return ['list', '--details']
+}
+
+/** Get/flip the "Show this device when on Wi-Fi" lockdown value (our patched
+ *  go-ios `wificonnections` command). Always prints the resulting state. */
+export function wifiConnectionsArgs(udid: string, op: 'get' | 'enable' | 'disable'): string[] {
+  return ['wificonnections', op, '--udid', udid]
 }
 
 export function infoArgs(udid: string): string[] {
@@ -349,9 +397,12 @@ export function killArgs(udid: string, bundleId: string): string[] {
   return ['kill', bundleId, '--udid', udid]
 }
 
-/** Start a no-sudo userspace tunnel bound to one device (long-lived daemon). */
-export function tunnelStartArgs(udid: string): string[] {
-  return ['tunnel', 'start', '--userspace', '--udid', udid]
+/** Start the no-sudo userspace tunnel AGENT (long-lived daemon). No `--udid`, so
+ *  one agent manages tunnels for EVERY connected device (it loops over the device
+ *  list, assigning each its own userspace RSD port) — the basis for multi-device
+ *  dev-tier. Per-device readiness is then read from `tunnel ls`. */
+export function tunnelStartArgs(): string[] {
+  return ['tunnel', 'start', '--userspace']
 }
 
 export function tunnelLsArgs(): string[] {

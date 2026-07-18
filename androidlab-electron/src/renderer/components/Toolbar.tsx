@@ -1,28 +1,33 @@
 /**
- * Shared device toolbar (device row): device picker + refresh + Wi-Fi + Mirror
- * + theme + About. App selection lives in the left-hand AppPickerPanel now.
- * Stream controls (Start/Pause/Clear) live in the filter bar, exactly as in ui.py.
+ * Shared device toolbar (device row): device picker + refresh + Mirror + AirPlay
+ * + theme + About. The picker is a custom dropdown (DevicePicker) that lists each
+ * device's transports (USB / Wi-Fi) as pickable sub-entries. App selection lives
+ * in the left-hand AppPickerPanel. Stream controls live in the filter bar, as in ui.py.
  */
 import type { Controller } from '../state/useAppController'
 import { Icon } from './Icon'
+import { DevicePicker } from './DevicePicker'
 import type { ThemeMode } from '../theme'
-
-const PHASE3 = 'Available in a later migration phase'
 
 export function Toolbar({
   c,
   onAbout,
   onMirror,
+  onAirplayReceiver,
   onIosInput,
   mirrorOpen,
+  airplayReceiverOn,
   theme,
   onToggleTheme
 }: {
   c: Controller
   onAbout: () => void
   onMirror: () => void
+  /** Toggle the standalone AirPlay receiver (works with no device connected). */
+  onAirplayReceiver: () => void
   onIosInput: () => void
   mirrorOpen: boolean
+  airplayReceiverOn: boolean
   theme: ThemeMode
   onToggleTheme: () => void
 }) {
@@ -34,41 +39,31 @@ export function Toolbar({
     <div className="toolbar">
       <div className="row toolbar-pad-left">
         <span className="label">Device</span>
-        {noAdb ? (
-          <select disabled style={{ flex: 1 }}>
-            <option>adb not found — set $ADB or add to PATH</option>
-          </select>
-        ) : (
-          <select
-            style={{ flex: 1 }}
-            value={c.serial ?? ''}
-            onChange={(e) => c.setSerial(e.target.value || null)}
-          >
-            {c.devices.length === 0 ? (
-              <option value="">no devices — is one connected?</option>
-            ) : (
-              c.devices.map((d) => (
-                <option key={d.serial} value={d.serial}>
-                  {d.label}
-                </option>
-              ))
-            )}
-          </select>
-        )}
+        <DevicePicker
+          devices={c.devices}
+          serial={c.serial}
+          connection={c.connection}
+          onPick={(serial, transport) => c.selectDevice(serial, transport)}
+          noAdb={noAdb}
+        />
         <button className="toggle" title="Refresh device list" onClick={() => void c.refreshDevices()}>
           <Icon name="refresh" size={16} />
         </button>
-        <button className="toggle" title={`Connect over Wi-Fi — ${PHASE3}`} disabled>
-          <Icon name="wifi" size={16} />
-        </button>
         <div style={{ flex: 1 }} />
         <button
-          className={mirrorOpen ? 'active' : undefined}
+          className={mirrorOpen && !airplayReceiverOn ? 'active' : undefined}
           title="Mirror the device's screen"
           disabled={!hasDevice}
           onClick={onMirror}
         >
           Mirror
+        </button>
+        <button
+          className={`toggle${airplayReceiverOn ? ' active' : ''}`}
+          title="AirPlay receiver — advertise “AndroidLab” so any iPhone on the network can mirror to it (no cable needed)"
+          onClick={onAirplayReceiver}
+        >
+          <Icon name="airplay" size={16} />
         </button>
         {isIos ? (
           <button className="toggle" title="iOS touch input — signing settings" onClick={onIosInput}>

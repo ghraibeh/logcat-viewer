@@ -56,6 +56,34 @@ export const ICON_PATHS = {
       <path d="M16 12h4" />
     </>
   ),
+  // Stream settings (gear).
+  settings: (
+    <>
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M12 3.5v2.2M12 18.3v2.2M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M3.5 12h2.2M18.3 12h2.2M4.9 19.1l1.6-1.6M17.5 6.5l1.6-1.6" />
+    </>
+  ),
+  // AirPlay / Wi-Fi mirror path toggle (screen with an upward triangle).
+  airplay: (
+    <>
+      <path d="M5 17H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-1" />
+      <path d="M12 14l4 5H8z" fill="currentColor" stroke="none" />
+    </>
+  ),
+  // Mirror-audio playback on the host (speaker with sound waves / crossed out).
+  sound: (
+    <>
+      <path d="M4 9.5h3L11 6v12l-4-3.5H4z" />
+      <path d="M15 9.5a3.6 3.6 0 0 1 0 5" />
+      <path d="M17.5 7a7.2 7.2 0 0 1 0 10" />
+    </>
+  ),
+  muted: (
+    <>
+      <path d="M4 9.5h3L11 6v12l-4-3.5H4z" />
+      <path d="M15.5 9.5 20.5 14.5M20.5 9.5 15.5 14.5" />
+    </>
+  ),
   power: (
     <>
       <path d="M12 4v7" />
@@ -319,6 +347,19 @@ export const ICON_PATHS = {
     </>
   ),
   signal: <path d="M4 20v-2.5M9 20v-6M14 20v-9.5M19 20V5" />,
+  // USB connector: a shaft down the middle with the classic circle (base),
+  // triangle and square branch tips — reads as "wired / USB".
+  usb: (
+    <>
+      <path d="M12 21V4" />
+      <path d="m9 7 3-3 3 3" />
+      <circle cx="12" cy="21" r="0.8" fill="currentColor" />
+      <path d="M12 15l4-2.5V10" />
+      <rect x="14.6" y="7.6" width="2.8" height="2.8" rx="0.5" />
+      <path d="M12 12l-4-2.5" />
+      <circle cx="7.6" cy="9" r="1.4" />
+    </>
+  ),
   globe: (
     <>
       <circle cx="12" cy="12" r="9" />

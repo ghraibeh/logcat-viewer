@@ -6,22 +6,50 @@
 import { describe, expect, it } from 'vitest'
 import * as G from '@core/goios'
 
-describe('parseDeviceList', () => {
-  it('reads UDIDs from a deviceList document', () => {
-    expect(G.parseDeviceList('{"deviceList":["00008130-AAA","00008120-BBB"]}')).toEqual([
-      '00008130-AAA',
-      '00008120-BBB'
+describe('parseDeviceListDetails', () => {
+  const entry = (udid: string, conn: string): string =>
+    `{"Udid":"${udid}","ProductName":"iPhone OS","ProductType":"iPhone16,2","ProductVersion":"26.5.2","ConnectionType":"${conn}"}`
+
+  it('reads udid + transports from a --details document', () => {
+    const out = `{"deviceList":[${entry('00008130-AAA', 'USB')},${entry('00008120-BBB', 'Network')}]}`
+    expect(G.parseDeviceListDetails(out)).toEqual([
+      { udid: '00008130-AAA', transports: ['usb'] },
+      { udid: '00008120-BBB', transports: ['wifi'] }
     ])
   })
 
+  it('groups a device visible over both transports — USB listed first, either order', () => {
+    for (const [a, b] of [
+      ['USB', 'Network'],
+      ['Network', 'USB']
+    ]) {
+      const out = `{"deviceList":[${entry('UDID-1', a)},${entry('UDID-1', b)}]}`
+      expect(G.parseDeviceListDetails(out)).toEqual([{ udid: 'UDID-1', transports: ['usb', 'wifi'] }])
+    }
+  })
+
   it('tolerates structured log lines prepended on stdout', () => {
-    const out = ['{"level":"warn","msg":"agent not running"}', '{"deviceList":["UDID-1"]}'].join('\n')
-    expect(G.parseDeviceList(out)).toEqual(['UDID-1'])
+    const out = ['{"level":"warn","msg":"agent not running"}', `{"deviceList":[${entry('UDID-1', 'USB')}]}`].join('\n')
+    expect(G.parseDeviceListDetails(out)).toEqual([{ udid: 'UDID-1', transports: ['usb'] }])
   })
 
   it('returns [] for empty / junk output', () => {
-    expect(G.parseDeviceList('')).toEqual([])
-    expect(G.parseDeviceList('not json at all')).toEqual([])
+    expect(G.parseDeviceListDetails('')).toEqual([])
+    expect(G.parseDeviceListDetails('not json at all')).toEqual([])
+  })
+})
+
+describe('wificonnections', () => {
+  it('builds get/enable/disable argv', () => {
+    expect(G.wifiConnectionsArgs('UDID-1', 'enable')).toEqual(['wificonnections', 'enable', '--udid', 'UDID-1'])
+    expect(G.wifiConnectionsArgs('UDID-1', 'get')).toEqual(['wificonnections', 'get', '--udid', 'UDID-1'])
+  })
+
+  it('parses the resulting state (log noise tolerated)', () => {
+    expect(G.parseWifiConnections('{"EnableWifiConnections":true}')).toBe(true)
+    const noisy = ['{"level":"info","msg":"x"}', '{"EnableWifiConnections":false}'].join('\n')
+    expect(G.parseWifiConnections(noisy)).toBe(false)
+    expect(G.parseWifiConnections('boom')).toBeNull()
   })
 })
 
@@ -138,7 +166,7 @@ describe('parseApps', () => {
 
 describe('command builders', () => {
   it('targets the device with --udid', () => {
-    expect(G.listArgs()).toEqual(['list'])
+    expect(G.listArgs()).toEqual(['list', '--details'])
     expect(G.infoArgs('U')).toEqual(['info', '--udid', 'U'])
   })
 
@@ -159,7 +187,8 @@ describe('command builders', () => {
     expect(G.launchArgs('U', 'com.x')).toEqual(['launch', 'com.x', '--udid', 'U'])
     expect(G.launchArgs('U', 'com.x', true)).toEqual(['launch', 'com.x', '--kill-existing', '--udid', 'U'])
     expect(G.killArgs('U', 'com.x')).toEqual(['kill', 'com.x', '--udid', 'U'])
-    expect(G.tunnelStartArgs('U')).toEqual(['tunnel', 'start', '--userspace', '--udid', 'U'])
+    // No --udid: one agent manages tunnels for every connected device.
+    expect(G.tunnelStartArgs()).toEqual(['tunnel', 'start', '--userspace'])
     expect(G.tunnelLsArgs()).toEqual(['tunnel', 'ls'])
   })
 })

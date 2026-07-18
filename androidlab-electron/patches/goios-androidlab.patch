@@ -1,3 +1,43 @@
+diff --git a/cmd_device_registry.go b/cmd_device_registry.go
+index bbe1eb7..49fd70e 100644
+--- a/cmd_device_registry.go
++++ b/cmd_device_registry.go
+@@ -53,6 +53,7 @@ var deviceCommands = []command{
+ 	commandByBool("mobilegestalt", runMobileGestaltCommand),
+ 	commandByBool("devicestate", runDeviceStateCommand),
+ 	commandByBool("wifi", runWifiCommand),
++	commandByBool("wificonnections", runWifiConnectionsCommand),
+ 	commandByBool("prepare", runPrepareCommand),
+ 	commandByBool("set-wallpaper", runSetWallpaperCommand),
+ 	commandByBool("get-wallpaper", runGetWallpaperCommand),
+diff --git a/cmd_device_wificonnections.go b/cmd_device_wificonnections.go
+new file mode 100644
+index 0000000..cfe069b
+--- /dev/null
++++ b/cmd_device_wificonnections.go
+@@ -0,0 +1,22 @@
++package main
++
++import (
++	"fmt"
++
++	"github.com/danielpaulus/go-ios/ios"
++)
++
++// runWifiConnectionsCommand gets/sets the "Show this device when on Wi-Fi"
++// lockdown value (com.apple.mobile.wireless_lockdown/EnableWifiConnections).
++// Always prints the resulting state so `enable`/`disable` double as a readback.
++func runWifiConnectionsCommand(ctx commandContext) {
++	if enable, _ := ctx.Args.Bool("enable"); enable {
++		exitIfError("failed enabling wifi connections", ios.SetWifiConnections(ctx.Device, true))
++	}
++	if disable, _ := ctx.Args.Bool("disable"); disable {
++		exitIfError("failed disabling wifi connections", ios.SetWifiConnections(ctx.Device, false))
++	}
++	enabled, err := ios.GetWifiConnections(ctx.Device)
++	exitIfError("failed reading wifi connections state", err)
++	fmt.Println(convertToJSONString(map[string]interface{}{"EnableWifiConnections": enabled}))
++}
 diff --git a/ios/imagemounter/personalized_image.go b/ios/imagemounter/personalized_image.go
 index d35eadd..1e74763 100644
 --- a/ios/imagemounter/personalized_image.go
@@ -218,6 +258,58 @@ index 9fe16fb..ae6bd9a 100644
  }
  
  type CPUUsage struct {
+diff --git a/ios/lockdown_wificonnections.go b/ios/lockdown_wificonnections.go
+new file mode 100644
+index 0000000..bb7e120
+--- /dev/null
++++ b/ios/lockdown_wificonnections.go
+@@ -0,0 +1,46 @@
++package ios
++
++const (
++	wirelessLockdownDomain = "com.apple.mobile.wireless_lockdown"
++	wifiConnectionsKey     = "EnableWifiConnections"
++)
++
++// GetWifiConnections reads whether the device advertises itself to paired hosts
++// over Wi-Fi — the same lockdown value behind Finder's "Show this iPhone when
++// on Wi-Fi" checkbox. The key is absent until the first toggle; that reads as
++// disabled.
++func GetWifiConnections(device DeviceEntry) (bool, error) {
++	lockDownConn, err := ConnectLockdownWithSession(device)
++	if err != nil {
++		return false, err
++	}
++	defer lockDownConn.Close()
++	value, err := lockDownConn.GetValueForDomain(wifiConnectionsKey, wirelessLockdownDomain)
++	if err != nil {
++		return false, err
++	}
++	switch v := value.(type) {
++	case bool:
++		return v, nil
++	case uint64:
++		return v != 0, nil
++	case int64:
++		return v != 0, nil
++	default:
++		// nil / unexpected type: the key was never set — Wi-Fi connections are off.
++		return false, nil
++	}
++}
++
++// SetWifiConnections flips the Wi-Fi-connections lockdown value. The device
++// must already be paired over USB; once enabled, usbmuxd (macOS/Windows)
++// discovers the device on the local network and every usbmux-routed service
++// keeps working without the cable.
++func SetWifiConnections(device DeviceEntry, enabled bool) error {
++	lockDownConn, err := ConnectLockdownWithSession(device)
++	if err != nil {
++		return err
++	}
++	defer lockDownConn.Close()
++	return lockDownConn.SetValueForDomain(wifiConnectionsKey, wirelessLockdownDomain, enabled)
++}
 diff --git a/ios/pcap/ipfinder.go b/ios/pcap/ipfinder.go
 index 1f90a9b..556a862 100644
 --- a/ios/pcap/ipfinder.go
@@ -477,11 +569,104 @@ index 1f90a9b..556a862 100644
 -	return nil
 +	return best
  }
+diff --git a/ios/tunnel/tunnel_api.go b/ios/tunnel/tunnel_api.go
+index c3daeca..985cf34 100644
+--- a/ios/tunnel/tunnel_api.go
++++ b/ios/tunnel/tunnel_api.go
+@@ -486,10 +486,18 @@ func (m *TunnelManager) UpdateTunnels(ctx context.Context) error {
+ }
+ 
+ // shouldSkipDevice reports whether UpdateTunnels should not attempt a tunnel for
+-// d on this cycle: network-connected devices can never establish a tunnel, and a
++// d on this cycle: network-connected devices are skipped by default, and a
+ // device that recently failed is held off until its backoff window elapses.
++//
++// AndroidLab patch: upstream skips every "Network" (Wi-Fi/usbmux) device on the
++// assumption they can never tunnel. In practice the CoreDeviceProxy tunnel rides
++// the same usbmux Connect that classic services already use over Wi-Fi, so it can
++// work cable-free. Setting GOIOS_NETWORK_TUNNEL lets UpdateTunnels attempt the
++// tunnel for network devices too (still guarded by the failure backoff below, so
++// a device that genuinely can't tunnel backs off to 5-minute retries instead of
++// spinning). Unset ⇒ exact upstream behavior.
+ func shouldSkipDevice(d ios.DeviceEntry, failed map[string]failedDevice, now time.Time) bool {
+-	if d.Properties.ConnectionType == "Network" {
++	if d.Properties.ConnectionType == "Network" && os.Getenv("GOIOS_NETWORK_TUNNEL") == "" {
+ 		return true
+ 	}
+ 	if f, ok := failed[d.Properties.SerialNumber]; ok && now.Sub(f.lastAttempt) < failedDeviceBackoff(f.failCount) {
+diff --git a/ios/utils.go b/ios/utils.go
+index 56a0de2..6d4beb9 100755
+--- a/ios/utils.go
++++ b/ios/utils.go
+@@ -121,22 +121,39 @@ func GetDeviceWithAddress(udid string, address string, provider RsdPortProvider)
+ 		if len(deviceList.DeviceList) == 0 {
+ 			return DeviceEntry{}, errors.New("no iOS devices are attached to this host")
+ 		}
+-		device := deviceList.DeviceList[0]
++		device := preferUsbEntry(deviceList.DeviceList)
+ 		golog.Info("no udid specified using first device in list", "module", logModule, "udid", device.Properties.SerialNumber)
+ 		device.Address = address
+ 		device.Rsd = provider
+ 		return device, nil
+ 	}
++	matches := make([]DeviceEntry, 0, 2)
+ 	for _, device := range deviceList.DeviceList {
+ 		if device.Properties.SerialNumber == udid {
+-			device.Address = address
+-			device.Rsd = provider
+-			return device, nil
++			matches = append(matches, device)
+ 		}
+ 	}
++	if len(matches) > 0 {
++		device := preferUsbEntry(matches)
++		device.Address = address
++		device.Rsd = provider
++		return device, nil
++	}
+ 	return DeviceEntry{}, fmt.Errorf("Device '%s' not found. Is it attached to the machine?", udid)
+ }
+ 
++// preferUsbEntry picks the USB usbmuxd entry when a device is visible both over
++// the cable and over Wi-Fi (ConnectionType "Network") — same udid, two entries.
++// USB is faster and is required by some services, so it always wins when present.
++func preferUsbEntry(entries []DeviceEntry) DeviceEntry {
++	for _, entry := range entries {
++		if entry.Properties.ConnectionType != "Network" {
++			return entry
++		}
++	}
++	return entries[0]
++}
++
+ // PathExists is used to determine whether the path folder exists
+ // True if it exists, false otherwise
+ func PathExists(path string) (bool, error) {
 diff --git a/main.go b/main.go
-index d048316..5c22d68 100644
+index d048316..9f6010c 100644
 --- a/main.go
 +++ b/main.go
-@@ -621,6 +621,9 @@ func printSysmontapStats(device ios.DeviceEntry) {
+@@ -126,6 +126,7 @@ Usage:
+   ios prepare create-cert
+   ios prepare printskip
+   ios wifi [--ssid=<ssid>] [--password=<password>] [--enc-type=<encType>] [--remove] [options]
++  ios wificonnections (enable | disable | get) [options]
+   ios profile add <profileFile> [--p12file=<orgid>] [--password=<p12password>] [options]
+   ios profile list [options]
+   ios profile remove <profileName> [options]
+@@ -386,6 +387,11 @@ The commands work as following:
+ 																		Installs a wifi profile on the device forcing a connection to the provided WiFi network
+ 																		If --remove is specified, the wifi profile of the provided ssid will be removed.
+ 
++	ios wificonnections (enable | disable | get)                       Gets or sets whether the device is reachable by paired hosts over Wi-Fi
++																		(Finder's "Show this iPhone when on Wi-Fi"). Prints {"EnableWifiConnections": bool}.
++																		Requires an existing USB pairing; once enabled, usbmuxd sees the device on the
++																		local network and go-ios can talk to it without the cable.
++
+     ios profile add <profileFile> [--p12file=<orgid>] [--password=<p12password>]
+                                                                        Install profile file on the device.
+                                                                        If supervised set p12file and password or the environment variable 'P12_PASSWORD'
+@@ -621,6 +627,9 @@ func printSysmontapStats(device ios.DeviceEntry) {
  				"enabled_cpus", cpuUsageMsg.EnabledCPUs,
  				"end_time", cpuUsageMsg.EndMachAbsTime,
  				"cpu_total_load", cpuUsageMsg.SystemCPUUsage.CPU_TotalLoad,
@@ -491,3 +676,27 @@ index d048316..5c22d68 100644
  			)
  
  		case <-c:
+@@ -1407,15 +1416,15 @@ func outputDetailedList(deviceList ios.DeviceList) {
+ 	result := make([]detailsEntry, len(deviceList.DeviceList))
+ 	for i, device := range deviceList.DeviceList {
+ 		udid := device.Properties.SerialNumber
+-		allValues, err := ios.GetValues(device)
+-		exitIfError("failed getting values", err)
+-		result[i] = detailsEntry{
+-			Udid:           udid,
+-			ProductName:    allValues.Value.ProductName,
+-			ProductType:    allValues.Value.ProductType,
+-			ProductVersion: allValues.Value.ProductVersion,
+-			ConnectionType: device.ConnectionTypeLabel(),
++		// A single unreachable entry (e.g. a stale Wi-Fi record) must not kill
++		// the whole listing — emit it with empty product fields instead.
++		entry := detailsEntry{Udid: udid, ConnectionType: device.ConnectionTypeLabel()}
++		if allValues, err := ios.GetValues(device); err == nil {
++			entry.ProductName = allValues.Value.ProductName
++			entry.ProductType = allValues.Value.ProductType
++			entry.ProductVersion = allValues.Value.ProductVersion
+ 		}
++		result[i] = entry
+ 	}
+ 	fmt.Println(convertToJSONString(map[string][]detailsEntry{
+ 		"deviceList": result,

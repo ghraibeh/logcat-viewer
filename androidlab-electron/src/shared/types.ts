@@ -12,6 +12,11 @@ import type { DisplayFlow } from '@core/intercept'
 /** Which backend a device is reached through: Android via adb, iOS via go-ios. */
 export type Platform = 'android' | 'ios'
 
+/** A transport a device is reachable over. iOS: usbmux USB vs Wi-Fi (Network)
+ *  entry. Android: USB vs wireless-adb (ip:port serial). A device can expose
+ *  more than one at once — the picker lists each so the user can choose. */
+export type Transport = 'usb' | 'wifi'
+
 export interface Device {
   /** adb serial (Android) or device UDID (iOS). */
   serial: string
@@ -24,6 +29,20 @@ export interface Device {
   label: string
   /** The backend this device talks to; drives per-platform feature gating. */
   platform: Platform
+  /** Every transport this device is currently reachable over (>=1). A device
+   *  visible over both cable and Wi-Fi lists both, so the picker can show a
+   *  sub-entry per transport and let the user pick. */
+  transports: Transport[]
+}
+
+/** Persisted app settings (see main/services/settings.ts). */
+export interface AppSettings {
+  /** Auto-enable iOS "Show this device when on Wi-Fi" the moment a device
+   *  attaches over USB, so unplugging leaves it connected wirelessly. */
+  autoWifi: boolean
+  /** UDIDs the user explicitly turned Wi-Fi off for in the dialog — never
+   *  auto-re-enable these even while autoWifi is on. */
+  wifiOptOut: string[]
 }
 
 /** One app entry for the picker. `clone` marks a VA-host clone package. */
@@ -73,11 +92,17 @@ export interface MirrorFailed {
   message: string
 }
 
-/** State of the iOS mirror (macOS): a native AVFoundation + VideoToolbox helper
- *  streams H.264 off the CoreMediaIO "iOS Device" screen — the QuickTime path. */
+/** State of the iOS mirror (macOS). Two feeds, same H.264 → WebCodecs decoder:
+ *  - 'h264'    : USB. Native AVFoundation + VideoToolbox helper streams H.264 off the
+ *               CoreMediaIO "iOS Device" screen (the QuickTime path) — low latency,
+ *               plus touch forwarding.
+ *  - 'airplay' : Wi-Fi. The device AirPlay-mirrors to our bundled receiver (RPiPlay
+ *               core); view-only, phone-initiated. `waiting` is true until the phone
+ *               picks us in Control Center ▸ Screen Mirroring and frames arrive. */
 export interface IosMirrorState {
-  mode: 'h264'
+  mode: 'h264' | 'airplay'
   message: string
+  waiting?: boolean
 }
 
 /** Which device the detached mirror window should mirror. The main window pushes
@@ -86,6 +111,9 @@ export interface IosMirrorState {
 export interface MirrorPopoutInfo {
   serial: string | null
   platform: Platform
+  /** iOS transport, so the detached mirror defaults to the same feed path (AirPlay
+   *  for a Wi-Fi-only device) as the docked view. */
+  connection?: 'usb' | 'wifi'
 }
 
 // --- Database Inspector payloads (mirror dbinspect.py's worker signals) -------

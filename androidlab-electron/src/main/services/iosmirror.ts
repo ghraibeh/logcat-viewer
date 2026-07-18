@@ -9,6 +9,11 @@
  * VideoToolbox, and writes a raw Annex-B elementary stream to stdout — byte-for-byte
  * what the renderer's existing WebCodecs decoder (the Android scrcpy pipeline) eats.
  *
+ * The helper also plays the device's AUDIO on the Mac's default output (same CMIO
+ * mechanism; never on stdout, so the byte stream stays pure H.264). Mute is a
+ * SIGUSR2 toggle: the helper always starts unmuted, so this service tracks the
+ * user's preference and re-syncs it whenever a (re)spawned helper starts streaming.
+ *
  * Unprivileged (only a camera/screen TCC prompt — the Electron app grants it), and
  * it does NOT switch the device's USB config, so go-ios/usbmux (the other iOS tabs)
  * keep working while mirroring. macOS-only; other platforms report unsupported.
@@ -47,6 +52,10 @@ export class IosMirrorService {
   private alive = false
   private gotData = false
   private teardownTimer: ReturnType<typeof setTimeout> | null = null
+  // The user's mute preference vs what the running helper is actually doing (a fresh
+  // helper always starts unmuted). SIGUSR2 only toggles, so sync compares the two.
+  private mutedWanted = false
+  private helperMuted = false
 
   constructor(
     private readonly goiosBin: string,
@@ -97,6 +106,33 @@ export class IosMirrorService {
     }
   }
 
+  // --- device-audio mute ----------------------------------------------------
+  /** Set the mute preference. Applied to the live helper at once; a helper spawned
+   *  later picks it up when it starts streaming. Returns the effective preference. */
+  setMuted(muted: boolean): boolean {
+    this.mutedWanted = muted
+    this.syncMute()
+    return this.mutedWanted
+  }
+
+  getMuted(): boolean {
+    return this.mutedWanted
+  }
+
+  /** Bring the helper's actual mute state in line with the preference. Gated on
+   *  gotData: by the time frames flow the helper's signal handlers are long
+   *  installed (an unhandled SIGUSR2 would kill a just-spawned process). */
+  private syncMute(): void {
+    if (!this.proc || !this.alive || !this.gotData) return
+    if (this.helperMuted === this.mutedWanted) return
+    try {
+      this.proc.kill('SIGUSR2')
+      this.helperMuted = this.mutedWanted
+    } catch {
+      /* helper vanished — the next spawn re-syncs */
+    }
+  }
+
   /** Immediate teardown — kills the capture helper (grace timer firing, new device, quit). */
   private hardStop(): void {
     this.runToken++
@@ -133,6 +169,7 @@ export class IosMirrorService {
     this.proc = proc
     this.alive = true
     this.gotData = false
+    this.helperMuted = false // a fresh helper always starts unmuted
     let err = ''
 
     proc.stdout.on('data', (chunk: Buffer) => {
@@ -140,6 +177,7 @@ export class IosMirrorService {
       if (!this.gotData) {
         this.gotData = true
         this.cb.onState({ mode: 'h264', message: 'Live stream' })
+        this.syncMute()
       }
       this.cb.onH264(new Uint8Array(chunk))
     })

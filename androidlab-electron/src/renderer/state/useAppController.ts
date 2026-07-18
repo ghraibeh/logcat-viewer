@@ -8,7 +8,7 @@ import { parseLine, type LogEntry } from '@core/parser'
 import { FilterSpec } from '@core/filters'
 import { PRIORITY } from '@core/priorities'
 import { exportText, cleanPreset, type PresetValues } from '@core/logtools'
-import type { AppEntry, Device, Platform, PresetMap, SaveResult, InstallResult } from '@shared/types'
+import type { AppEntry, Device, Platform, PresetMap, SaveResult, InstallResult, Transport } from '@shared/types'
 import { platformOf } from '@shared/capabilities'
 import { LogStore } from '@core/logStore'
 
@@ -118,6 +118,13 @@ export function useAppController() {
 
   // Platform of the selected device — drives per-platform tab/feature gating.
   const platform = useMemo<Platform>(() => platformOf(devices, serial), [devices, serial])
+
+  // The transport the user picked for the selected device ('usb'/'wifi'). Defaults
+  // to the device's preferred transport (USB when available) and follows the
+  // picker's per-transport sub-entry. Lets the iOS mirror pick its feed path
+  // (AirPlay for Wi-Fi, USB capture for cable).
+  const [connection, setConnectionState] = useState<Transport>('usb')
+  const connectionRef = useRef<Transport>('usb')
 
   useEffect(() => {
     filterRef.current = filter
@@ -353,15 +360,29 @@ export function useAppController() {
     applyFilter()
   }, [applyFilter])
 
-  const setSerial = useCallback(
-    (s: string | null) => {
+  // Preferred transport for a device: USB when reachable (faster), else its first
+  // listed transport. Used when a selection doesn't name a still-valid transport.
+  const preferredTransport = (dev: Device | undefined): Transport =>
+    dev ? (dev.transports.includes('usb') ? 'usb' : (dev.transports[0] ?? 'usb')) : 'usb'
+
+  // Select a device and (optionally) a specific transport sub-entry. Omitting the
+  // transport, or naming one the device no longer exposes, falls back to the
+  // preferred transport.
+  const selectDevice = useCallback(
+    (s: string | null, transport?: Transport) => {
       serialRef.current = s
       setSerialState(s)
+      const dev = devicesRef.current.find((d) => d.serial === s)
+      const t = transport && dev?.transports.includes(transport) ? transport : preferredTransport(dev)
+      connectionRef.current = t
+      setConnectionState(t)
       clearAppSelection()
       void reloadApps()
     },
     [reloadApps, clearAppSelection]
   )
+
+  const setSerial = useCallback((s: string | null) => selectDevice(s), [selectDevice])
 
   // Apply a device list (from a manual refresh OR the hotplug push). Keeps the
   // current selection if that device is still present; otherwise picks the first
@@ -382,6 +403,15 @@ export function useAppController() {
       if (changed) clearAppSelection()
       serialRef.current = pick
       setSerialState(pick)
+      // Keep the user's transport if the picked device still exposes it; else
+      // fall back to its preferred transport (e.g. it dropped from USB to Wi-Fi).
+      const dev = list.find((d) => d.serial === pick)
+      const t =
+        dev && dev.transports.includes(connectionRef.current)
+          ? connectionRef.current
+          : preferredTransport(dev)
+      connectionRef.current = t
+      setConnectionState(t)
       if (changed || force) void reloadApps()
     },
     [reloadApps, clearAppSelection]
@@ -569,7 +599,9 @@ export function useAppController() {
     devices,
     serial,
     platform,
+    connection,
     setSerial,
+    selectDevice,
     refreshDevices,
     apps,
     appsLoading,

@@ -18,7 +18,8 @@
     "postinstall": "electron-rebuild -f -w node-pty",
     "smoke": "npm run build && ANDROIDLAB_SMOKE=1 electron .",
     "build:ioshelper": "node scripts/build-ios-helper.js",
-    "dist": "npm run build:ioshelper && npm run build && electron-builder"
+    "build:airplayhelper": "node scripts/build-airplay-helper.js",
+    "dist": "npm run build:ioshelper && npm run build:airplayhelper && npm run build && electron-builder"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.10.9",

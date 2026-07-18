@@ -1,0 +1,123 @@
+/* Custom device dropdown (Toolbar). */
+
+.dp {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.dp-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.dp-trigger:hover:not(:disabled) {
+  border-color: var(--border-2);
+}
+.dp-trigger:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.dp-trigger-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dp-dim {
+  color: var(--text-dim);
+}
+
+/* Transport marker chip (USB / Wi-Fi). */
+.dp-tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+}
+.dp-tag-wifi {
+  color: #38bdf8;
+  border-color: rgba(14, 165, 233, 0.45);
+  background: rgba(14, 165, 233, 0.12);
+}
+.dp-tag-usb {
+  color: #a3e635;
+  border-color: rgba(132, 204, 22, 0.4);
+  background: rgba(132, 204, 22, 0.12);
+}
+
+.dp-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  max-width: 460px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.5);
+}
+
+.dp-group + .dp-group {
+  margin-top: 2px;
+  border-top: 1px solid var(--border);
+  padding-top: 2px;
+}
+.dp-devlabel {
+  padding: 6px 10px 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.dp-row-sub {
+  padding-left: 18px;
+}
+.dp-row:hover {
+  background: var(--surface);
+}
+.dp-row-active {
+  background: var(--select-soft, rgba(90, 150, 250, 0.18));
+}
+.dp-row-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

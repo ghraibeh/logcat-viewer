@@ -13,6 +13,17 @@
 # IP-address lookup is reliable (identifies the device's Wi-Fi IP from the pcapd
 # stream without matching the hardware MAC — which iOS's default Private Wi-Fi
 # Address randomises — and returns within a bounded timeout instead of hanging).
+# It also adds `ios wificonnections (enable|disable|get)` — the lockdown value
+# behind Finder's "Show this iPhone when on Wi-Fi" — powering the app's cable-free
+# iOS connection flow; makes device-by-udid resolution prefer the USB usbmuxd
+# entry when the same device is also visible over Wi-Fi; and hardens
+# `ios list --details` so one unreachable (e.g. stale Wi-Fi) entry degrades to
+# empty fields instead of failing the whole listing. Finally, it lets the
+# developer tunnel come up over Wi-Fi: upstream's tunnel agent hard-skips every
+# "Network" device (assuming they can't tunnel), but the CoreDeviceProxy tunnel
+# rides the same usbmux Connect that classic services already use over Wi-Fi and
+# works cable-free — verified on-device. Setting GOIOS_NETWORK_TUNNEL=1 (which the
+# app does) enables the attempt; unset preserves exact upstream behavior.
 #
 # This clones go-ios, applies the patch, and builds the `ios` binary. go-ios is
 # pure Go (CGO disabled), so by default this cross-compiles ALL supported

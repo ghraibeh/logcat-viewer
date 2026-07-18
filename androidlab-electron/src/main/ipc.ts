@@ -7,7 +7,7 @@ import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { IPC } from '@shared/ipc'
-import type { Device, MirrorPopoutInfo, PresetMap } from '@shared/types'
+import type { AppSettings, Device, MirrorPopoutInfo, PresetMap } from '@shared/types'
 import { MirrorWindowManager } from './mirrorWindow'
 import { findAdb, listDevices, listApps, resolvePids, forceCrash } from './services/adb'
 import { DeviceWatcher } from './services/devicewatch'
@@ -21,10 +21,12 @@ import { LeakDetectService } from './services/leakdetect'
 import { captureInspect } from './services/inspector'
 import { MirrorService } from './services/mirror'
 import { IosMirrorService } from './services/iosmirror'
+import { IosAirplayService } from './services/iosairplay'
 import * as iosinput from './services/iosinput'
 import type { IosInputConfig } from '@core/iosinput'
 import { readControlsState, applyControls } from './services/controls'
 import { enableWirelessDebug } from './services/wireless'
+import { loadSettings, saveSettings } from './services/settings'
 import { MockLocationService } from './services/mocklocation'
 import { DbService } from './services/db'
 import { IosDbService } from './services/iosdb'
@@ -60,6 +62,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   let mockloc: MockLocationService | null = null
   let mirrorSvc: MirrorService | null = null
   let iosMirrorSvc: IosMirrorService | null = null
+  let iosAirplaySvc: IosAirplayService | null = null
   // One PTY-backed session per renderer shell tab, keyed by the tab's id.
   const shellSessions = new Map<string, ShellSession>()
   let intercept: InterceptService | null = null
@@ -100,6 +103,35 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   ipcMain.handle(IPC.adbFind, () => ({ path: findAdb() }))
 
+  // Session cache of iOS UDIDs already made Wi-Fi-ready, so auto-enable fires
+  // once per device (not on every list rebuild). Cleared only on app restart.
+  const wifiReady = new Set<string>()
+
+  // Auto-switch to Wi-Fi: the instant an iOS device is seen over USB, enable its
+  // "Show when on Wi-Fi" lockdown value (unless the user opted it out). usbmuxd
+  // hides the Wi-Fi entry while USB is present, so this is prep — when the cable
+  // comes out the device reappears over Wi-Fi on its own (same UDID ⇒ the app
+  // keeps it selected). Fire-and-forget so it never slows enumeration.
+  const autoEnableWifi = (bin: string, devices: Device[]): void => {
+    const s = loadSettings()
+    if (!s.autoWifi) return
+    for (const d of devices) {
+      // Enroll any iOS device we can currently reach over USB (that's when
+      // usbmux lets us flip its Wi-Fi-sync lockdown value).
+      if (d.platform !== 'ios' || !d.transports.includes('usb')) continue
+      if (wifiReady.has(d.serial) || s.wifiOptOut.includes(d.serial)) continue
+      void goios
+        .wifiConnections(bin, d.serial, 'enable')
+        .then((r) => {
+          if (r.ok) {
+            wifiReady.add(d.serial)
+            console.error(`[wifi] auto-enabled Wi-Fi connections for ${d.serial}`)
+          }
+        })
+        .catch(() => {})
+    }
+  }
+
   // The app's device list is the union of adb (Android) + go-ios (iOS). Either
   // backend being absent just contributes an empty list.
   const buildDeviceList = async (): Promise<Device[]> => {
@@ -107,6 +139,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     const android = adb ? await listDevices(adb) : []
     const iosBin = goios.findGoIos()
     const ios = iosBin ? await goios.listDevices(iosBin).catch(() => []) : []
+    if (iosBin) autoEnableWifi(iosBin, ios)
     return [...android, ...ios]
   }
 
@@ -455,6 +488,37 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     if (!adb || !serial) return { ok: false, message: 'no device selected' }
     return await enableWirelessDebug(adb, serial)
   })
+
+  // iOS "Show this device when on Wi-Fi" (lockdown, via patched go-ios).
+  ipcMain.handle(IPC.wirelessIosGet, async (_e, udid: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return { ok: false, enabled: false, message: 'no device selected' }
+    return await goios.wifiConnections(bin, udid, 'get')
+  })
+  ipcMain.handle(IPC.wirelessIosSet, async (_e, udid: string, enabled: boolean) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid) return { ok: false, enabled: false, message: 'no device selected' }
+    const r = await goios.wifiConnections(bin, udid, enabled ? 'enable' : 'disable')
+    // Remember an explicit user choice so auto-enable respects it: opting out
+    // when they disable, clearing the opt-out (and priming wifiReady) on enable.
+    if (r.ok) {
+      const s = loadSettings()
+      const optOut = new Set(s.wifiOptOut)
+      if (enabled) {
+        optOut.delete(udid)
+        wifiReady.add(udid)
+      } else {
+        optOut.add(udid)
+        wifiReady.delete(udid)
+      }
+      saveSettings({ wifiOptOut: [...optOut] })
+    }
+    return r
+  })
+
+  // App settings (auto-Wi-Fi toggle + per-device opt-outs).
+  ipcMain.handle(IPC.settingsGet, () => loadSettings())
+  ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) => saveSettings(patch))
 
   // --- mock GPS location --------------------------------------------------
   const ensureMockloc = (adb: string): MockLocationService => {
@@ -1099,17 +1163,53 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return iosMirrorSvc
   }
 
-  ipcMain.handle(IPC.iosMirrorStart, (_e, udid: string) => {
-    const bin = goios.findGoIos()
-    if (!bin || !udid) return false
-    ensureIosMirror(bin).start(udid)
-    return true
-  })
+  // The AirPlay (Wi-Fi) receiver broadcasts on the SAME channels as the USB mirror,
+  // so the renderer's decoder is feed-agnostic; only one feed runs at a time.
+  const ensureIosAirplay = (): IosAirplayService => {
+    if (!iosAirplaySvc) {
+      iosAirplaySvc = new IosAirplayService({
+        onH264: (chunk) => broadcast(IPC.iosMirrorH264, chunk),
+        onState: (state) => broadcast(IPC.iosMirrorState, state),
+        onFailed: (message) => broadcast(IPC.iosMirrorFailed, message)
+      })
+    }
+    return iosAirplaySvc
+  }
+
+  ipcMain.handle(
+    IPC.iosMirrorStart,
+    (_e, udid: string, mode?: 'usb' | 'airplay', resolution?: { width: number; height: number }) => {
+      if (mode === 'airplay') {
+        // Wi-Fi path: the phone initiates. Tear down the USB feed and advertise the
+        // receiver (no udid needed — the user picks "AndroidLab" on the device).
+        iosMirrorSvc?.stopFeed(true)
+        ensureIosAirplay().start(resolution)
+        return true
+      }
+      // USB path (default): CoreMediaIO capture of the cabled device.
+      iosAirplaySvc?.stop(true)
+      const bin = goios.findGoIos()
+      if (!bin || !udid) return false
+      ensureIosMirror(bin).start(udid)
+      return true
+    }
+  )
 
   ipcMain.handle(IPC.iosMirrorStop, (_e, immediate?: boolean) => {
     iosMirrorSvc?.stopFeed(immediate)
+    iosAirplaySvc?.stop(immediate)
     return true
   })
+
+  // One mute preference, applied to whichever feed is live (USB plays the device
+  // audio on this Mac; AirPlay plays the decoded AAC). Setting both keeps them in
+  // lockstep so toggling the feed path doesn't surprise the user with sound state.
+  ipcMain.handle(IPC.iosMirrorSetMuted, (_e, muted: boolean) => {
+    iosMirrorSvc?.setMuted(muted)
+    iosAirplaySvc?.setMuted(muted)
+    return muted
+  })
+  ipcMain.handle(IPC.iosMirrorGetMuted, () => iosMirrorSvc?.getMuted() ?? iosAirplaySvc?.getMuted() ?? false)
 
   ipcMain.handle(IPC.iosMirrorSaveFrame, (_e, pngBase64: string) => {
     const b64 = pngBase64.replace(/^data:image\/png;base64,/, '')
@@ -1313,6 +1413,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     mockloc?.shutdown()
     mirrorSvc?.shutdown()
     iosMirrorSvc?.shutdown()
+    iosAirplaySvc?.shutdown()
     iosinput.shutdown()
     intercept?.shutdown()
     iosDb?.shutdown()

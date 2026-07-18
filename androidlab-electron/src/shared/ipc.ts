@@ -78,8 +78,14 @@ export const IPC = {
   controlsRead: 'controls:read',
   controlsApply: 'controls:apply',
 
-  // wireless adb (invoke/handle)
+  // wireless adb / iOS Wi-Fi connections (invoke/handle)
   wirelessEnable: 'wireless:enable',
+  wirelessIosGet: 'wireless:ios-get',
+  wirelessIosSet: 'wireless:ios-set',
+
+  // app settings (invoke/handle)
+  settingsGet: 'settings:get',
+  settingsSet: 'settings:set',
 
   // mock GPS location (invoke/handle)
   mocklocSetup: 'mockloc:setup',
@@ -178,6 +184,8 @@ export const IPC = {
   iosMirrorStart: 'ios-mirror:start',
   iosMirrorStop: 'ios-mirror:stop',
   iosMirrorSaveFrame: 'ios-mirror:save-frame', // save a canvas PNG to ~/Downloads
+  iosMirrorSetMuted: 'ios-mirror:set-muted', // mute/unmute the device audio played on this Mac
+  iosMirrorGetMuted: 'ios-mirror:get-muted', // read the mute preference (survives remounts)
   iosMirrorH264: 'ios-mirror:h264', // event: raw Annex-B H.264 bytes (main -> renderer)
   iosMirrorState: 'ios-mirror:state', // event: status message
   iosMirrorFailed: 'ios-mirror:failed', // event: feed could not produce frames

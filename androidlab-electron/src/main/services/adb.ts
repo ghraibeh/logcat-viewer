@@ -142,7 +142,9 @@ export async function listDevices(adb: string): Promise<Device[]> {
       description,
       online,
       label: deviceLabel(serial, description, online) + stateSuffix,
-      platform: 'android'
+      platform: 'android',
+      // Wireless-adb devices connect by ip:port serial; USB serials have no colon.
+      transports: [serial.includes(':') ? 'wifi' : 'usb']
     })
   }
   return devices

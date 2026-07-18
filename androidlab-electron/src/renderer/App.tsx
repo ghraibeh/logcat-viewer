@@ -27,6 +27,7 @@ import { NetworkView } from './components/NetworkView'
 import { tabSupported } from '@shared/capabilities'
 import { MirrorDock } from './components/MirrorDock'
 import { IosMirrorDock } from './components/IosMirrorDock'
+import { NoDeviceView } from './components/NoDeviceView'
 import { StatusBar } from './components/StatusBar'
 import { AboutDialog } from './components/AboutDialog'
 import { MessageBox, PromptDialog, Toast, type MessageBoxSpec } from './components/dialogs'
@@ -75,6 +76,11 @@ export default function App() {
   const [mirrorMode, setMirrorMode] = useState<'closed' | 'docked' | 'popped'>('closed')
   const mirrorModeRef = useRef(mirrorMode)
   mirrorModeRef.current = mirrorMode
+  // Standalone AirPlay receiver: when on, the docked mirror is the receiver (any phone
+  // on the network can mirror to "AndroidLab"), independent of the selected device.
+  const [airplayReceiver, setAirplayReceiver] = useState(false)
+  const airplayReceiverRef = useRef(airplayReceiver)
+  airplayReceiverRef.current = airplayReceiver
   const [mirrorWidth, setMirrorWidth] = useState(360)
   const [secondaryReq, setSecondaryReq] = useState(0)
   const [leakReq, setLeakReq] = useState<{ serial: string; pkg: string } | null>(null)
@@ -357,6 +363,13 @@ export default function App() {
   // Toolbar button: closed → docked; anything open → fully closed (also closes
   // the popout window, no re-dock).
   const toggleMirror = useCallback(() => {
+    // If the receiver is currently occupying the dock, switch it to the device mirror
+    // (keep it open) rather than closing.
+    if (airplayReceiverRef.current) {
+      setAirplayReceiver(false)
+      setMirrorMode('docked')
+      return
+    }
     if (mirrorModeRef.current === 'closed') {
       setMirrorMode('docked')
     } else {
@@ -365,11 +378,25 @@ export default function App() {
     }
   }, [])
 
+  // Top-bar AirPlay button: toggle the standalone receiver. Opening shows the docked
+  // receiver (waiting for a phone to pick "AndroidLab"); closing tears it down.
+  const toggleAirplayReceiver = useCallback(() => {
+    if (airplayReceiverRef.current) {
+      setAirplayReceiver(false)
+      setMirrorMode('closed')
+    } else {
+      // Taking over the dock from a device mirror popout: close that window first.
+      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
+      setAirplayReceiver(true)
+      setMirrorMode('docked')
+    }
+  }, [])
+
   // Detach the docked mirror into its own OS window (Android Studio-style).
   const popOutMirror = useCallback(() => {
-    void window.androidlab.mirror.openPopout({ serial: c.serial, platform: c.platform })
+    void window.androidlab.mirror.openPopout({ serial: c.serial, platform: c.platform, connection: c.connection })
     setMirrorMode('popped')
-  }, [c.serial, c.platform])
+  }, [c.serial, c.platform, c.connection])
 
   // The popout window was closed (native X or its dock-back button) → re-dock.
   useEffect(() => window.androidlab.mirror.onPopoutClosed(() => setMirrorMode('docked')), [])
@@ -387,9 +414,9 @@ export default function App() {
   // Keep the popout tracking the currently-selected device.
   useEffect(() => {
     if (mirrorMode === 'popped') {
-      void window.androidlab.mirror.updatePopout({ serial: c.serial, platform: c.platform })
+      void window.androidlab.mirror.updatePopout({ serial: c.serial, platform: c.platform, connection: c.connection })
     }
-  }, [mirrorMode, c.serial, c.platform])
+  }, [mirrorMode, c.serial, c.platform, c.connection])
 
   // Context-menu target computation (mirrors _show_table_menu).
   const ctxTarget = (() => {
@@ -416,22 +443,28 @@ export default function App() {
         c={c}
         onAbout={() => setAbout(true)}
         onMirror={toggleMirror}
+        onAirplayReceiver={toggleAirplayReceiver}
         onIosInput={() => setIosInputOpen(true)}
         mirrorOpen={mirrorMode !== 'closed'}
+        airplayReceiverOn={airplayReceiver}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
-      <TabBar
-        tabs={TABS.filter((t) => tabSupported(t.id, c.platform)).map((t) =>
-          t.id === 'apps' ? { ...t, badge: appsBadge } : t
-        )}
-        current={tab}
-        onSelect={setTab}
-      />
+      {c.devices.length > 0 ? (
+        <TabBar
+          tabs={TABS.filter((t) => tabSupported(t.id, c.platform)).map((t) =>
+            t.id === 'apps' ? { ...t, badge: appsBadge } : t
+          )}
+          current={tab}
+          onSelect={setTab}
+        />
+      ) : null}
 
       <div className="main-row">
       <div className="main-content">
-      {tab === 'deviceinfo' ? (
+      {c.devices.length === 0 ? (
+        <NoDeviceView c={c} airplayOn={airplayReceiver} onAirplay={toggleAirplayReceiver} />
+      ) : tab === 'deviceinfo' ? (
         <DeviceInfoView c={c} />
       ) : tab === 'logs' ? (
         <div className="logs-tab">
@@ -521,9 +554,26 @@ export default function App() {
         <>
           <div className="mirror-splitter" onMouseDown={onMirrorSplitterDown} />
           <div className="mirror-dock-holder" style={{ width: mirrorWidth, display: 'flex' }}>
-            {c.platform === 'ios' ? (
+            {airplayReceiver ? (
+              <IosMirrorDock
+                receiver
+                serial={null}
+                onClose={() => {
+                  setAirplayReceiver(false)
+                  setMirrorMode('closed')
+                }}
+                onCaptured={(r) =>
+                  r.ok
+                    ? setMsgBox({ title: 'Capture saved', body: `✓  ${r.message}`, dir: r.dir })
+                    : r.message !== 'cancelled'
+                      ? showToast(`✗ ${r.message}`)
+                      : undefined
+                }
+              />
+            ) : c.platform === 'ios' ? (
               <IosMirrorDock
                 serial={c.serial}
+                connection={c.connection}
                 onClose={() => setMirrorMode('closed')}
                 onPopout={popOutMirror}
                 onCaptured={(r) =>
@@ -618,6 +668,7 @@ export default function App() {
       {iosInputOpen ? (
         <IosInputSettingsModal serial={c.serial} isIos={c.platform === 'ios'} onClose={() => setIosInputOpen(false)} />
       ) : null}
+
 
       {about ? <AboutDialog onClose={() => setAbout(false)} /> : null}
       {msgBox ? <MessageBox spec={msgBox} onClose={() => setMsgBox(null)} /> : null}
