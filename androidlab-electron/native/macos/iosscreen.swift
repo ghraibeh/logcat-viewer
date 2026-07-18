@@ -187,12 +187,16 @@ final class FrameHandler: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
-        // Tag the stream as BT.709 so the WebCodecs decoder does the right YCbCr->RGB
-        // conversion. Without explicit color info the SPS carries no VUI, the decoder
-        // guesses, and the picture comes out washed-out / milky (raised blacks, low
-        // contrast). VideoToolbox converts the P3 screen buffers into this space.
+        // Tag the stream to match the capture buffers EXACTLY (709 primaries, sRGB
+        // transfer, 709 matrix — what the screen daemon attaches to its 420v frames)
+        // so VideoToolbox does no color conversion and the VUI tells the truth.
+        // Without explicit color info the SPS carries no VUI and the decoder guesses;
+        // tagging transfer as ITU_R_709_2 instead makes VT gamma-convert sRGB->709
+        // (midtones drop ~10%: sRGB 128 encodes to 115) and Chromium then paints the
+        // 709-encoded values as sRGB — a visibly darker, contrastier mirror. VUI
+        // transfer 13 (sRGB) round-trips through WebCodecs untouched.
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ColorPrimaries, value: kCVImageBufferColorPrimaries_ITU_R_709_2)
-        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_TransferFunction, value: kCVImageBufferTransferFunction_ITU_R_709_2)
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_TransferFunction, value: kCVImageBufferTransferFunction_sRGB)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_YCbCrMatrix, value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: 8_000_000 as CFNumber)
@@ -229,6 +233,18 @@ func startCapture(_ device: AVCaptureDevice) {
         exit(3)
     }
     let output = AVCaptureVideoDataOutput()
+    // Request 420v (bi-planar video-range) instead of the device's native 2vuy.
+    // The iOS screen device's raw 2vuy is NOT standard video range: measured against
+    // `ios screenshot` ground truth, its luma is full-range + 16 (clamped at 235) and
+    // its chroma is full-range — an off-spec conversion QuickTime compensates for
+    // internally. Encoding those planes as-is and letting a spec-compliant decoder
+    // expand 16-235 -> 0-255 lifts the whole picture ~16% and clips every highlight
+    // above ~86% signal to white (washed-out mirror, pastels turn white). Asking
+    // AVFoundation for 420v routes frames through the daemon's own converter, which
+    // undoes its convention correctly (verified: gray N -> Y = 16 + 219*N/255 exactly),
+    // and 420v is also the H.264 encoder's native input so VT passes planes through.
+    output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String:
+                                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
     let handler = FrameHandler()
     output.setSampleBufferDelegate(handler, queue: DispatchQueue(label: "capture"))
     output.alwaysDiscardsLateVideoFrames = true
