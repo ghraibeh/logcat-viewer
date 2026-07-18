@@ -1096,6 +1096,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return await goios.listApps(bin, udid)
   })
 
+  ipcMain.handle(IPC.iosAppIcon, async (_e, udid: string, bundleId: string) => {
+    const bin = goios.findGoIos()
+    if (!bin || !udid || !bundleId) return { dataUrl: null, unavailable: false }
+    return await goios.appIcon(bin, udid, bundleId)
+  })
+
   ipcMain.handle(IPC.iosChooseIpa, async () => {
     const win = getWindow()
     if (!win) return null
@@ -1189,7 +1195,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     (_e, udid: string, mode?: 'usb' | 'airplay', resolution?: { width: number; height: number }) => {
       if (mode === 'airplay') {
         // Wi-Fi path: the phone initiates. Tear down the USB feed and advertise the
-        // receiver (no udid needed — the user picks "AndroidLab" on the device).
+        // receiver (no udid needed — the user picks "MobileLabKit" on the device).
         iosMirrorSvc?.stopFeed(true)
         ensureIosAirplay().start(resolution)
         return true

@@ -181,6 +181,15 @@ describe('command builders', () => {
     expect(G.uninstallArgs('U', 'com.example.zeta')).toEqual(['uninstall', 'com.example.zeta', '--udid', 'U'])
   })
 
+  it('builds get-app-icon argv', () => {
+    expect(G.iconArgs('U', 'com.example.zeta')).toEqual([
+      'get-app-icon',
+      '--bundleid=com.example.zeta',
+      '--udid',
+      'U'
+    ])
+  })
+
   it('builds developer-tier argv (ps / launch / kill / tunnel)', () => {
     expect(G.psArgs('U')).toEqual(['ps', '--udid', 'U'])
     expect(G.psArgs('U', true)).toEqual(['ps', '--apps', '--udid', 'U'])
@@ -190,6 +199,24 @@ describe('command builders', () => {
     // No --udid: one agent manages tunnels for every connected device.
     expect(G.tunnelStartArgs()).toEqual(['tunnel', 'start', '--userspace'])
     expect(G.tunnelLsArgs()).toEqual(['tunnel', 'ls'])
+  })
+})
+
+describe('parseAppIconDataUrl', () => {
+  it('turns get-app-icon JSON into a data URL', () => {
+    const out = '{"bundleId":"com.example.zeta","pngData":"iVBORw0KGgo="}'
+    expect(G.parseAppIconDataUrl(out)).toBe('data:image/png;base64,iVBORw0KGgo=')
+  })
+
+  it('tolerates go-ios log lines prepended to the JSON', () => {
+    const out = `time=2026 level=INFO msg="connecting"\n{"bundleId":"com.x","pngData":"QUJD"}`
+    expect(G.parseAppIconDataUrl(out)).toBe('data:image/png;base64,QUJD')
+  })
+
+  it('returns null when there is no pngData', () => {
+    expect(G.parseAppIconDataUrl('{"bundleId":"com.x","pngData":""}')).toBeNull()
+    expect(G.parseAppIconDataUrl('')).toBeNull()
+    expect(G.parseAppIconDataUrl('boom: could not connect')).toBeNull()
   })
 })
 
@@ -368,13 +395,13 @@ describe('configuration-profile helpers (CA delivery)', () => {
     const out = JSON.stringify([
       {
         Identifier: 'com.androidlabkit.ca',
-        Metadata: { PayloadDisplayName: 'AndroidLabKit CA' }
+        Metadata: { PayloadDisplayName: 'MobileLabKit CA' }
       },
       { Identifier: 'other.profile', Metadata: { PayloadDisplayName: 'Other' } }
     ])
     const rows = G.parseProfileList(out)
     expect(rows).toEqual([
-      { identifier: 'com.androidlabkit.ca', displayName: 'AndroidLabKit CA' },
+      { identifier: 'com.androidlabkit.ca', displayName: 'MobileLabKit CA' },
       { identifier: 'other.profile', displayName: 'Other' }
     ])
   })

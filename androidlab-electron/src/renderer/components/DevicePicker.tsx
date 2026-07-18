@@ -5,7 +5,7 @@
  * use. Single-transport devices collapse to one clickable row.
  */
 import { useEffect, useRef, useState } from 'react'
-import type { Device, Transport } from '@shared/types'
+import type { Device, Platform, Transport } from '@shared/types'
 import { Icon } from './Icon'
 
 const TRANSPORT_LABEL: Record<Transport, string> = { usb: 'USB', wifi: 'Wi-Fi' }
@@ -16,6 +16,17 @@ function TransportTag({ t }: { t: Transport }) {
     <span className={`dp-tag dp-tag-${t}`}>
       <Icon name={TRANSPORT_ICON[t]} size={12} />
       {TRANSPORT_LABEL[t]}
+    </span>
+  )
+}
+
+// Platform badge: an Apple logo for iOS devices, the Android robot for Android —
+// so the OS is readable at a glance in the picker.
+function PlatformIcon({ platform }: { platform: Platform }) {
+  const isIos = platform === 'ios'
+  return (
+    <span className={`dp-plat dp-plat-${platform}`} title={isIos ? 'Apple / iOS' : 'Android'}>
+      <Icon name={isIos ? 'apple' : 'android'} size={13} />
     </span>
   )
 }
@@ -81,6 +92,7 @@ export function DevicePicker({
           <>
             <TransportTag t={connection} />
             <span className="dp-trigger-label">{selected.label}</span>
+            <PlatformIcon platform={selected.platform} />
           </>
         ) : (
           <span className="dp-trigger-label dp-dim">no devices — is one connected?</span>
@@ -95,7 +107,12 @@ export function DevicePicker({
             const multi = transports.length > 1
             return (
               <div key={d.serial} className="dp-group">
-                {multi ? <div className="dp-devlabel">{d.label}</div> : null}
+                {multi ? (
+                  <div className="dp-devlabel">
+                    <span className="dp-devlabel-text">{d.label}</span>
+                    <PlatformIcon platform={d.platform} />
+                  </div>
+                ) : null}
                 {transports.map((t) => {
                   const active = d.serial === serial && t === connection
                   return (
@@ -107,6 +124,7 @@ export function DevicePicker({
                       <TransportTag t={t} />
                       <span className="dp-row-label">{multi ? TRANSPORT_LABEL[t] : d.label}</span>
                       {active ? <Icon name="check" size={14} /> : null}
+                      {multi ? null : <PlatformIcon platform={d.platform} />}
                     </button>
                   )
                 })}

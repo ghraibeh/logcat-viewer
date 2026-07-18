@@ -39,7 +39,7 @@ function buildScene(c: Controller, onOpenLog: () => void): EmptyStateProps {
       title: 'adb not found',
       body: (
         <>
-          AndroidLab needs the Android <b>platform-tools</b>. Install them, then set the{' '}
+          MobileLabKit needs the Android <b>platform-tools</b>. Install them, then set the{' '}
           <b>$ADB</b> environment variable or add <b>adb</b> to your PATH and relaunch. You can still
           open a saved log file in the meantime.
         </>

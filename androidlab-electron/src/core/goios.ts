@@ -287,6 +287,25 @@ export function uninstallArgs(udid: string, bundleId: string): string[] {
   return ['uninstall', bundleId, '--udid', udid]
 }
 
+/** Fetch one app's home-screen icon (patched go-ios `get-app-icon`, classic-tier
+ *  — no developer tunnel). It prints {"bundleId", "pngData": base64}. */
+export function iconArgs(udid: string, bundleId: string): string[] {
+  return ['get-app-icon', `--bundleid=${bundleId}`, '--udid', udid]
+}
+
+/** The `get-app-icon` JSON → a `data:image/png;base64,…` URL, or null when the
+ *  device returned nothing usable. go-ios can prepend structured log lines, so we
+ *  scan every JSON value (jsonValues) and keep the first with a non-empty
+ *  base64 `pngData`. */
+export function parseAppIconDataUrl(stdout: string): string | null {
+  for (const v of jsonValues(stdout)) {
+    if (!isObj(v)) continue
+    const b64 = str(v, 'pngData')
+    if (b64) return `data:image/png;base64,${b64}`
+  }
+  return null
+}
+
 // The iOS Info sub-panel rows: [label, IosAppInfo key]. Mirrors appmgr INFO_ROWS.
 export const IOS_INFO_ROWS: Array<[string, keyof IosAppInfo]> = [
   ['Name', 'name'],
@@ -601,7 +620,7 @@ export function parseFsyncTree(stdout: string): ContainerEntry[] {
 /** The fixed identifier + display name of the CA profile we install (constant so
  *  a re-install replaces rather than duplicates, and removal can target it). */
 export const CA_PROFILE_IDENTIFIER = 'com.androidlabkit.ca'
-export const CA_PROFILE_NAME = 'AndroidLabKit CA'
+export const CA_PROFILE_NAME = 'MobileLabKit CA'
 
 export function profileListArgs(udid: string): string[] {
   return ['profile', 'list', '--udid', udid]
@@ -678,7 +697,7 @@ export function caMobileconfig(derBase64: string): string {
     `  <key>PayloadIdentifier</key><string>${CA_PROFILE_IDENTIFIER}</string>`,
     `  <key>PayloadUUID</key><string>${ROOT_UUID}</string>`,
     `  <key>PayloadDisplayName</key><string>${CA_PROFILE_NAME}</string>`,
-    '  <key>PayloadDescription</key><string>Installs the AndroidLabKit HTTPS-decryption certificate for network inspection.</string>',
+    '  <key>PayloadDescription</key><string>Installs the MobileLabKit HTTPS-decryption certificate for network inspection.</string>',
     '  <key>PayloadRemovalDisallowed</key><false/>',
     '</dict>',
     '</plist>',

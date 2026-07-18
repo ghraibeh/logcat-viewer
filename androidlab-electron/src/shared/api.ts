@@ -328,6 +328,10 @@ export interface AndroidLabApi {
      *  null when offline / no render exists. */
     deviceImage(identifier: string): Promise<IosDeviceRender>
     listApps(udid: string): Promise<IosAppListResult>
+    /** One app's home-screen icon (masked PNG from com.apple.springboardservices,
+     *  classic-tier). `dataUrl` is null when unavailable; the caller keeps its
+     *  drawn-tile placeholder. */
+    appIcon(udid: string, bundleId: string): Promise<IconResult>
     /** Open a file dialog for a signed .ipa; returns its path or null. */
     chooseIpa(): Promise<string | null>
     install(udid: string, ipaPath: string): Promise<AppActionResult>
@@ -352,7 +356,7 @@ export interface AndroidLabApi {
    *  AirPlay-mirrors over Wi-Fi to a bundled receiver. USB is the default. */
   iosMirror: {
     /** Begin a feed. `mode` 'usb' (default, needs the cabled `udid`) or 'airplay'
-     *  (Wi-Fi; the user picks "AndroidLab" in Control Center on the phone).
+     *  (Wi-Fi; the user picks "MobileLabKit" in Control Center on the phone).
      *  `resolution` (AirPlay only) sets the advertised display size the phone mirrors
      *  at — larger is sharper. Ignored on the USB path (always native resolution). */
     start(

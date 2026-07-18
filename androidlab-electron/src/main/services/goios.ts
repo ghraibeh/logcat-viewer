@@ -10,7 +10,7 @@
  * All device work happens in the main process; the renderer only sees JSON.
  */
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, join } from 'node:path'
@@ -32,9 +32,11 @@ import {
   imageAutoArgs,
   imageIsMounted,
   imageListArgs,
+  iconArgs,
   infoArgs,
   installArgs,
   ipArgs,
+  parseAppIconDataUrl,
   killArgs,
   launchArgs,
   listArgs,
@@ -65,6 +67,7 @@ import type {
   AppActionResult,
   CrashScanResult,
   Device,
+  IconResult,
   IosAppListResult,
   IosProcessListResult,
   MockResult,
@@ -240,6 +243,45 @@ export async function listApps(bin: string, udid: string): Promise<IosAppListRes
     return { ok: false, apps: [], error: lastLine(r.stderr, r.stdout, 'No apps returned') }
   }
   return { ok: true, apps, error: '' }
+}
+
+/** One app's home-screen icon as a data URL (patched go-ios `get-app-icon` over
+ *  com.apple.springboardservices — classic-tier, no developer tunnel). Returns
+ *  the drawn-tile fallback signal ({dataUrl:null}) on any error so the renderer
+ *  just keeps its placeholder. `unavailable` is unused on iOS (the service is
+ *  always present) but kept for a shared IconResult shape with Android. */
+export async function appIcon(bin: string, udid: string, bundleId: string): Promise<IconResult> {
+  // Serve from the on-disk cache when present — an icon is then fetched from the
+  // device (one go-ios/springboardservices subprocess) at most once, and stays
+  // instant across reloads, tab switches, and app restarts.
+  const file = iconCacheFile(udid, bundleId)
+  if (existsSync(file)) {
+    try {
+      return { dataUrl: `data:image/png;base64,${readFileSync(file).toString('base64')}`, unavailable: false }
+    } catch {
+      /* unreadable cache entry — fall through and refetch */
+    }
+  }
+  const r = await run(bin, iconArgs(udid, bundleId), 15000).catch(() => ({ stdout: '', stderr: '' }) as never)
+  const dataUrl = parseAppIconDataUrl(r.stdout)
+  if (dataUrl) {
+    const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
+    try {
+      writeFileSync(file, Buffer.from(b64, 'base64'))
+    } catch {
+      /* cache is best-effort */
+    }
+  }
+  return { dataUrl, unavailable: false }
+}
+
+/** Per-user on-disk icon cache path, keyed by udid + bundle id. Segments are
+ *  sanitised so a bundle id can't escape the cache directory. */
+function iconCacheFile(udid: string, bundleId: string): string {
+  const safe = (s: string): string => s.replace(/[^\w.-]/g, '_')
+  const dir = join(app.getPath('userData'), 'ios-app-icons', safe(udid))
+  mkdirSync(dir, { recursive: true })
+  return join(dir, `${safe(bundleId)}.png`)
 }
 
 /** Install a signed .ipa (`ios install --path=`). */
@@ -420,6 +462,15 @@ function spawnAgent(bin: string): AppActionResult {
     // over Wi-Fi (a "Network" usbmux device) — upstream skips those. This makes
     // dev-tier features (process control, MJPEG mirror, monitor, mock location)
     // work cable-free, matching the auto-switch-to-Wi-Fi flow. Verified on-device.
+    //
+    // NOTE: RemotePairing Wi-Fi discovery (GOIOS_WIFI_PAIRING) is intentionally
+    // NOT enabled here. It works (the agent can tunnel a device usbmux hasn't
+    // surfaced), but that tunnel is dev-tier only — classic-tier lockdown (Info/
+    // Apps/Files) does not route over it — so a device shown via that path has a
+    // broken Info tab, and it toggles with usbmux's flaky Network entry, causing
+    // connect/disconnect churn. The full-function Wi-Fi path is usbmux "Network"
+    // (reached cable-free via GOIOS_NETWORK_TUNNEL). Re-enable only once classic-
+    // tier is routed over the RemotePairing RSD tunnel. See goios-androidlab.patch.
     const child = spawn(bin, tunnelStartArgs(), {
       stdio: ['ignore', 'ignore', 'pipe'],
       env: { ...process.env, GOIOS_NETWORK_TUNNEL: '1' }

@@ -11,9 +11,10 @@
  *
  * All device work happens here in the main process; the renderer only sees JSON.
  */
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
+import { app } from 'electron'
 import { run, runBinary } from './adb'
 import {
   appopsGetArgs,
@@ -65,6 +66,16 @@ function lastLine(stderr: string, stdout: string, fallback: string): string {
 function downloadsDir(): string {
   const d = join(homedir(), 'Downloads')
   return existsSync(d) ? d : homedir()
+}
+
+/** Per-user on-disk APK-icon cache path, keyed by serial + package. The stored
+ *  file is the full `data:<mime>;base64,…` URL so its mime survives. Segments are
+ *  sanitised so a package name can't escape the cache directory. */
+function iconCacheFile(serial: string, pkg: string): string {
+  const safe = (s: string): string => s.replace(/[^\w.-]/g, '_')
+  const dir = join(app.getPath('userData'), 'android-app-icons', safe(serial))
+  mkdirSync(dir, { recursive: true })
+  return join(dir, `${safe(pkg)}.dataurl`)
 }
 
 /** Sniff a raster image's mime from magic bytes (icons are png/webp). */
@@ -180,8 +191,20 @@ export class AppMgrService {
   }
 
   // --- app icon (AppIconWorker) -----------------------------------------------
-  async icon(serial: string, _pkg: string, apkPath: string): Promise<IconResult> {
+  async icon(serial: string, pkg: string, apkPath: string): Promise<IconResult> {
     if (!apkPath) return { dataUrl: null, unavailable: false }
+    // Serve from the on-disk cache — an icon is unzipped out of its APK (an adb
+    // round-trip) at most once and then stays instant across reloads, tab
+    // switches, and app restarts.
+    const cacheFile = iconCacheFile(serial, pkg)
+    if (existsSync(cacheFile)) {
+      try {
+        const dataUrl = readFileSync(cacheFile, 'utf8')
+        if (dataUrl.startsWith('data:')) return { dataUrl, unavailable: false }
+      } catch {
+        /* unreadable cache entry — fall through and re-extract */
+      }
+    }
     const listing = await run(this.adb, null, unzipListArgs(serial, apkPath), 15000)
     if (listing.code !== 0) {
       const err = (listing.stderr || '').toLowerCase()
@@ -193,7 +216,13 @@ export class AppMgrService {
     const blob = await runBinary(this.adb, unzipExtractArgs(serial, apkPath, entry), 20000)
     const mime = imageMime(blob.stdout)
     if (!mime) return { dataUrl: null, unavailable: false }
-    return { dataUrl: `data:${mime};base64,${blob.stdout.toString('base64')}`, unavailable: false }
+    const dataUrl = `data:${mime};base64,${blob.stdout.toString('base64')}`
+    try {
+      writeFileSync(cacheFile, dataUrl)
+    } catch {
+      /* cache is best-effort */
+    }
+    return { dataUrl, unavailable: false }
   }
 
   // --- extract APK (PullWorker) -----------------------------------------------

@@ -170,6 +170,7 @@ export const IPC = {
   iosDeviceIp: 'ios:device-ip',
   iosDeviceImage: 'ios:device-image',
   iosListApps: 'ios:list-apps',
+  iosAppIcon: 'ios:app-icon',
   iosChooseIpa: 'ios:choose-ipa',
   iosInstall: 'ios:install',
   iosUninstall: 'ios:uninstall',

@@ -541,7 +541,7 @@ export function NetworkView({ c }: { c: Controller }) {
           className="net-toggle"
           title={
             isIos
-              ? 'Send the AndroidLab CA to the iPhone as a profile (then approve + trust it in Settings)'
+              ? 'Send the MobileLabKit CA to the iPhone as a profile (then approve + trust it in Settings)'
               : 'Push the CA cert to the device to install it'
           }
           onClick={installCert}

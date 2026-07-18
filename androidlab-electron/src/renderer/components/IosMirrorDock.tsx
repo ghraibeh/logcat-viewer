@@ -388,7 +388,7 @@ export function IosMirrorDock({
   popped?: boolean
   /** Standalone AirPlay-receiver mode (top-bar toggle): always the AirPlay path,
    *  independent of any selected device — the USB toggle is hidden and no serial is
-   *  needed. Any phone that picks "AndroidLab" on the network shows up here. */
+   *  needed. Any phone that picks "MobileLabKit" on the network shows up here. */
   receiver?: boolean
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -873,7 +873,7 @@ export function IosMirrorDock({
             title={
               mode === 'airplay'
                 ? 'AirPlay (Wi-Fi) — click for USB capture'
-                : 'Mirror over Wi-Fi via AirPlay (view-only; the phone connects to “AndroidLab”)'
+                : 'Mirror over Wi-Fi via AirPlay (view-only; the phone connects to “MobileLabKit”)'
             }
             onClick={() => setMode((m) => (m === 'airplay' ? 'usb' : 'airplay'))}
           >

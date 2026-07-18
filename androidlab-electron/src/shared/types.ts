@@ -119,7 +119,7 @@ export interface MirrorPopoutInfo {
    *  for a Wi-Fi-only device) as the docked view. */
   connection?: 'usb' | 'wifi'
   /** Standalone AirPlay-receiver mode (top-bar toggle) — the popped window mirrors
-   *  any phone that picks "AndroidLab", independent of the selected device. */
+   *  any phone that picks "MobileLabKit", independent of the selected device. */
   receiver?: boolean
 }
 

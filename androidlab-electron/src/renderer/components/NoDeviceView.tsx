@@ -47,8 +47,8 @@ export function NoDeviceView({
         </button>
         <div className="no-device-hint">
           {airplayOn
-            ? 'On your iPhone, open Control Center ▸ Screen Mirroring and pick “AndroidLab”. Its screen appears in the mirror panel.'
-            : 'No cable needed — any iPhone on this network can mirror to AndroidLab.'}
+            ? 'On your iPhone, open Control Center ▸ Screen Mirroring and pick “MobileLabKit”. Its screen appears in the mirror panel.'
+            : 'No cable needed — any iPhone on this network can mirror to MobileLabKit.'}
         </div>
       </div>
     </div>

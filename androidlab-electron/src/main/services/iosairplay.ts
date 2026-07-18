@@ -4,7 +4,7 @@
  *
  * Here the phone initiates: a bundled native receiver (`resources/airplayscreen`,
  * built from native/macos/airplay/* — the vendored RPiPlay core, GPL-3.0) advertises
- * "AndroidLab" over Bonjour and runs the AirPlay/FairPlay handshake. When the user
+ * "MobileLabKit" over Bonjour and runs the AirPlay/FairPlay handshake. When the user
  * picks it in Control Center ▸ Screen Mirroring, the receiver decrypts the mirror
  * stream and writes **Annex-B H.264** to stdout — byte-for-byte what iosscreen emits,
  * so the renderer's existing WebCodecs decoder handles both paths identically. This
@@ -35,7 +35,7 @@ export interface IosAirplayCallbacks {
 }
 
 /** The Bonjour name the receiver advertises — what the user taps on the phone. */
-export const AIRPLAY_NAME = 'AndroidLab'
+export const AIRPLAY_NAME = 'MobileLabKit'
 
 /** Advertised AirPlay display resolution (the phone mirrors at up to this). */
 export interface AirplayResolution {
@@ -47,7 +47,7 @@ const DEFAULT_RES: AirplayResolution = { width: 1920, height: 1080 }
 // A dock<->popout move unmounts the old dock (stop, grace) then mounts the new one
 // (start) a beat later. Deferring teardown lets the follow-up start cancel it, so the
 // AirPlay receiver keeps running across the hand-off — the phone stays connected
-// instead of being dropped and forced to re-pick "AndroidLab". Mirrors iosmirror.ts.
+// instead of being dropped and forced to re-pick "MobileLabKit". Mirrors iosmirror.ts.
 const HANDOFF_GRACE_MS = 3000
 
 export class IosAirplayService {
@@ -211,7 +211,7 @@ export class IosAirplayService {
         if (t) console.error(`[airplayscreen] ${t}`)
       }
       // The receiver logs a disconnect when the phone stops mirroring — fall back to
-      // the waiting state so the dock re-shows the "pick AndroidLab" hint.
+      // the waiting state so the dock re-shows the "pick MobileLabKit" hint.
       if (token === this.runToken && /client disconnected/i.test(text)) {
         this.gotData = false
         this.cb.onState({

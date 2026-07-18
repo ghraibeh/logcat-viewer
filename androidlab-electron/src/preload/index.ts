@@ -210,6 +210,7 @@ const api: AndroidLabApi = {
     deviceIp: (udid) => ipcRenderer.invoke(IPC.iosDeviceIp, udid),
     deviceImage: (identifier) => ipcRenderer.invoke(IPC.iosDeviceImage, identifier),
     listApps: (udid) => ipcRenderer.invoke(IPC.iosListApps, udid),
+    appIcon: (udid, bundleId) => ipcRenderer.invoke(IPC.iosAppIcon, udid, bundleId),
     chooseIpa: () => ipcRenderer.invoke(IPC.iosChooseIpa),
     install: (udid, ipaPath) => ipcRenderer.invoke(IPC.iosInstall, udid, ipaPath),
     uninstall: (udid, bundleId) => ipcRenderer.invoke(IPC.iosUninstall, udid, bundleId),

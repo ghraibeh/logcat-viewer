@@ -8,11 +8,11 @@ import { registerIpc } from './ipc'
 import { buildAppMenu } from './menu'
 import { IPC } from '@shared/ipc'
 
-// app.name drives the app-support dir (~/Library/Application Support/AndroidLabKit)
+// app.name drives the app-support dir (~/Library/Application Support/MobileLabKit)
 // and the menu-bar / dock name on macOS.
-app.setName('AndroidLabKit')
+app.setName('MobileLabKit')
 app.setAboutPanelOptions({
-  applicationName: 'AndroidLabKit',
+  applicationName: 'MobileLabKit',
   applicationVersion: app.getVersion(),
   copyright: 'Copyright © 2026 Mahmoud Alghraibeh'
 })
@@ -34,7 +34,7 @@ function createWindow(): void {
     minHeight: 560,
     show: false,
     backgroundColor: '#16171c',
-    title: 'AndroidLabKit',
+    title: 'MobileLabKit',
     icon: iconPath,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {

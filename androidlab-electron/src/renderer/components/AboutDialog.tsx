@@ -16,7 +16,7 @@ const FEATURES: Array<[string, string, string]> = [
   ['#f25a52', 'App manager', 'Permissions, components, app-ops, APK decompile']
 ]
 
-/** The AndroidLabKit app icon (matches build/icon.png), drawn inline as SVG so it
+/** The MobileLabKit app icon (matches build/icon.png), drawn inline as SVG so it
  *  stays crisp at any size and needs no bundled asset. */
 function Logo() {
   return (
@@ -59,7 +59,7 @@ export function AboutDialog({ onClose }: { onClose: () => void }) {
         <div className="about-logo">
           <Logo />
         </div>
-        <div className="about-name">AndroidLabKit</div>
+        <div className="about-name">MobileLabKit</div>
         <div className="about-version">Version {VERSION}</div>
         <div className="about-tagline">{TAGLINE}</div>
         <div className="about-sep" />

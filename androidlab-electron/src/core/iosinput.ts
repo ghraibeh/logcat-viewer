@@ -93,7 +93,7 @@ export function provisionArgs(
   s: IosSigning,
   p12Out: string,
   profileOut: string,
-  profileName = 'AndroidLabKit UI Agent'
+  profileName = 'MobileLabKit UI Agent'
 ): string[] {
   return [
     'sign',

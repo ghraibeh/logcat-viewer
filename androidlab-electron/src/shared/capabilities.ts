@@ -1,5 +1,5 @@
 /**
- * Per-platform feature gating. AndroidLab's tabs were all built on adb's deep
+ * Per-platform feature gating. MobileLabKit's tabs were all built on adb's deep
  * `shell` access; iOS reaches devices through go-ios's fixed set of lockdown
  * services, so most tabs have no iOS equivalent (yet). Rather than scatter
  * `platform === 'ios'` checks through the UI, the renderer consults this map to

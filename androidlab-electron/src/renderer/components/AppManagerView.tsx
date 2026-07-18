@@ -62,12 +62,21 @@ export interface AppManagerViewProps {
   onMessage: (spec: MessageBoxSpec) => void
 }
 
+type ViewMode = 'list' | 'grid'
+
+// Session-lived APK-icon cache keyed by `${serial}::${pkg}`, shared across every
+// mount of this view so icons survive tab switches / remounts (the main process
+// also caches them on disk). An icon is extracted from its APK at most once.
+const ICON_CACHE = new Map<string, string | null>()
+const iconKey = (serial: string, pkg: string): string => `${serial}::${pkg}`
+
 // --- lazily-loaded APK icon (per-visible-row, bounded pool) -------------------
 function AppRow({
   app,
   selected,
   disabledLook,
   icon,
+  mode,
   register,
   onPick,
   onContext
@@ -76,6 +85,7 @@ function AppRow({
   selected: boolean
   disabledLook: boolean
   icon: string | null | undefined
+  mode: ViewMode
   register: (el: HTMLElement | null, pkg: string, apkPath: string) => () => void
   onPick: () => void
   onContext: (e: React.MouseEvent) => void
@@ -85,15 +95,36 @@ function AppRow({
   const badges: string[] = []
   if (app.system) badges.push('system')
   if (!app.enabled) badges.push('disabled')
+  const title = app.package + (badges.length ? `  (${badges.join(', ')})` : '')
+  const size = mode === 'grid' ? 52 : 30
+  const iconEl = icon ? (
+    <img className="am-item-icon" src={icon} alt="" width={size} height={size} />
+  ) : (
+    <AppIcon pkg={app.package} size={size} />
+  )
+  if (mode === 'grid') {
+    return (
+      <div
+        ref={ref}
+        className={`am-tile${selected ? ' selected' : ''}${disabledLook ? ' dim' : ''}`}
+        title={title}
+        onClick={onPick}
+        onContextMenu={onContext}
+      >
+        {iconEl}
+        <span className="am-tile-name">{app.package}</span>
+      </div>
+    )
+  }
   return (
     <div
       ref={ref}
       className={`am-item${selected ? ' selected' : ''}${disabledLook ? ' dim' : ''}`}
-      title={app.package + (badges.length ? `  (${badges.join(', ')})` : '')}
+      title={title}
       onClick={onPick}
       onContextMenu={onContext}
     >
-      {icon ? <img className="am-item-icon" src={icon} alt="" width={30} height={30} /> : <AppIcon pkg={app.package} size={30} />}
+      {iconEl}
       <span className="am-item-name">{app.package}</span>
     </div>
   )
@@ -104,6 +135,7 @@ export function AppManagerView({ c, onStatus, onFailed, onMessage }: AppManagerV
   const [countLabel, setCountLabel] = useState('')
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState<Category>('All')
+  const [view, setView] = useState<ViewMode>('grid')
   const [detail, setDetail] = useState<AppDetail | null>(null)
   const [detailMsg, setDetailMsg] = useState('Select an app')
   const [detailNonce, setDetailNonce] = useState(0)
@@ -146,6 +178,7 @@ export function AppManagerView({ c, onStatus, onFailed, onMessage }: AppManagerV
           iconQueue.current = []
           return
         }
+        ICON_CACHE.set(iconKey(s, pkg), res.dataUrl)
         setIcons((prev) => ({ ...prev, [pkg]: res.dataUrl }))
         pump()
       })
@@ -154,8 +187,15 @@ export function AppManagerView({ c, onStatus, onFailed, onMessage }: AppManagerV
 
   const requestIcon = useCallback(
     (pkg: string, apkPath: string) => {
-      if (iconsDisabled.current || !apkPath || iconSeen.current.has(pkg)) return
+      const s = serialRef.current
+      if (!s || iconsDisabled.current || !apkPath || iconSeen.current.has(pkg)) return
       iconSeen.current.add(pkg)
+      // Serve from the session cache with no IPC when we already have it.
+      const cached = ICON_CACHE.get(iconKey(s, pkg))
+      if (cached !== undefined) {
+        if (cached) setIcons((prev) => ({ ...prev, [pkg]: cached }))
+        return
+      }
       iconQueue.current.push({ pkg, apkPath })
       pump()
     },
@@ -216,9 +256,19 @@ export function AppManagerView({ c, onStatus, onFailed, onMessage }: AppManagerV
   }, [onStatus, onFailed])
 
   useEffect(() => {
-    // device changed: icon state is per-device.
-    setIcons({})
-    iconSeen.current.clear()
+    // Device changed: seed icon state from the session cache (instant, no re-fetch)
+    // and reset the per-mount bookkeeping. Icons persist across reloads/remounts.
+    const seed: Record<string, string | null> = {}
+    const seen = new Set<string>()
+    const prefix = `${serial}::`
+    for (const [k, v] of ICON_CACHE) {
+      if (!k.startsWith(prefix)) continue
+      const pkg = k.slice(prefix.length)
+      seen.add(pkg)
+      if (v) seed[pkg] = v
+    }
+    setIcons(seed)
+    iconSeen.current = seen
     iconQueue.current = []
     iconInflight.current = 0
     iconsDisabled.current = false
@@ -256,7 +306,7 @@ export function AppManagerView({ c, onStatus, onFailed, onMessage }: AppManagerV
   // Keep the list scrolled to the externally-selected app.
   useEffect(() => {
     if (!c.appPkg) return
-    listRef.current?.querySelector('.am-item.selected')?.scrollIntoView({ block: 'nearest' })
+    listRef.current?.querySelector('.am-item.selected, .am-tile.selected')?.scrollIntoView({ block: 'nearest' })
   }, [c.appPkg, apps])
 
   // Live-crash: badge the Crashes sub-tab unless it's already open.
@@ -491,7 +541,36 @@ export function AppManagerView({ c, onStatus, onFailed, onMessage }: AppManagerV
       <div className="am-split">
         {/* Left: filter bar + app list. */}
         <div className="am-left">
-          <div className="am-bar">
+          <div className="am-bar am-toolbar">
+            <select value={category} onChange={(e) => setCategory(e.target.value as Category)}>
+              <option>All</option>
+              <option>User</option>
+              <option>System</option>
+              <option>Disabled</option>
+            </select>
+            <span className="am-bar-tools">
+              <button
+                className={`toggle${view === 'list' ? ' active' : ''}`}
+                title="List view"
+                aria-pressed={view === 'list'}
+                onClick={() => setView('list')}
+              >
+                <Icon name="list" size={16} />
+              </button>
+              <button
+                className={`toggle${view === 'grid' ? ' active' : ''}`}
+                title="Grid view"
+                aria-pressed={view === 'grid'}
+                onClick={() => setView('grid')}
+              >
+                <Icon name="grid" size={16} />
+              </button>
+              <button className="toggle" title="Reload the installed-app list" onClick={() => void reload()}>
+                <Icon name="refresh" size={16} />
+              </button>
+            </span>
+          </div>
+          <div className="am-searchrow">
             <input
               className="am-search"
               type="text"
@@ -499,17 +578,8 @@ export function AppManagerView({ c, onStatus, onFailed, onMessage }: AppManagerV
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
-            <select value={category} onChange={(e) => setCategory(e.target.value as Category)}>
-              <option>All</option>
-              <option>User</option>
-              <option>System</option>
-              <option>Disabled</option>
-            </select>
-            <button className="toggle" title="Reload the installed-app list" onClick={() => void reload()}>
-              <Icon name="refresh" size={16} />
-            </button>
           </div>
-          <div className="am-list" ref={listRef}>
+          <div className={view === 'grid' ? 'am-grid' : 'am-list'} ref={listRef}>
             {shown.map((a) => (
               <AppRow
                 key={a.package}
@@ -517,6 +587,7 @@ export function AppManagerView({ c, onStatus, onFailed, onMessage }: AppManagerV
                 selected={a.package === c.appPkg}
                 disabledLook={!a.enabled}
                 icon={icons[a.package]}
+                mode={view}
                 register={registerRow}
                 onPick={() => void c.selectApp(a.package)}
                 onContext={(e) => appListMenu(e, a)}

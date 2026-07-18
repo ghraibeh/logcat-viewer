@@ -36,6 +36,28 @@
   flex: 1;
   min-width: 0;
 }
+/* App-list two-row header (Android App Manager + iOS Apps): controls row
+   (filter + view toggles) on top, a full-width search below it. */
+.am-toolbar {
+  border-bottom: none;
+  padding-bottom: 2px;
+}
+.am-bar-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.am-searchrow {
+  flex: 0 0 auto;
+  padding: 2px 8px 7px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.am-searchrow .am-search {
+  width: 100%;
+  box-sizing: border-box;
+}
 .am-list {
   flex: 1;
   min-height: 0;
@@ -82,6 +104,54 @@
   color: var(--text-dim);
   border-top: 1px solid var(--border);
   background: var(--surface);
+}
+
+/* Grid (large-icon) view — an alternative to .am-list for the same app rows. */
+.am-grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  /* Size each row to its content. Without this, the "auto" rows of a grid that
+     is itself a flex child with a definite (overflowing) height collapse to the
+     name line's height, so the 52px icon overflows the row and gets clipped by
+     the tile's overflow:hidden — the "cropped icons" bug. */
+  grid-auto-rows: min-content;
+  gap: 2px;
+  align-content: start;
+}
+.am-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 4px;
+  border-radius: 10px;
+  cursor: default;
+  color: var(--text);
+  font-size: 11px;
+  text-align: center;
+  overflow: hidden;
+}
+.am-tile:hover {
+  background: var(--surface-2);
+}
+.am-tile.selected {
+  background: var(--select);
+}
+.am-tile.dim .am-tile-name {
+  color: var(--text-dim);
+}
+.am-tile .am-item-icon {
+  border-radius: 12px;
+}
+.am-tile-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .am-right {

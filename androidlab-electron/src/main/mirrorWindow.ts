@@ -57,7 +57,7 @@ export class MirrorWindowManager {
       minHeight: 480,
       show: false,
       backgroundColor: '#16171c',
-      title: 'Screen Mirror — AndroidLabKit',
+      title: 'Screen Mirror — MobileLabKit',
       icon: iconPath,
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
       webPreferences: {

@@ -249,6 +249,13 @@ button.toggle.checked {
   color: #fff;
   font-weight: 600;
 }
+/* Subtle "selected segment" state (e.g. a list/grid view switcher) — reads as
+   pressed without the full accent fill of .checked. */
+button.toggle.active {
+  background: var(--surface-2);
+  border-color: var(--accent);
+  color: var(--text);
+}
 
 button.pause.checked {
   background: var(--amber);

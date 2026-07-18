@@ -124,15 +124,15 @@ export class IosWiring implements DeviceWiring {
   }
 }
 
-/** Remove the AndroidLab CA profile from the device (used for cleanup / a UI
+/** Remove the MobileLabKit CA profile from the device (used for cleanup / a UI
  *  "Remove CA" action). Best-effort; returns a user-facing result. */
 export async function removeIosCaProfile(bin: string, udid: string): Promise<CertPushResult> {
   const list = await runGoIos(bin, profileListArgs(udid), 15000)
   const id = findCaProfile(list.stdout || list.stderr)
-  if (!id) return { ok: true, message: 'No AndroidLab CA profile installed', dir: '' }
+  if (!id) return { ok: true, message: 'No MobileLabKit CA profile installed', dir: '' }
   const r = await runGoIos(bin, profileRemoveArgs(udid, id), 20000)
   if (r.code !== 0) {
     return { ok: false, message: `Couldn't remove the CA profile: ${lastLine(r.stderr, r.stdout, 'profile remove failed')}`, dir: '' }
   }
-  return { ok: true, message: 'Removed the AndroidLab CA profile', dir: '' }
+  return { ok: true, message: 'Removed the MobileLabKit CA profile', dir: '' }
 }

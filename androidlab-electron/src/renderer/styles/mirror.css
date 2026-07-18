@@ -235,7 +235,7 @@
 }
 
 /* AirPlay (Wi-Fi) "waiting for the phone to connect" card — the receiver is
-   advertised; the user picks "AndroidLab" on the device. A gently pulsing AirPlay
+   advertised; the user picks "MobileLabKit" on the device. A gently pulsing AirPlay
    glyph signals "ready and waiting" rather than "working" (no spinner). */
 .ios-airplay-wait {
   color: var(--accent);

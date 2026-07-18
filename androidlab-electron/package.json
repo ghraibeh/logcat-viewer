@@ -1,7 +1,7 @@
 {
   "name": "androidlabkit",
   "version": "0.1.0",
-  "description": "AndroidLabKit — live adb logcat viewer and device toolkit (Electron)",
+  "description": "MobileLabKit — live adb logcat viewer and device toolkit (Electron)",
   "author": "Mahmoud Alghraibeh <M.Ghraibeh@penguinin.com>",
   "license": "MIT",
   "main": "./out/main/index.js",

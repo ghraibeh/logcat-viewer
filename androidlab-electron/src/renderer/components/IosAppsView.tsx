@@ -10,7 +10,7 @@
  * (the app's NS*UsageDescription Info.plist strings) in place of Android's
  * runtime permissions.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Controller } from '../state/useAppController'
 import type { MessageBoxSpec } from './dialogs'
 import { IOS_INFO_ROWS, type IosAppInfo } from '@core/goios'
@@ -29,6 +29,68 @@ interface Props {
   onMessage: (spec: MessageBoxSpec) => void
 }
 
+type ViewMode = 'list' | 'grid'
+
+// Session-lived icon cache keyed by `${serial}::${bundleId}`, shared across every
+// mount of this view. It survives tab switches / remounts and the main process
+// also caches icons on disk, so an icon is fetched from the device at most once
+// and never re-loaded on a manual refresh. Only a device unplug/replug (which
+// changes serial keys) or an app relaunch clears it.
+const ICON_CACHE = new Map<string, string | null>()
+const iconKey = (serial: string, bundleId: string): string => `${serial}::${bundleId}`
+
+/** One app entry, rendered as a list row or a grid tile. Either way it registers
+ *  itself with the parent's lazy-icon pool so its real home-screen icon is
+ *  fetched only once it scrolls into view. */
+function IosAppRow({
+  app,
+  selected,
+  icon,
+  mode,
+  register,
+  onPick
+}: {
+  app: IosAppInfo
+  selected: boolean
+  icon: string | null | undefined
+  mode: ViewMode
+  register: (el: HTMLElement | null, bundleId: string) => () => void
+  onPick: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => register(ref.current, app.bundleId), [register, app.bundleId])
+  const size = mode === 'grid' ? 52 : 30
+  const iconEl = icon ? (
+    <img className="am-item-icon" src={icon} alt="" width={size} height={size} />
+  ) : (
+    <AppIcon pkg={app.bundleId} size={size} />
+  )
+  if (mode === 'grid') {
+    return (
+      <div
+        ref={ref}
+        className={`am-tile${selected ? ' selected' : ''}`}
+        onClick={onPick}
+        title={app.bundleId}
+      >
+        {iconEl}
+        <span className="am-tile-name">{app.name}</span>
+      </div>
+    )
+  }
+  return (
+    <div
+      ref={ref}
+      className={`am-item${selected ? ' selected' : ''}`}
+      onClick={onPick}
+      title={app.bundleId}
+    >
+      {iconEl}
+      <span className="am-item-name">{app.name}</span>
+    </div>
+  )
+}
+
 export function IosAppsView({ c, onStatus, onMessage }: Props) {
   const serial = c.serial
   const [apps, setApps] = useState<IosAppInfo[]>([])
@@ -36,6 +98,7 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [kind, setKind] = useState<FilterKind>('user')
+  const [view, setView] = useState<ViewMode>('grid')
   // Selection is the shared app pick (c.appPkg) so the Databases tab + sub-tabs
   // all follow one selection, like Android's AppManagerView.
   const selected = c.appPkg
@@ -46,6 +109,80 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
   const [tunnel, setTunnel] = useState(false)
   const [tunnelBusy, setTunnelBusy] = useState(false)
   const [runningCount, setRunningCount] = useState<number | null>(null)
+
+  // --- real home-screen icons: bounded (3-wide) lazy pool over visible rows.
+  // Each icon is a separate go-ios/springboardservices round-trip, so we fetch
+  // only rows scrolled into view and cap concurrency (mirrors AppManagerView).
+  const [icons, setIcons] = useState<Record<string, string | null>>({})
+  const serialRef = useRef(serial)
+  serialRef.current = serial
+  const observerRef = useRef<IntersectionObserver | null>(null)
+  const rowMeta = useRef(new Map<Element, string>())
+  const iconSeen = useRef(new Set<string>())
+  const iconQueue = useRef<string[]>([])
+  const iconInflight = useRef(0)
+
+  const pump = useCallback(() => {
+    const s = serialRef.current
+    if (!s) return
+    while (iconInflight.current < 3 && iconQueue.current.length > 0) {
+      const bundleId = iconQueue.current.shift() as string
+      iconInflight.current += 1
+      void window.androidlab.ios.appIcon(s, bundleId).then((res) => {
+        iconInflight.current -= 1
+        ICON_CACHE.set(iconKey(s, bundleId), res.dataUrl)
+        setIcons((prev) => ({ ...prev, [bundleId]: res.dataUrl }))
+        pump()
+      })
+    }
+  }, [])
+
+  const requestIcon = useCallback(
+    (bundleId: string) => {
+      const s = serialRef.current
+      if (!s || !bundleId || iconSeen.current.has(bundleId)) return
+      iconSeen.current.add(bundleId)
+      // Serve from the session cache with no IPC when we already have it.
+      const cached = ICON_CACHE.get(iconKey(s, bundleId))
+      if (cached !== undefined) {
+        if (cached) setIcons((prev) => ({ ...prev, [bundleId]: cached }))
+        return
+      }
+      iconQueue.current.push(bundleId)
+      pump()
+    },
+    [pump]
+  )
+
+  const getObserver = useCallback((): IntersectionObserver => {
+    if (!observerRef.current) {
+      observerRef.current = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            if (!e.isIntersecting) continue
+            const bid = rowMeta.current.get(e.target)
+            if (bid) requestIcon(bid)
+          }
+        },
+        { rootMargin: '150px' }
+      )
+    }
+    return observerRef.current
+  }, [requestIcon])
+
+  const registerRow = useCallback(
+    (el: HTMLElement | null, bundleId: string): (() => void) => {
+      if (!el) return () => {}
+      const io = getObserver()
+      rowMeta.current.set(el, bundleId)
+      io.observe(el)
+      return () => {
+        io.unobserve(el)
+        rowMeta.current.delete(el)
+      }
+    },
+    [getObserver]
+  )
 
   const reload = useCallback(async () => {
     if (!serial) {
@@ -61,7 +198,27 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
     setLoading(false)
   }, [serial])
 
-  // Reload on device change.
+  // Seed icon state from the session cache when the device changes (or on mount)
+  // and reset the per-mount request bookkeeping. Cached icons paint instantly
+  // with no device round-trip; only rows we've never fetched load on scroll. A
+  // manual refresh no longer wipes icons — they persist from the cache.
+  useEffect(() => {
+    const seed: Record<string, string | null> = {}
+    const seen = new Set<string>()
+    const prefix = `${serial}::`
+    for (const [k, v] of ICON_CACHE) {
+      if (!k.startsWith(prefix)) continue
+      const bundleId = k.slice(prefix.length)
+      seen.add(bundleId)
+      if (v) seed[bundleId] = v
+    }
+    setIcons(seed)
+    iconSeen.current = seen
+    iconQueue.current = []
+    iconInflight.current = 0
+  }, [serial])
+
+  // Reload the app list on device change.
   useEffect(() => {
     void reload()
   }, [reload])
@@ -134,6 +291,11 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
 
   const current = useMemo(() => filtered.find((a) => a.bundleId === selected) ?? null, [filtered, selected])
 
+  // Prioritise the selected app's icon (the header shows it larger).
+  useEffect(() => {
+    if (current) requestIcon(current.bundleId)
+  }, [current, requestIcon])
+
   const launchApp = useCallback(async () => {
     if (!serial || !current) return
     setBusy(true)
@@ -198,7 +360,35 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
     <div className="am-view">
       <div className="am-split">
         <div className="am-left">
-          <div className="am-bar">
+          <div className="am-bar am-toolbar">
+            <select value={kind} onChange={(e) => setKind(e.target.value as FilterKind)}>
+              <option value="user">User ({counts.user})</option>
+              <option value="system">System ({counts.system})</option>
+              <option value="all">All ({counts.all})</option>
+            </select>
+            <span className="am-bar-tools">
+              <button
+                className={`toggle${view === 'list' ? ' active' : ''}`}
+                title="List view"
+                aria-pressed={view === 'list'}
+                onClick={() => setView('list')}
+              >
+                <Icon name="list" size={16} />
+              </button>
+              <button
+                className={`toggle${view === 'grid' ? ' active' : ''}`}
+                title="Grid view"
+                aria-pressed={view === 'grid'}
+                onClick={() => setView('grid')}
+              >
+                <Icon name="grid" size={16} />
+              </button>
+              <button className="toggle" title="Reload the installed-app list" onClick={() => void reload()}>
+                <Icon name="refresh" size={16} />
+              </button>
+            </span>
+          </div>
+          <div className="am-searchrow">
             <input
               className="am-search"
               type="text"
@@ -206,27 +396,19 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
-            <select value={kind} onChange={(e) => setKind(e.target.value as FilterKind)}>
-              <option value="user">User ({counts.user})</option>
-              <option value="system">System ({counts.system})</option>
-              <option value="all">All ({counts.all})</option>
-            </select>
-            <button className="toggle" title="Reload the installed-app list" onClick={() => void reload()}>
-              <Icon name="refresh" size={16} />
-            </button>
           </div>
           {loading ? <div className="app-panel-busy" /> : null}
-          <div className="am-list">
+          <div className={view === 'grid' ? 'am-grid' : 'am-list'}>
             {filtered.map((a) => (
-              <div
+              <IosAppRow
                 key={a.bundleId}
-                className={`am-item${a.bundleId === selected ? ' selected' : ''}`}
-                onClick={() => void c.selectApp(a.bundleId)}
-                title={a.bundleId}
-              >
-                <AppIcon pkg={a.bundleId} size={30} />
-                <span className="am-item-name">{a.name}</span>
-              </div>
+                app={a}
+                selected={a.bundleId === selected}
+                icon={icons[a.bundleId]}
+                mode={view}
+                register={registerRow}
+                onPick={() => void c.selectApp(a.bundleId)}
+              />
             ))}
           </div>
           <div className="am-count">{countLabel}</div>
@@ -235,7 +417,11 @@ export function IosAppsView({ c, onStatus, onMessage }: Props) {
         <div className="am-right">
           <div className="am-header">
             <div className="am-titlerow">
-              <AppIcon pkg={current ? current.bundleId : '?'} size={40} />
+              {current && icons[current.bundleId] ? (
+                <img className="am-header-icon" src={icons[current.bundleId] as string} alt="" width={40} height={40} />
+              ) : (
+                <AppIcon pkg={current ? current.bundleId : '?'} size={40} />
+              )}
               <div className="am-titlebox">
                 <div className="am-title">{current ? current.name : 'Select an app'}</div>
                 <div className="am-subtitle">

@@ -60,7 +60,7 @@ export function Toolbar({
         </button>
         <button
           className={`toggle${airplayReceiverOn ? ' active' : ''}`}
-          title="AirPlay receiver — advertise “AndroidLab” so any iPhone on the network can mirror to it (no cable needed)"
+          title="AirPlay receiver — advertise “MobileLabKit” so any iPhone on the network can mirror to it (no cable needed)"
           onClick={onAirplayReceiver}
         >
           <Icon name="airplay" size={16} />
@@ -77,7 +77,7 @@ export function Toolbar({
         >
           <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
         </button>
-        <button className="toggle" title="About AndroidLabKit" onClick={onAbout}>
+        <button className="toggle" title="About MobileLabKit" onClick={onAbout}>
           <Icon name="info" size={16} />
         </button>
       </div>

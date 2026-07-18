@@ -25,7 +25,7 @@ export class CancelledError extends Error {
 export type Progress = (message: string) => void
 export type IsCancelled = () => boolean
 
-/** ~/Library/Application Support/AndroidLabKit/tools (created on demand). */
+/** ~/Library/Application Support/MobileLabKit/tools (created on demand). */
 export function toolsDir(): string {
   const d = join(app.getPath('userData'), 'tools')
   mkdirSync(d, { recursive: true })
@@ -120,7 +120,7 @@ export function downloadFile(
         fail(new CancelledError())
         return
       }
-      const req = httpsGet(u, { headers: { 'User-Agent': 'AndroidLab' } }, (res) => {
+      const req = httpsGet(u, { headers: { 'User-Agent': 'MobileLabKit' } }, (res) => {
         const status = res.statusCode ?? 0
         if (status >= 300 && status < 400 && res.headers.location) {
           res.resume() // drain

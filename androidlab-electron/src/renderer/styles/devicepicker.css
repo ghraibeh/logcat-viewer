@@ -84,12 +84,32 @@
   padding-top: 2px;
 }
 .dp-devlabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 6px 10px 3px;
   font-size: 11px;
   color: var(--text-dim);
+}
+.dp-devlabel-text {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Platform badge (Apple logo for iOS, Android robot for Android). */
+.dp-plat {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.dp-plat-ios {
+  color: var(--text);
+}
+.dp-plat-android {
+  color: #3ddc84; /* Android brand green */
 }
 
 .dp-row {

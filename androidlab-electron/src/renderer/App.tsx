@@ -77,7 +77,7 @@ export default function App() {
   const mirrorModeRef = useRef(mirrorMode)
   mirrorModeRef.current = mirrorMode
   // Standalone AirPlay receiver: when on, the docked mirror is the receiver (any phone
-  // on the network can mirror to "AndroidLab"), independent of the selected device.
+  // on the network can mirror to "MobileLabKit"), independent of the selected device.
   const [airplayReceiver, setAirplayReceiver] = useState(false)
   const airplayReceiverRef = useRef(airplayReceiver)
   airplayReceiverRef.current = airplayReceiver
@@ -379,7 +379,7 @@ export default function App() {
   }, [])
 
   // Top-bar AirPlay button: toggle the standalone receiver. Opening shows the docked
-  // receiver (waiting for a phone to pick "AndroidLab"); closing tears it down.
+  // receiver (waiting for a phone to pick "MobileLabKit"); closing tears it down.
   const toggleAirplayReceiver = useCallback(() => {
     if (airplayReceiverRef.current) {
       // Also close the detached window if the receiver is currently popped out.
@@ -558,7 +558,7 @@ export default function App() {
       ) : (
         <div className="tab-placeholder">
           <div className="big">{TABS.find((t) => t.id === tab)?.label}</div>
-          <div>This tool is migrated in Phase 3 of the AndroidLab → Electron port.</div>
+          <div>This tool is migrated in Phase 3 of the MobileLabKit → Electron port.</div>
         </div>
       )}
       </div>

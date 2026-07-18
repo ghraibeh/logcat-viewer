@@ -1,15 +1,89 @@
+diff --git a/cli_device_resolution.go b/cli_device_resolution.go
+index f6f533f..321ac78 100644
+--- a/cli_device_resolution.go
++++ b/cli_device_resolution.go
+@@ -50,6 +50,23 @@ func resolveDevice(arguments docopt.Opts, tunnelInfo tunnelInfoConfig) ios.Devic
+ 		return device
+ 	}
+ 
++	// AndroidLab: a device reachable only over a cable-free RemotePairing/Wi-Fi
++	// tunnel has no usbmux entry, so GetDevice fails. If the tunnel agent has a
++	// tunnel for this udid, synthesize a device from that tunnel info (DeviceID
++	// stays 0, so lockdown + services route over RSD — see useRsdLockdown /
++	// ConnectToShimService). This makes classic + dev tier work cable-free.
++	if err != nil && udid != "" {
++		if info, terr := tunnel.TunnelInfoForDevice(udid, tunnelInfo.Host, tunnelInfo.Port); terr == nil && info.Udid != "" {
++			synth := ios.DeviceEntry{}
++			synth.Properties.SerialNumber = udid
++			synth.UserspaceTUN = info.UserspaceTUN
++			synth.UserspaceTUNHost = userspaceTunnelHost
++			synth.UserspaceTUNPort = info.UserspaceTUNPort
++			tunnelDevice, derr := deviceFromTunnel(synth, info.Address, info.RsdPort)
++			exitIfError("Device '"+udid+"' is only reachable over Wi-Fi but its tunnel could not be reached", derr)
++			return tunnelDevice
++		}
++	}
+ 	exitIfError("Device not found: "+udid, err)
+ 	if addressErr == nil && rsdErr == nil {
+ 		if userspaceTunnelErr == nil {
 diff --git a/cmd_device_registry.go b/cmd_device_registry.go
-index bbe1eb7..49fd70e 100644
+index bbe1eb7..569a6e4 100644
 --- a/cmd_device_registry.go
 +++ b/cmd_device_registry.go
-@@ -53,6 +53,7 @@ var deviceCommands = []command{
+@@ -53,6 +53,8 @@ var deviceCommands = []command{
  	commandByBool("mobilegestalt", runMobileGestaltCommand),
  	commandByBool("devicestate", runDeviceStateCommand),
  	commandByBool("wifi", runWifiCommand),
 +	commandByBool("wificonnections", runWifiConnectionsCommand),
++	commandByBool("remotepair", runRemotePairCommand),
  	commandByBool("prepare", runPrepareCommand),
  	commandByBool("set-wallpaper", runSetWallpaperCommand),
  	commandByBool("get-wallpaper", runGetWallpaperCommand),
+diff --git a/cmd_device_remotepairing.go b/cmd_device_remotepairing.go
+new file mode 100644
+index 0000000..0ccf5c4
+--- /dev/null
++++ b/cmd_device_remotepairing.go
+@@ -0,0 +1,39 @@
++package main
++
++import (
++	"context"
++	"fmt"
++	"time"
++
++	"github.com/danielpaulus/go-ios/ios/tunnel"
++)
++
++// runRemotePairCommand establishes RemotePairing trust with a USB-connected
++// device — the one-time setup a device needs before it will accept a cable-free
++// Wi-Fi developer tunnel (see ios/tunnel/tunnel_wifi.go). It runs the
++// RemotePairing ManualPair handshake over the device's USB RSD; the device then
++// persists trust for this host's selfIdentity key, so a later Wi-Fi verify-pair
++// (ConnectToWifiTunnel over "_remotepairing._tcp") succeeds without the cable. A
++// first pairing shows an on-device confirmation prompt. Nothing device-specific
++// is stored locally (verify uses selfIdentity); --pair-record-path holds that
++// host identity and defaults to '.'.
++//
++// AndroidLab patch.
++func runRemotePairCommand(ctx commandContext) {
++	pairRecordsPath, _ := ctx.Args.String("--pair-record-path")
++	if len(pairRecordsPath) == 0 {
++		pairRecordsPath = "."
++	}
++	pm, err := tunnel.NewPairRecordManager(pairRecordsPath)
++	exitIfError("failed to create pair record manager", err)
++
++	c, cancel := context.WithTimeout(context.Background(), 60*time.Second)
++	defer cancel()
++	err = tunnel.PairOverUSB(c, ctx.Device, pm)
++	exitIfError("failed to establish RemotePairing over USB", err)
++
++	fmt.Println(convertToJSONString(map[string]interface{}{
++		"udid":   ctx.Device.Properties.SerialNumber,
++		"status": "paired",
++	}))
++}
 diff --git a/cmd_device_wificonnections.go b/cmd_device_wificonnections.go
 new file mode 100644
 index 0000000..cfe069b
@@ -38,6 +112,85 @@ index 0000000..cfe069b
 +	exitIfError("failed reading wifi connections state", err)
 +	fmt.Println(convertToJSONString(map[string]interface{}{"EnableWifiConnections": enabled}))
 +}
+diff --git a/ios/afc/client.go b/ios/afc/client.go
+index 72111d9..dfc451d 100644
+--- a/ios/afc/client.go
++++ b/ios/afc/client.go
+@@ -32,7 +32,7 @@ type Client struct {
+ 
+ // New creates a connection to the afc service
+ func New(d ios.DeviceEntry) (*Client, error) {
+-	deviceConn, err := ios.ConnectToService(d, serviceName)
++	deviceConn, err := ios.ConnectToServiceWithRsd(d, serviceName)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("error connecting to service '%s': %w", serviceName, err)
+ 	}
+diff --git a/ios/crashreport/crashreport.go b/ios/crashreport/crashreport.go
+index 2f25fa6..67075c7 100644
+--- a/ios/crashreport/crashreport.go
++++ b/ios/crashreport/crashreport.go
+@@ -28,7 +28,7 @@ func DownloadReports(device ios.DeviceEntry, pattern string, targetdir string) e
+ 	if err != nil {
+ 		return err
+ 	}
+-	deviceConn, err := ios.ConnectToService(device, crashReportCopyMobileService)
++	deviceConn, err := ios.ConnectToServiceWithRsd(device, crashReportCopyMobileService)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -54,7 +54,7 @@ func RemoveReports(device ios.DeviceEntry, cwd string, pattern string) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	deviceConn, err := ios.ConnectToService(device, crashReportCopyMobileService)
++	deviceConn, err := ios.ConnectToServiceWithRsd(device, crashReportCopyMobileService)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -75,7 +75,7 @@ func ListReports(device ios.DeviceEntry, pattern string) ([]string, error) {
+ 	if err != nil {
+ 		return []string{}, err
+ 	}
+-	deviceConn, err := ios.ConnectToService(device, crashReportCopyMobileService)
++	deviceConn, err := ios.ConnectToServiceWithRsd(device, crashReportCopyMobileService)
+ 	if err != nil {
+ 		return []string{}, err
+ 	}
+@@ -124,7 +124,7 @@ type moverConnection struct {
+ 
+ // NewWithHouseArrest returns a new ZipConduit Connection for the given DeviceID and Udid
+ func newMover(device ios.DeviceEntry) (*moverConnection, error) {
+-	deviceConn, err := ios.ConnectToService(device, crashReportMoverService)
++	deviceConn, err := ios.ConnectToServiceWithRsd(device, crashReportMoverService)
+ 	if err != nil {
+ 		return &moverConnection{}, err
+ 	}
+diff --git a/ios/diagnostics/diagnostics.go b/ios/diagnostics/diagnostics.go
+index 8c670af..3588014 100644
+--- a/ios/diagnostics/diagnostics.go
++++ b/ios/diagnostics/diagnostics.go
+@@ -14,7 +14,7 @@ type Connection struct {
+ }
+ 
+ func New(device ios.DeviceEntry) (*Connection, error) {
+-	deviceConn, err := ios.ConnectToService(device, serviceName)
++	deviceConn, err := ios.ConnectToServiceWithRsd(device, serviceName)
+ 	if err != nil {
+ 		return &Connection{}, err
+ 	}
+diff --git a/ios/house_arrest/house_arrest.go b/ios/house_arrest/house_arrest.go
+index 868fabb..51028bf 100644
+--- a/ios/house_arrest/house_arrest.go
++++ b/ios/house_arrest/house_arrest.go
+@@ -14,7 +14,7 @@ import (
+ const serviceName = "com.apple.mobile.house_arrest"
+ 
+ func New(device ios.DeviceEntry, bundleID string) (*afc.Client, error) {
+-	deviceConn, err := ios.ConnectToService(device, serviceName)
++	deviceConn, err := ios.ConnectToServiceWithRsd(device, serviceName)
+ 	if err != nil {
+ 		return nil, err
+ 	}
 diff --git a/ios/imagemounter/personalized_image.go b/ios/imagemounter/personalized_image.go
 index d35eadd..1e74763 100644
 --- a/ios/imagemounter/personalized_image.go
@@ -178,6 +331,19 @@ index 488c537..f77444a 100644
  type response struct {
  	status        int
  	message       string
+diff --git a/ios/installationproxy/installationproxy.go b/ios/installationproxy/installationproxy.go
+index 4a133ec..fc5fc16 100644
+--- a/ios/installationproxy/installationproxy.go
++++ b/ios/installationproxy/installationproxy.go
+@@ -48,7 +48,7 @@ func (c *Connection) Close() {
+ }
+ 
+ func New(device ios.DeviceEntry) (*Connection, error) {
+-	deviceConn, err := ios.ConnectToService(device, serviceName)
++	deviceConn, err := ios.ConnectToServiceWithRsd(device, serviceName)
+ 	if err != nil {
+ 		return &Connection{}, err
+ 	}
 diff --git a/ios/instruments/instruments_sysmontap.go b/ios/instruments/instruments_sysmontap.go
 index 9fe16fb..ae6bd9a 100644
 --- a/ios/instruments/instruments_sysmontap.go
@@ -258,6 +424,117 @@ index 9fe16fb..ae6bd9a 100644
  }
  
  type CPUUsage struct {
+diff --git a/ios/lockdown_rsd.go b/ios/lockdown_rsd.go
+new file mode 100644
+index 0000000..937ae9a
+--- /dev/null
++++ b/ios/lockdown_rsd.go
+@@ -0,0 +1,56 @@
++package ios
++
++import (
++	"fmt"
++	"os"
++)
++
++// AndroidLab patch: reach classic-tier lockdown over the RSD developer tunnel.
++//
++// Lockdown (GetValues → `ios info`, and everything that reads device values)
++// normally runs over usbmux (ConnectLockdownWithSession). A device reachable
++// ONLY over a cable-free RemotePairing/Wi-Fi tunnel has no usbmux entry, so that
++// path can't reach it. iOS 17+ also exposes lockdown as an RSD service —
++// "com.apple.mobile.lockdown.remote.trusted" — over the tunnel. That connection
++// is pre-trusted (the tunnel already authenticated the host), so no
++// StartSession/SSL handshake is needed: connect via RSD and read values directly.
++
++const lockdownRemoteTrustedShim = "com.apple.mobile.lockdown.remote.trusted"
++
++// useRsdTransport reports whether classic-tier services should be reached over
++// the RSD tunnel instead of usbmux. A tunnel-only device (no usbmux entry ⇒
++// DeviceID 0) can be reached only that way; GOIOS_FORCE_RSD_LOCKDOWN forces it
++// even for a device that is also on usbmux (used to test the RSD path on a cabled
++// device). A usbmux device (DeviceID > 0) keeps using usbmux, so nothing about
++// the wired path changes.
++func useRsdTransport(device DeviceEntry) bool {
++	if !device.SupportsRsd() {
++		return false
++	}
++	return device.DeviceID == 0 || os.Getenv("GOIOS_FORCE_RSD_LOCKDOWN") != ""
++}
++
++// ConnectToServiceWithRsd connects to a lockdown service, preferring the RSD
++// tunnel (the "<serviceName>.shim.remote" variant) when the device is reachable
++// only that way (see useRsdTransport), and falling back to plain usbmux
++// (ConnectToService) otherwise. This lets a cable-free RemotePairing/Wi-Fi device
++// use the classic-tier services (apps, files, diagnostics, icons, prefs, crashes)
++// that otherwise require usbmux. AndroidLab patch.
++func ConnectToServiceWithRsd(device DeviceEntry, serviceName string) (DeviceConnectionInterface, error) {
++	if useRsdTransport(device) {
++		return ConnectToShimService(device, serviceName+".shim.remote")
++	}
++	return ConnectToService(device, serviceName)
++}
++
++// connectLockdownOverRsd opens a pre-trusted lockdown connection over the RSD
++// tunnel (see lockdownRemoteTrustedShim). RSD check-in is performed by
++// ConnectToShimService; the returned connection speaks the lockdown plist
++// protocol directly, with no session to start.
++func connectLockdownOverRsd(device DeviceEntry) (*LockDownConnection, error) {
++	conn, err := ConnectToShimService(device, lockdownRemoteTrustedShim)
++	if err != nil {
++		return nil, fmt.Errorf("connectLockdownOverRsd: %w", err)
++	}
++	return NewLockDownConnection(conn), nil
++}
+diff --git a/ios/lockdown_value.go b/ios/lockdown_value.go
+index 30c56e6..cb2d736 100755
+--- a/ios/lockdown_value.go
++++ b/ios/lockdown_value.go
+@@ -252,12 +252,27 @@ func getAllValuesResponseFromBytes(plistBytes []byte) GetAllValuesResponse {
+ 
+ // GetValuesPlist returns the full lockdown values response as a map, so it can be converted to JSON easily.
+ func GetValuesPlist(device DeviceEntry) (map[string]interface{}, error) {
++	// AndroidLab: a tunnel-only (cable-free) device is reached over RSD lockdown.
++	if useRsdTransport(device) {
++		lockdownConnection, err := connectLockdownOverRsd(device)
++		if err != nil {
++			return map[string]interface{}{}, err
++		}
++		defer lockdownConnection.Close()
++		return getValuesPlistOver(lockdownConnection)
++	}
+ 	lockdownConnection, err := ConnectLockdownWithSession(device)
+ 	if err != nil {
+ 		return map[string]interface{}{}, err
+ 	}
+ 	defer lockdownConnection.Close()
+-	err = lockdownConnection.Send(newGetValue(""))
++	return getValuesPlistOver(lockdownConnection)
++}
++
++// getValuesPlistOver reads the full lockdown values map over an already-connected
++// lockdown connection (usbmux session or RSD tunnel). AndroidLab patch.
++func getValuesPlistOver(lockdownConnection *LockDownConnection) (map[string]interface{}, error) {
++	err := lockdownConnection.Send(newGetValue(""))
+ 	if err != nil {
+ 		return map[string]interface{}{}, err
+ 	}
+@@ -278,6 +293,15 @@ func GetValuesPlist(device DeviceEntry) (map[string]interface{}, error) {
+ 
+ // GetValues returns all values of deviceInformation from lockdown
+ func GetValues(device DeviceEntry) (GetAllValuesResponse, error) {
++	// AndroidLab: a tunnel-only (cable-free) device is reached over RSD lockdown.
++	if useRsdTransport(device) {
++		lockdownConnection, err := connectLockdownOverRsd(device)
++		if err != nil {
++			return GetAllValuesResponse{}, err
++		}
++		defer lockdownConnection.Close()
++		return lockdownConnection.GetValues()
++	}
+ 	lockdownConnection, err := ConnectLockdownWithSession(device)
+ 	if err != nil {
+ 		return GetAllValuesResponse{}, err
 diff --git a/ios/lockdown_wificonnections.go b/ios/lockdown_wificonnections.go
 new file mode 100644
 index 0000000..bb7e120
@@ -310,6 +587,32 @@ index 0000000..bb7e120
 +	defer lockDownConn.Close()
 +	return lockDownConn.SetValueForDomain(wifiConnectionsKey, wirelessLockdownDomain, enabled)
 +}
+diff --git a/ios/misagent/misagent.go b/ios/misagent/misagent.go
+index 861758d..d98fb0f 100644
+--- a/ios/misagent/misagent.go
++++ b/ios/misagent/misagent.go
+@@ -14,7 +14,7 @@ type Connection struct {
+ }
+ 
+ func New(device ios.DeviceEntry) (*Connection, error) {
+-	deviceConn, err := ios.ConnectToService(device, serviceName)
++	deviceConn, err := ios.ConnectToServiceWithRsd(device, serviceName)
+ 	if err != nil {
+ 		return &Connection{}, err
+ 	}
+diff --git a/ios/notificationproxy/notificationproxy.go b/ios/notificationproxy/notificationproxy.go
+index a3bd2ce..ad8ca1c 100644
+--- a/ios/notificationproxy/notificationproxy.go
++++ b/ios/notificationproxy/notificationproxy.go
+@@ -42,7 +42,7 @@ func (c *Connection) Close() {
+ }
+ 
+ func New(device ios.DeviceEntry) (*Connection, error) {
+-	deviceConn, err := ios.ConnectToService(device, serviceName)
++	deviceConn, err := ios.ConnectToServiceWithRsd(device, serviceName)
+ 	if err != nil {
+ 		return &Connection{}, err
+ 	}
 diff --git a/ios/pcap/ipfinder.go b/ios/pcap/ipfinder.go
 index 1f90a9b..556a862 100644
 --- a/ios/pcap/ipfinder.go
@@ -569,11 +872,124 @@ index 1f90a9b..556a862 100644
 -	return nil
 +	return best
  }
+diff --git a/ios/springboard/client.go b/ios/springboard/client.go
+index bb1b661..e827373 100644
+--- a/ios/springboard/client.go
++++ b/ios/springboard/client.go
+@@ -13,7 +13,7 @@ type Client struct {
+ }
+ 
+ func NewClient(d ios.DeviceEntry) (*Client, error) {
+-	conn, err := ios.ConnectToService(d, "com.apple.springboardservices")
++	conn, err := ios.ConnectToServiceWithRsd(d, "com.apple.springboardservices")
+ 	if err != nil {
+ 		return nil, fmt.Errorf("could not connect to 'com.apple.springboardservices': %w", err)
+ 	}
+diff --git a/ios/tunnel/codec.go b/ios/tunnel/codec.go
+index c821983..763b629 100644
+--- a/ios/tunnel/codec.go
++++ b/ios/tunnel/codec.go
+@@ -37,7 +37,7 @@ func (p *pairingData) Decode(e map[string]interface{}) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if data, ok := pd["data"].([]byte); ok {
++	if data := asBytes(pd["data"]); data != nil {
+ 		p.data = data
+ 	}
+ 	if kind, ok := pd["kind"].(string); ok {
+@@ -222,7 +222,7 @@ func (c *cipherStream) read(p *map[string]interface{}) error {
+ 		return err
+ 	}
+ 	if streamEncr, err := getChildMap(m, "streamEncrypted"); err == nil {
+-		if cip, ok := streamEncr["_0"].([]byte); ok {
++		if cip := asBytes(streamEncr["_0"]); cip != nil {
+ 			plain, err := c.serverCipher.Open(nil, c.nonce, cip, nil)
+ 			if err != nil {
+ 				return err
+diff --git a/ios/tunnel/tunnel.go b/ios/tunnel/tunnel.go
+index 547c692..c0e6707 100644
+--- a/ios/tunnel/tunnel.go
++++ b/ios/tunnel/tunnel.go
+@@ -36,11 +36,21 @@ type Tunnel struct {
+ 	// Userspace TUN device is used, connect to the local tcp port at Default
+ 	UserspaceTUN     bool `json:"userspaceTun"`
+ 	UserspaceTUNPort int  `json:"userspaceTunPort"`
+-	closer           func() error
++	// Connection reports how this tunnel reaches the device: "" (default, the
++	// usbmux/CoreDeviceProxy path) or "wifi" for a cable-free RemotePairing
++	// tunnel discovered over "_remotepairing._tcp" (AndroidLab patch). Lets the
++	// tunnel-info consumer tell a Wi-Fi-only device apart from a wired one.
++	Connection string `json:"connection,omitempty"`
++	closer     func() error
+ }
+ 
+ // Close closes the connection to the device and removes the virtual network interface from the host
+ func (t Tunnel) Close() error {
++	// A zero-value Tunnel (e.g. returned alongside an error) has no closer;
++	// closing it must be a safe no-op rather than a nil-pointer panic.
++	if t.closer == nil {
++		return nil
++	}
+ 	return t.closer()
+ }
+ 
 diff --git a/ios/tunnel/tunnel_api.go b/ios/tunnel/tunnel_api.go
-index c3daeca..985cf34 100644
+index c3daeca..1c9e0d7 100644
 --- a/ios/tunnel/tunnel_api.go
 +++ b/ios/tunnel/tunnel_api.go
-@@ -486,10 +486,18 @@ func (m *TunnelManager) UpdateTunnels(ctx context.Context) error {
+@@ -339,6 +339,32 @@ type TunnelManager struct {
+ 	// basePort is the base for derived userspace listener ports (the agent's own
+ 	// tunnel-info port), so per-device agents on different ports don't collide.
+ 	basePort int
++	// extraTunnels, when set, contributes additional tunnels to ListTunnels /
++	// FindTunnel (and thus the /tunnels + /tunnel/{udid} API) without being
++	// managed by this manager's usbmux UpdateTunnels loop. AndroidLab uses it to
++	// merge cable-free RemotePairing (Wi-Fi) tunnels from a WifiTunnelManager, so
++	// the working usbmux path stays untouched.
++	extraTunnels func() []Tunnel
++}
++
++// SetExtraTunnels registers a provider of extra tunnels (e.g. a
++// WifiTunnelManager's RemotePairing tunnels) that get merged into ListTunnels /
++// FindTunnel. AndroidLab patch.
++func (m *TunnelManager) SetExtraTunnels(provider func() []Tunnel) {
++	m.mux.Lock()
++	defer m.mux.Unlock()
++	m.extraTunnels = provider
++}
++
++// HasTunnel reports whether this manager currently has a usbmux tunnel for udid.
++// AndroidLab uses it so the Wi-Fi manager skips devices already reachable over
++// the cable (usbmux/CoreDeviceProxy), avoiding a duplicate tunnel. AndroidLab
++// patch.
++func (m *TunnelManager) HasTunnel(udid string) bool {
++	m.mux.Lock()
++	defer m.mux.Unlock()
++	_, ok := m.tunnels[udid]
++	return ok
+ }
+ 
+ // NewTunnelManager creates a new TunnelManager instance for setting up device tunnels for all connected devices
+@@ -378,11 +404,12 @@ func newTunnelManager(pm PairRecordManager, userspaceTUN bool, udidFilter string
+ func (m *TunnelManager) Close() error {
+ 	var baseErr error
+ 	m.closeOnce.Do(func() {
+-		tunnels, err := m.ListTunnels()
+-		if err != nil {
+-			golog.Error("failed to list tunnels", "module", logModule, "error", err)
+-		}
+-		for _, t := range tunnels {
++		// Close only this manager's own usbmux tunnels; extraTunnels (e.g. the
++		// Wi-Fi manager's) own their lifecycle and close themselves on shutdown.
++		m.mux.Lock()
++		own := maps.Values(m.tunnels)
++		m.mux.Unlock()
++		for _, t := range own {
+ 			err := t.Close()
+ 			baseErr = errors.Join(baseErr, err)
+ 			if err != nil {
+@@ -486,10 +513,18 @@ func (m *TunnelManager) UpdateTunnels(ctx context.Context) error {
  }
  
  // shouldSkipDevice reports whether UpdateTunnels should not attempt a tunnel for
@@ -594,6 +1010,560 @@ index c3daeca..985cf34 100644
  		return true
  	}
  	if f, ok := failed[d.Properties.SerialNumber]; ok && now.Sub(f.lastAttempt) < failedDeviceBackoff(f.failCount) {
+@@ -554,11 +589,17 @@ func (m *TunnelManager) startTunnel(ctx context.Context, device ios.DeviceEntry)
+ 	return t, nil
+ }
+ 
+-// ListTunnels provides all currently running device tunnels
++// ListTunnels provides all currently running device tunnels, including any
++// contributed by a registered extraTunnels provider (AndroidLab: Wi-Fi tunnels).
+ func (m *TunnelManager) ListTunnels() ([]Tunnel, error) {
+ 	m.mux.Lock()
+-	defer m.mux.Unlock()
+-	return maps.Values(m.tunnels), nil
++	tunnels := maps.Values(m.tunnels)
++	extra := m.extraTunnels
++	m.mux.Unlock()
++	if extra != nil {
++		tunnels = append(tunnels, extra()...)
++	}
++	return tunnels, nil
+ }
+ 
+ func (m *TunnelManager) FindTunnel(udid string) (Tunnel, error) {
+diff --git a/ios/tunnel/tunnel_wifi.go b/ios/tunnel/tunnel_wifi.go
+new file mode 100644
+index 0000000..ebb0ba8
+--- /dev/null
++++ b/ios/tunnel/tunnel_wifi.go
+@@ -0,0 +1,297 @@
++package tunnel
++
++import (
++	"bufio"
++	"context"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"sync"
++
++	"github.com/danielpaulus/go-ios/ios"
++	"github.com/danielpaulus/go-ios/ios/golog"
++	"github.com/danielpaulus/go-ios/ios/http"
++	"github.com/danielpaulus/go-ios/ios/tunnel/tlspsk"
++	"github.com/grandcat/zeroconf"
++)
++
++// PairOverUSB establishes RemotePairing trust with a USB-connected device: the
++// device persists trust for our selfIdentity's Ed25519 key. This is the one-time
++// setup a device needs before Wi-Fi verify-pair (ConnectToWifiTunnel) can
++// succeed, because Wi-Fi only exposes the verify service — not first-time
++// pairing. It connects to the untrusted tunnel service over the USB _remoted RSD
++// and runs the same ManualPair handshake; a first pairing shows an on-device
++// confirmation prompt. Nothing is persisted locally (verify uses selfIdentity).
++func PairOverUSB(ctx context.Context, device ios.DeviceEntry, p PairRecordManager) error {
++	addr, err := ios.FindDeviceInterfaceAddress(ctx, device)
++	if err != nil {
++		return fmt.Errorf("PairOverUSB: find device interface address: %w", err)
++	}
++	servicePort, err := getUntrustedTunnelServicePort(addr, device)
++	if err != nil {
++		return fmt.Errorf("PairOverUSB: find untrusted tunnel service port: %w", err)
++	}
++	conn, err := ios.ConnectTUNDevice(addr, servicePort, device)
++	if err != nil {
++		return fmt.Errorf("PairOverUSB: connect to tunnel service: %w", err)
++	}
++	h, err := http.NewHttpConnection(conn)
++	if err != nil {
++		return fmt.Errorf("PairOverUSB: http2: %w", err)
++	}
++	xpcConn, err := ios.CreateXpcConnection(h)
++	if err != nil {
++		return fmt.Errorf("PairOverUSB: remotexpc: %w", err)
++	}
++	ts := newTunnelServiceWithXpc(xpcConn, h, p)
++	if err := ts.ManualPair(); err != nil {
++		return fmt.Errorf("PairOverUSB: pair: %w", err)
++	}
++	return nil
++}
++
++// AndroidLab patch: Wi-Fi (cable-free) developer tunnels via RemotePairing.
++//
++// Upstream go-ios reaches a device's developer services only through the USB
++// CDC-NCM ethernet interface (it browses "_remoted._tcp", exposed only over the
++// cable — see discover.go) and runs the RemotePairing handshake over RemoteXPC
++// (HTTP/2). iOS 17+ devices ALSO advertise "_remotepairing._tcp" over Wi-Fi (the
++// service pymobiledevice3's tunneld uses), where the SAME RemotePairing handshake
++// runs over a different transport: length-prefixed "RPPairing" JSON packets on
++// the raw TCP socket. This file adds that Wi-Fi path — a socket-backed control
++// channel (rpPairingConn) satisfies go-ios's xpcConn interface so the entire
++// existing handshake + TLS-PSK tunnel + userspace data plane are reused verbatim.
++
++const remotePairingServiceName = "_remotepairing._tcp"
++
++// rpPairingMagic prefixes every RemotePairing control packet on the Wi-Fi socket
++// transport (pymobiledevice3's RPPairingPacket: magic + uint16-BE length + JSON).
++var rpPairingMagic = []byte("RPPairing")
++
++// asBytes coerces a control-channel value to raw bytes. The RemoteXPC transport
++// yields native []byte; the RPPairing (Wi-Fi/JSON) transport carries the same
++// binary fields as base64 strings. Accept either so the handshake codec works
++// unchanged over both transports.
++func asBytes(v interface{}) []byte {
++	switch b := v.(type) {
++	case []byte:
++		return b
++	case string:
++		if decoded, err := base64.StdEncoding.DecodeString(b); err == nil {
++			return decoded
++		}
++	}
++	return nil
++}
++
++// rpPairingConn adapts a raw TCP connection to the "_remotepairing._tcp" service
++// into go-ios's xpcConn interface. go-ios's control channel builds the full
++// RemoteXPC envelope {mangledTypeName, value:{...}} and calls Send; the Wi-Fi
++// wire format carries only the inner value as RPPairing-framed JSON, so we strip
++// it on send and re-wrap it on receive. json.Marshal base64-encodes []byte just
++// like the device expects (matching pymobiledevice3's encoder).
++type rpPairingConn struct {
++	conn net.Conn
++	r    *bufio.Reader
++}
++
++func newRpPairingConn(conn net.Conn) *rpPairingConn {
++	return &rpPairingConn{conn: conn, r: bufio.NewReader(conn)}
++}
++
++func (c *rpPairingConn) Send(data map[string]interface{}, flags ...uint32) error {
++	// Unwrap the RemoteXPC envelope: the Wi-Fi transport sends only the inner
++	// {message, originatedBy, sequenceNumber}.
++	body := data
++	if v, ok := data["value"].(map[string]interface{}); ok {
++		body = v
++	}
++	payload, err := json.Marshal(body)
++	if err != nil {
++		return fmt.Errorf("rpPairingConn.Send: marshal: %w", err)
++	}
++	if len(payload) > 0xffff {
++		return fmt.Errorf("rpPairingConn.Send: payload too large (%d)", len(payload))
++	}
++	pkt := make([]byte, 0, len(rpPairingMagic)+2+len(payload))
++	pkt = append(pkt, rpPairingMagic...)
++	pkt = binary.BigEndian.AppendUint16(pkt, uint16(len(payload)))
++	pkt = append(pkt, payload...)
++	_, err = c.conn.Write(pkt)
++	return err
++}
++
++func (c *rpPairingConn) ReceiveOnClientServerStream() (map[string]interface{}, error) {
++	magic := make([]byte, len(rpPairingMagic))
++	if _, err := io.ReadFull(c.r, magic); err != nil {
++		return nil, fmt.Errorf("rpPairingConn.Receive: read magic: %w", err)
++	}
++	if string(magic) != string(rpPairingMagic) {
++		return nil, fmt.Errorf("rpPairingConn.Receive: bad magic %q", magic)
++	}
++	var sz [2]byte
++	if _, err := io.ReadFull(c.r, sz[:]); err != nil {
++		return nil, fmt.Errorf("rpPairingConn.Receive: read length: %w", err)
++	}
++	body := make([]byte, binary.BigEndian.Uint16(sz[:]))
++	if _, err := io.ReadFull(c.r, body); err != nil {
++		return nil, fmt.Errorf("rpPairingConn.Receive: read body: %w", err)
++	}
++	var inner map[string]interface{}
++	if err := json.Unmarshal(body, &inner); err != nil {
++		return nil, fmt.Errorf("rpPairingConn.Receive: unmarshal: %w", err)
++	}
++	// Re-wrap so go-ios's read() finds it under "value".
++	return map[string]interface{}{"value": inner}, nil
++}
++
++// newTunnelServiceWithSocket builds a tunnelService whose control channel speaks
++// the RPPairing framed protocol over a raw socket (Wi-Fi), instead of RemoteXPC
++// over HTTP/2 (USB). xpcConn stays nil — the handshake only uses controlChannel,
++// cipher, and the io.Closer.
++func newTunnelServiceWithSocket(conn net.Conn, pairRecords PairRecordManager) *tunnelService {
++	return &tunnelService{
++		c:              conn,
++		controlChannel: newControlChannelReadWriter(newRpPairingConn(conn)),
++		pairRecords:    pairRecords,
++	}
++}
++
++// RemotePairingEndpoint is one "_remotepairing._tcp" advertisement discovered
++// over Wi-Fi: the device's link-local IPv6 (with %zone) and the service port.
++// Instance is the mDNS service instance name — an opaque per-device GUID that is
++// stable across a device's interfaces and browse cycles, so it keys a device
++// before its UDID is known (the UDID only comes from an RSD handshake over the
++// tunnel).
++type RemotePairingEndpoint struct {
++	Addr     string // "<ipv6>%<iface>"
++	Port     int
++	Instance string // mDNS service instance name (per-device GUID)
++}
++
++// FindRemotePairingEndpoints browses "_remotepairing._tcp" on every interface and
++// returns the distinct endpoints seen before ctx is done.
++func FindRemotePairingEndpoints(ctx context.Context) []RemotePairingEndpoint {
++	ifaces, err := net.Interfaces()
++	if err != nil {
++		return nil
++	}
++	found := make(chan RemotePairingEndpoint)
++	var wg sync.WaitGroup
++	for _, iface := range ifaces {
++		resolver, err := zeroconf.NewResolver(zeroconf.SelectIfaces([]net.Interface{iface}), zeroconf.SelectIPTraffic(zeroconf.IPv6))
++		if err != nil {
++			continue
++		}
++		entries := make(chan *zeroconf.ServiceEntry)
++		if err := resolver.Browse(ctx, remotePairingServiceName, "local.", entries); err != nil {
++			continue
++		}
++		wg.Add(1)
++		go func(ifaceName string) {
++			defer wg.Done()
++			for entry := range entries {
++				if entry == nil {
++					continue
++				}
++				for _, ip6 := range entry.AddrIPv6 {
++					select {
++					case found <- RemotePairingEndpoint{Addr: fmt.Sprintf("%s%%%s", ip6.String(), ifaceName), Port: entry.Port, Instance: entry.Instance}:
++					case <-ctx.Done():
++						return
++					}
++				}
++			}
++		}(iface.Name)
++	}
++	go func() { wg.Wait(); close(found) }()
++
++	seen := map[string]bool{}
++	var out []RemotePairingEndpoint
++	for {
++		select {
++		case <-ctx.Done():
++			return out
++		case ep, ok := <-found:
++			if !ok {
++				return out
++			}
++			key := fmt.Sprintf("%s:%d", ep.Addr, ep.Port)
++			if !seen[key] {
++				seen[key] = true
++				out = append(out, ep)
++			}
++		}
++	}
++}
++
++// ConnectToWifiTunnel brings up a no-root developer tunnel to a device over Wi-Fi
++// via a "_remotepairing._tcp" endpoint. It runs the RemotePairing handshake over
++// the RPPairing socket transport (verify-pair against the stored selfIdentity —
++// no PIN for an already-paired device), then the TLS-PSK TCP tunnel and the
++// gVisor userspace data plane. The tunnel exposes its RSD proxy on
++// localhost:ifacePort; Udid is filled from an RSD handshake over the tunnel.
++func ConnectToWifiTunnel(ctx context.Context, ep RemotePairingEndpoint, ifacePort int, p PairRecordManager) (Tunnel, error) {
++	dialer := net.Dialer{}
++	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("[%s]:%d", ep.Addr, ep.Port))
++	if err != nil {
++		return Tunnel{}, fmt.Errorf("ConnectToWifiTunnel: dial %s:%d: %w", ep.Addr, ep.Port, err)
++	}
++	ts := newTunnelServiceWithSocket(conn, p)
++	if err := ts.ManualPair(); err != nil {
++		conn.Close()
++		return Tunnel{}, fmt.Errorf("ConnectToWifiTunnel: pair: %w", err)
++	}
++	tunnelPort, err := ts.createTcpTunnelListener()
++	if err != nil {
++		conn.Close()
++		return Tunnel{}, fmt.Errorf("ConnectToWifiTunnel: create tcp listener: %w", err)
++	}
++	tunnelAddr := fmt.Sprintf("[%s]:%d", ep.Addr, tunnelPort)
++	tcpConn, err := net.Dial("tcp", tunnelAddr)
++	if err != nil {
++		conn.Close()
++		return Tunnel{}, fmt.Errorf("ConnectToWifiTunnel: dial tunnel %s: %w", tunnelAddr, err)
++	}
++	tlsConn, err := tlspsk.Client(tcpConn, ts.sharedSecret)
++	if err != nil {
++		conn.Close()
++		return Tunnel{}, fmt.Errorf("ConnectToWifiTunnel: tls-psk: %w", err)
++	}
++	t, err := connectToUserspaceTunnelLockdown(ctx, ios.DeviceEntry{}, tlsConn, ifacePort)
++	if err != nil {
++		conn.Close()
++		return Tunnel{}, fmt.Errorf("ConnectToWifiTunnel: userspace tunnel: %w", err)
++	}
++	t.UserspaceTUN = true
++	t.UserspaceTUNPort = ifacePort
++	if udid, err := wifiTunnelUdid(t); err != nil {
++		golog.Warn("ConnectToWifiTunnel: could not read udid over tunnel", "module", logModule, "error", err)
++	} else {
++		t.Udid = udid
++	}
++	return t, nil
++}
++
++// wifiTunnelUdid performs an RSD handshake through the freshly-created userspace
++// tunnel to learn the device's UDID.
++func wifiTunnelUdid(t Tunnel) (string, error) {
++	device := ios.DeviceEntry{
++		UserspaceTUN:     true,
++		UserspaceTUNHost: "localhost",
++		UserspaceTUNPort: t.UserspaceTUNPort,
++	}
++	rsd, err := ios.NewWithAddrPortDevice(t.Address, t.RsdPort, device)
++	if err != nil {
++		return "", err
++	}
++	defer rsd.Close()
++	resp, err := rsd.Handshake()
++	if err != nil {
++		return "", err
++	}
++	return resp.Udid, nil
++}
+diff --git a/ios/tunnel/tunnel_wifi_manager.go b/ios/tunnel/tunnel_wifi_manager.go
+new file mode 100644
+index 0000000..9caced4
+--- /dev/null
++++ b/ios/tunnel/tunnel_wifi_manager.go
+@@ -0,0 +1,224 @@
++package tunnel
++
++// AndroidLab patch: a persistent manager for cable-free RemotePairing (Wi-Fi)
++// tunnels, mirroring pymobiledevice3's tunneld. It browses "_remotepairing._tcp"
++// on a slow ticker and keeps one live tunnel per device that is NOT already
++// reachable over the cable (usbmux). Its tunnels are exposed to the agent's
++// /tunnels + /tunnel/{udid} API via TunnelManager.SetExtraTunnels, so downstream
++// commands reach a Wi-Fi-only device transparently — while the working usbmux
++// TunnelManager loop stays completely untouched.
++//
++// Discovery is tunnel-bound by necessity: "_remotepairing._tcp" advertises only
++// an opaque per-device GUID (the mDNS instance name), never the UDID, so the UDID
++// is learned from an RSD handshake once the tunnel is up (see ConnectToWifiTunnel
++// / wifiTunnelUdid). The GUID keys a device across cycles so an already-tunneled
++// (or known-cabled) device is skipped without reconnecting.
++
++import (
++	"context"
++	"sync"
++	"time"
++
++	"github.com/danielpaulus/go-ios/ios/golog"
++)
++
++const (
++	// wifiBrowseTimeout bounds each "_remotepairing._tcp" browse.
++	wifiBrowseTimeout = 3 * time.Second
++	// wifiConnectTimeout bounds bringing up a single Wi-Fi tunnel.
++	wifiConnectTimeout = 20 * time.Second
++	// wifiPortBase offsets Wi-Fi userspace listener ports well clear of the
++	// usbmux manager's range (basePort + small offset), so they never collide.
++	wifiPortBase = 500
++)
++
++// WifiTunnelManager maintains RemotePairing (Wi-Fi) tunnels to devices
++// discovered over "_remotepairing._tcp".
++type WifiTunnelManager struct {
++	pm       PairRecordManager
++	basePort int
++	// isCabled reports a device already reachable over usbmux (so we skip it and
++	// let the wired tunnel win). Typically TunnelManager.HasTunnel.
++	isCabled func(udid string) bool
++
++	mux         sync.Mutex
++	tunnels     map[string]Tunnel    // keyed by device UDID
++	addrToUdid  map[string]string    // device link-local addr -> UDID (learned once)
++	failedAddrs map[string]time.Time // addr -> last failed connect (backoff)
++	portOffset  int
++	closed      bool
++}
++
++// wifiFailBackoff is how long to wait before re-attempting an address whose last
++// connect failed to yield a usable Wi-Fi tunnel. Bounds the reconnect churn for
++// a cabled device (whose Wi-Fi RSD handshake collides with its usbmux tunnel and
++// yields no UDID) while still letting a genuinely Wi-Fi-only device appear soon.
++const wifiFailBackoff = 30 * time.Second
++
++// NewWifiTunnelManager builds a Wi-Fi tunnel manager. pm is the RemotePairing
++// identity store; basePort is the agent's tunnel-info port (Wi-Fi listener ports
++// derive from it); isCabled reports devices already tunneled over usbmux.
++func NewWifiTunnelManager(pm PairRecordManager, basePort int, isCabled func(udid string) bool) *WifiTunnelManager {
++	if isCabled == nil {
++		isCabled = func(string) bool { return false }
++	}
++	return &WifiTunnelManager{
++		pm:          pm,
++		basePort:    basePort,
++		isCabled:    isCabled,
++		tunnels:     map[string]Tunnel{},
++		addrToUdid:  map[string]string{},
++		failedAddrs: map[string]time.Time{},
++	}
++}
++
++// ListTunnels returns the current Wi-Fi tunnels (for TunnelManager.SetExtraTunnels).
++func (w *WifiTunnelManager) ListTunnels() []Tunnel {
++	w.mux.Lock()
++	defer w.mux.Unlock()
++	out := make([]Tunnel, 0, len(w.tunnels))
++	for _, t := range w.tunnels {
++		out = append(out, t)
++	}
++	return out
++}
++
++// Run drives the browse/tunnel loop until ctx is cancelled, then tears down every
++// Wi-Fi tunnel. Call it in its own goroutine.
++func (w *WifiTunnelManager) Run(ctx context.Context) {
++	ticker := time.NewTicker(5 * time.Second)
++	defer ticker.Stop()
++	w.update(ctx) // first pass immediately
++	for {
++		select {
++		case <-ctx.Done():
++			w.closeAll()
++			return
++		case <-ticker.C:
++			w.update(ctx)
++		}
++	}
++}
++
++func (w *WifiTunnelManager) nextPort() int {
++	w.mux.Lock()
++	defer w.mux.Unlock()
++	w.portOffset++
++	return w.basePort + wifiPortBase + w.portOffset
++}
++
++func (w *WifiTunnelManager) update(ctx context.Context) {
++	browseCtx, cancel := context.WithTimeout(ctx, wifiBrowseTimeout)
++	eps := FindRemotePairingEndpoints(browseCtx)
++	cancel()
++
++	// One endpoint per device link-local address. The mDNS instance GUID rotates
++	// frequently, so it can't key a device across cycles; the device's link-local
++	// IPv6 (fe80::…%iface) is stable while it stays on the Wi-Fi network, so key on
++	// that. A multi-interface device yields one entry per interface — the extras
++	// resolve to the same UDID and are deduped by UDID once connected.
++	byAddr := map[string]RemotePairingEndpoint{}
++	for _, ep := range eps {
++		if ep.Addr == "" {
++			continue
++		}
++		if _, ok := byAddr[ep.Addr]; !ok {
++			byAddr[ep.Addr] = ep
++		}
++	}
++
++	keep := map[string]bool{} // UDIDs whose Wi-Fi tunnel should survive this cycle
++	now := time.Now()
++	for addr, ep := range byAddr {
++		w.mux.Lock()
++		udid, known := w.addrToUdid[addr]
++		_, haveTun := w.tunnels[udid]
++		lastFail, failed := w.failedAddrs[addr]
++		w.mux.Unlock()
++
++		// Device is reachable over the cable → let the usbmux tunnel win; don't
++		// keep a Wi-Fi one (any existing one is torn down below).
++		if known && w.isCabled(udid) {
++			continue
++		}
++		if known && haveTun {
++			keep[udid] = true
++			continue
++		}
++		// Recently failed to yield a usable tunnel (e.g. a cabled device whose
++		// Wi-Fi RSD handshake collides with usbmux) → back off before retrying.
++		if failed && now.Sub(lastFail) < wifiFailBackoff {
++			continue
++		}
++
++		// (Re)connect: learn the UDID and bring the tunnel up.
++		connectCtx, c := context.WithTimeout(ctx, wifiConnectTimeout)
++		t, err := ConnectToWifiTunnel(connectCtx, ep, w.nextPort(), w.pm)
++		c()
++		if err != nil {
++			// ConnectToWifiTunnel already closed its own socket on failure; the
++			// returned zero Tunnel has no closer, so don't Close it here.
++			golog.Debug("wifi tunnel discovery attempt failed", "module", logModule, "addr", addr, "error", err)
++			w.mux.Lock()
++			w.failedAddrs[addr] = now
++			w.mux.Unlock()
++			continue
++		}
++		if t.Udid == "" {
++			_ = t.Close() // tunnel is up but the UDID handshake failed — drop it
++			golog.Debug("wifi tunnel discovery: no udid", "module", logModule, "addr", addr)
++			w.mux.Lock()
++			w.failedAddrs[addr] = now
++			w.mux.Unlock()
++			continue
++		}
++		w.mux.Lock()
++		w.addrToUdid[addr] = t.Udid
++		delete(w.failedAddrs, addr)
++		w.mux.Unlock()
++		if w.isCabled(t.Udid) {
++			_ = t.Close() // cabled after all — cache the addr→UDID and skip
++			golog.Debug("wifi discovery: device is cabled, skipping", "module", logModule, "udid", t.Udid)
++			continue
++		}
++		t.Connection = "wifi"
++		w.mux.Lock()
++		if old, ok := w.tunnels[t.Udid]; ok {
++			_ = old.Close()
++		}
++		w.tunnels[t.Udid] = t
++		w.mux.Unlock()
++		golog.Info("wifi tunnel established", "module", logModule, "udid", t.Udid, "address", t.Address, "rsdPort", t.RsdPort)
++		keep[t.Udid] = true
++	}
++
++	// Tear down Wi-Fi tunnels whose device vanished from Wi-Fi or became cabled.
++	w.mux.Lock()
++	stale := map[string]Tunnel{}
++	for udid, t := range w.tunnels {
++		if !keep[udid] {
++			stale[udid] = t
++			delete(w.tunnels, udid)
++		}
++	}
++	w.mux.Unlock()
++	for udid, t := range stale {
++		golog.Info("stopping wifi tunnel", "module", logModule, "udid", udid)
++		_ = t.Close()
++	}
++}
++
++func (w *WifiTunnelManager) closeAll() {
++	w.mux.Lock()
++	if w.closed {
++		w.mux.Unlock()
++		return
++	}
++	w.closed = true
++	all := w.tunnels
++	w.tunnels = map[string]Tunnel{}
++	w.mux.Unlock()
++	for _, t := range all {
++		_ = t.Close()
++	}
++}
 diff --git a/ios/utils.go b/ios/utils.go
 index 56a0de2..6d4beb9 100755
 --- a/ios/utils.go
@@ -643,18 +1613,19 @@ index 56a0de2..6d4beb9 100755
  // True if it exists, false otherwise
  func PathExists(path string) (bool, error) {
 diff --git a/main.go b/main.go
-index d048316..9f6010c 100644
+index d048316..c72a9c8 100644
 --- a/main.go
 +++ b/main.go
-@@ -126,6 +126,7 @@ Usage:
+@@ -126,6 +126,8 @@ Usage:
    ios prepare create-cert
    ios prepare printskip
    ios wifi [--ssid=<ssid>] [--password=<password>] [--enc-type=<encType>] [--remove] [options]
 +  ios wificonnections (enable | disable | get) [options]
++  ios remotepair [--pair-record-path=<pairrecordpath>] [options]
    ios profile add <profileFile> [--p12file=<orgid>] [--password=<p12password>] [options]
    ios profile list [options]
    ios profile remove <profileName> [options]
-@@ -386,6 +387,11 @@ The commands work as following:
+@@ -386,6 +388,15 @@ The commands work as following:
  																		Installs a wifi profile on the device forcing a connection to the provided WiFi network
  																		If --remove is specified, the wifi profile of the provided ssid will be removed.
  
@@ -662,11 +1633,15 @@ index d048316..9f6010c 100644
 +																		(Finder's "Show this iPhone when on Wi-Fi"). Prints {"EnableWifiConnections": bool}.
 +																		Requires an existing USB pairing; once enabled, usbmuxd sees the device on the
 +																		local network and go-ios can talk to it without the cable.
++    ios remotepair [--pair-record-path=<pairrecordpath>]               Establishes RemotePairing trust with a USB-connected device — the one-time
++																		setup a device needs before it will accept a cable-free Wi-Fi developer tunnel.
++																		The device persists trust for this host's identity; a first pairing shows an
++																		on-device confirmation prompt. --pair-record-path defaults to '.'.
 +
      ios profile add <profileFile> [--p12file=<orgid>] [--password=<p12password>]
                                                                         Install profile file on the device.
                                                                         If supervised set p12file and password or the environment variable 'P12_PASSWORD'
-@@ -621,6 +627,9 @@ func printSysmontapStats(device ios.DeviceEntry) {
+@@ -621,6 +632,9 @@ func printSysmontapStats(device ios.DeviceEntry) {
  				"enabled_cpus", cpuUsageMsg.EnabledCPUs,
  				"end_time", cpuUsageMsg.EndMachAbsTime,
  				"cpu_total_load", cpuUsageMsg.SystemCPUUsage.CPU_TotalLoad,
@@ -676,7 +1651,7 @@ index d048316..9f6010c 100644
  			)
  
  		case <-c:
-@@ -1407,15 +1416,15 @@ func outputDetailedList(deviceList ios.DeviceList) {
+@@ -1407,15 +1421,15 @@ func outputDetailedList(deviceList ios.DeviceList) {
  	result := make([]detailsEntry, len(deviceList.DeviceList))
  	for i, device := range deviceList.DeviceList {
  		udid := device.Properties.SerialNumber
@@ -700,3 +1675,49 @@ index d048316..9f6010c 100644
  	}
  	fmt.Println(convertToJSONString(map[string][]detailsEntry{
  		"deviceList": result,
+@@ -1848,6 +1862,17 @@ func startTunnel(ctx context.Context, recordsPath string, tunnelInfoHost string,
+ 	// "manage all devices".
+ 	tm := tunnel.NewTunnelManagerForDevice(pm, userspaceTUN, udid, tunnelInfoPort)
+ 
++	// AndroidLab patch: when GOIOS_WIFI_PAIRING is set, also maintain cable-free
++	// RemotePairing (Wi-Fi) tunnels for devices discovered over
++	// "_remotepairing._tcp" that aren't already reachable over usbmux. Only for
++	// the shared, manage-all agent (empty udid) — per-device agents stay wired.
++	if os.Getenv("GOIOS_WIFI_PAIRING") != "" && udid == "" {
++		wm := tunnel.NewWifiTunnelManager(pm, tunnelInfoPort, tm.HasTunnel)
++		tm.SetExtraTunnels(wm.ListTunnels)
++		go wm.Run(ctx)
++		slog.Info("RemotePairing Wi-Fi tunnel discovery enabled")
++	}
++
+ 	go func() {
+ 		ticker := time.NewTicker(1 * time.Second)
+ 		defer ticker.Stop()
+@@ -1888,6 +1913,27 @@ func deviceWithRsdProvider(device ios.DeviceEntry, udid string, address string,
+ 	return device1
+ }
+ 
++// deviceFromTunnel builds a DeviceEntry for a device reachable ONLY over a
++// cable-free RemotePairing/Wi-Fi tunnel (no usbmux entry). Unlike
++// deviceWithRsdProvider it does NOT re-look-up the device in usbmux
++// (GetDeviceWithAddress) — that would fail for a device usbmux can't see. It does
++// the RSD handshake and attaches the service-port provider directly, leaving
++// DeviceID 0 so services route over RSD (see useRsdTransport). AndroidLab patch.
++func deviceFromTunnel(device ios.DeviceEntry, address string, rsdPort int) (ios.DeviceEntry, error) {
++	device.Address = address
++	rsdService, err := ios.NewWithAddrPortDevice(address, rsdPort, device)
++	if err != nil {
++		return ios.DeviceEntry{}, fmt.Errorf("connect to RSD %s:%d: %w", address, rsdPort, err)
++	}
++	defer rsdService.Close()
++	rsdProvider, err := rsdService.Handshake()
++	if err != nil {
++		return ios.DeviceEntry{}, fmt.Errorf("RSD handshake: %w", err)
++	}
++	device.Rsd = rsdProvider
++	return device, nil
++}
++
+ func readPair(device ios.DeviceEntry) {
+ 	record, err := ios.ReadPairRecord(device.Properties.SerialNumber)
+ 	if err != nil {

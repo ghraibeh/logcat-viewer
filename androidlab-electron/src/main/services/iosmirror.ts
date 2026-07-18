@@ -237,7 +237,7 @@ function helperFailure(stderr: string): string {
     return 'No iPhone screen available to capture. Make sure the device is connected, unlocked, and trusted — if it was just used for other tools, reconnect it (or reboot it) so macOS re-exposes its screen.'
   }
   if (/permission|not authorized|denied/i.test(stderr)) {
-    return 'Screen capture was blocked — grant AndroidLab camera/screen-recording access in System Settings ▸ Privacy.'
+    return 'Screen capture was blocked — grant MobileLabKit camera/screen-recording access in System Settings ▸ Privacy.'
   }
   const last = stderr.split('\n').map((l) => l.trim()).filter(Boolean).pop()
   return last ? `Screen capture failed: ${last}` : 'Screen capture failed to start.'

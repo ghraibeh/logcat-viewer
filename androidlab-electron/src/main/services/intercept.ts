@@ -582,8 +582,8 @@ export class InterceptService {
     cert.validity.notBefore = new Date(Date.now() - 24 * 3600 * 1000)
     cert.validity.notAfter = new Date(Date.now() + 10 * 365 * 24 * 3600 * 1000)
     const attrs = [
-      { name: 'commonName', value: 'AndroidLabKit CA' },
-      { name: 'organizationName', value: 'AndroidLabKit' }
+      { name: 'commonName', value: 'MobileLabKit CA' },
+      { name: 'organizationName', value: 'MobileLabKit' }
     ]
     cert.setSubject(attrs)
     cert.setIssuer(attrs)
