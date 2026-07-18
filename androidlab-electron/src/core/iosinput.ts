@@ -308,6 +308,14 @@ export function wdaKeyValue(domKey: string): string[] | null {
  *  it bounded (a fast drag can fire 100+ mousemoves; ~40 preserves the curve cheaply). */
 export const MAX_GESTURE_POINTS = 40
 
+/** Max waypoints for the WebDriverAgent W3C path — kept SMALL on purpose. WDA's W3C→XCTest
+ *  synthesizer has a large per-waypoint cost (~150ms/point measured on-device), and worse: at
+ *  many points it stretches the playback into a slow crawl that loses the flick's velocity, so
+ *  a 40-point drag both lags (~7s) AND barely momentum-scrolls. A handful of points keeps the
+ *  gesture fast (~1–1.5s) with strong native momentum — measured best around here. (DeviceKit
+ *  builds the path in one native synthesize with no per-point tax, so it keeps MAX_GESTURE_POINTS.) */
+export const MAX_POINTER_ACTION_POINTS = 6
+
 /** Build a press→move…→release action list from a captured finger path (device points +
  *  ms timestamps). Each move's `duration` = time since the previous kept point, so the
  *  gesture replays at the user's real speed (giving natural scroll velocity/momentum).
@@ -337,6 +345,98 @@ export function pathToGestureActions(points: DkPathPoint[], button = 0): DkActio
   const last = kept[kept.length - 1]
   actions.push({ type: 'release', duration: 0, x: Math.round(last.x), y: Math.round(last.y), button })
   return actions
+}
+
+/** One item in a W3C Actions pointer sequence (WebDriverAgent `/session/:id/actions`). */
+export interface W3CPointerItem {
+  type: 'pointerMove' | 'pointerDown' | 'pointerUp' | 'pause'
+  duration?: number
+  x?: number
+  y?: number
+  button?: number
+}
+
+/** Build a W3C pointer-action sequence that replays a captured finger path FAITHFULLY —
+ *  pointerDown at the first point, one `pointerMove` per kept waypoint whose `duration` is
+ *  the real inter-sample delay, then pointerUp. Reproducing the per-segment timing preserves
+ *  the drag's velocity, so a flick carries iOS momentum-scroll (the whole reason we send the
+ *  full path, not just first→last). Downsamples to MAX_GESTURE_POINTS like `pathToGestureActions`.
+ *  This is the WebDriverAgent equivalent of DeviceKit's `device.io.gesture` full-path replay —
+ *  everything still lands in ONE atomic XCTest event (iOS can't stream touch; see the mirror
+ *  input notes), but a single faithful gesture feels far smoother than repeated lifting swipes.
+ *  `maxPoints` is deliberately small (see MAX_POINTER_ACTION_POINTS) — WDA's per-waypoint cost
+ *  makes a big path both slow and worse for momentum. */
+export function pathToPointerActions(points: DkPathPoint[], maxPoints = MAX_POINTER_ACTION_POINTS): W3CPointerItem[] {
+  if (points.length === 0) return []
+  const round = (p: DkPathPoint): { x: number; y: number } => ({ x: Math.round(p.x), y: Math.round(p.y) })
+  if (points.length === 1) {
+    const p = round(points[0])
+    return [
+      { type: 'pointerMove', duration: 0, x: p.x, y: p.y },
+      { type: 'pointerDown', button: 0 },
+      { type: 'pointerUp', button: 0 }
+    ]
+  }
+  let kept = points
+  if (points.length > maxPoints) {
+    kept = []
+    const step = (points.length - 1) / (maxPoints - 1)
+    for (let i = 0; i < maxPoints; i++) kept.push(points[Math.round(i * step)])
+    kept[kept.length - 1] = points[points.length - 1]
+  }
+  const first = round(kept[0])
+  const items: W3CPointerItem[] = [
+    { type: 'pointerMove', duration: 0, x: first.x, y: first.y },
+    { type: 'pointerDown', button: 0 }
+  ]
+  for (let i = 1; i < kept.length; i++) {
+    const p = round(kept[i])
+    const dtMs = Math.max(0, Math.round(kept[i].t - kept[i - 1].t))
+    items.push({ type: 'pointerMove', duration: dtMs, x: p.x, y: p.y })
+  }
+  items.push({ type: 'pointerUp', button: 0 })
+  return items
+}
+
+/** A momentum flick for the mirror's hybrid drag: a target projected from the release point
+ *  along the release velocity, plus the swipe duration to play it over. */
+export interface FlickSpec {
+  x: number
+  y: number
+  durMs: number
+}
+
+/** From the tail of a captured drag path (device points + ms timestamps), compute a momentum
+ *  flick for the release: project a target from `up` along the release velocity over
+ *  FLICK_PROJECT_MS (so the swipe's velocity ≈ the finger's), clamped to the device bounds.
+ *  Returns undefined for a slow release (below FLICK_MIN_SPEED) so the drag just settles at `up`.
+ *  Pure so the renderer can feed it straight into `iosInput.drag('end', …, flick)`. */
+export function computeFlick(
+  path: Array<{ x: number; y: number; t: number }>,
+  up: { x: number; y: number },
+  size: { width: number; height: number } | null
+): FlickSpec | undefined {
+  if (path.length < 2) return undefined
+  const FLICK_WINDOW_MS = 90 // velocity measured over the last ~90ms of motion
+  const FLICK_PROJECT_MS = 90 // ...and projected forward this long → swipe velocity ≈ release velocity
+  const FLICK_MIN_SPEED = 300 // device points/sec below which it's a settle, not a flick
+  const last = path[path.length - 1]
+  let i = path.length - 1
+  while (i > 0 && last.t - path[i - 1].t <= FLICK_WINDOW_MS) i--
+  const a = path[i]
+  const dt = (last.t - a.t) / 1000
+  if (dt <= 0) return undefined
+  const vx = (last.x - a.x) / dt
+  const vy = (last.y - a.y) / dt
+  const speed = Math.hypot(vx, vy)
+  if (speed < FLICK_MIN_SPEED) return undefined
+  let x = up.x + (vx * FLICK_PROJECT_MS) / 1000
+  let y = up.y + (vy * FLICK_PROJECT_MS) / 1000
+  if (size) {
+    x = Math.min(Math.max(x, 0), size.width - 1)
+    y = Math.min(Math.max(y, 0), size.height - 1)
+  }
+  return { x, y, durMs: FLICK_PROJECT_MS }
 }
 
 // --- input injection (agent must be running) ---------------------------------

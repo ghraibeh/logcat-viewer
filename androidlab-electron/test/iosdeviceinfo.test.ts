@@ -2,7 +2,7 @@
  * Device-Info aggregation tests. Synthetic fixtures (no real device PII).
  */
 import { describe, expect, it } from 'vitest'
-import { parseDeviceInfo, fmtGB } from '@core/iosdeviceinfo'
+import { parseDeviceInfo, fmtGB, backCameraLayout } from '@core/iosdeviceinfo'
 
 const INFO = JSON.stringify({
   DeviceName: 'Test Phone',
@@ -89,5 +89,29 @@ describe('fmtGB', () => {
   it('formats bytes as binary GB', () => {
     expect(fmtGB(255515160576)).toBe('238 GB')
     expect(fmtGB(12987228160)).toBe('12 GB')
+  })
+})
+
+describe('backCameraLayout (drawn-back camera module)', () => {
+  it('gives Pro / Pro Max a triple module', () => {
+    expect(backCameraLayout('iPhone 15 Pro Max')).toBe('triple')
+    expect(backCameraLayout('iPhone 16 Pro')).toBe('triple')
+    expect(backCameraLayout('iPhone 13 Pro')).toBe('triple')
+  })
+  it('gives the SE a single lens', () => {
+    expect(backCameraLayout('iPhone SE (3rd gen)')).toBe('single')
+    expect(backCameraLayout('iPhone SE')).toBe('single')
+  })
+  it('gives other modern iPhones a dual module', () => {
+    expect(backCameraLayout('iPhone 15')).toBe('dual')
+    expect(backCameraLayout('iPhone 15 Plus')).toBe('dual')
+    expect(backCameraLayout('iPhone 13 mini')).toBe('dual')
+  })
+  it('defaults unknown models (raw ProductType) to dual', () => {
+    expect(backCameraLayout('iPhone99,9')).toBe('dual')
+    expect(backCameraLayout('')).toBe('dual')
+  })
+  it('does not mistake "Plus"/"Max" alone for a Pro module', () => {
+    expect(backCameraLayout('iPhone 14 Plus')).toBe('dual')
   })
 })

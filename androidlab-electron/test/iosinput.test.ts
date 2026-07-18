@@ -7,6 +7,8 @@ import {
   DEFAULT_BUNDLE_ID,
   DEVICEKIT_XCTEST_CONFIG,
   MAX_GESTURE_POINTS,
+  MAX_POINTER_ACTION_POINTS,
+  computeFlick,
   WDA_LOCAL_URL,
   WDA_PORT,
   appsListArgs,
@@ -25,6 +27,7 @@ import {
   methodReady,
   parseUiSize,
   pathToGestureActions,
+  pathToPointerActions,
   provisionArgs,
   runDeviceKitArgs,
   runWdaArgs,
@@ -250,6 +253,81 @@ describe('DeviceKit agent (WebSocket JSON-RPC + full-path gesture)', () => {
     expect(a.length).toBeLessThanOrEqual(MAX_GESTURE_POINTS + 1)
     expect(a[0]).toMatchObject({ type: 'press', x: 0, y: 0 })
     expect(a[a.length - 1]).toMatchObject({ type: 'release', x: 299, y: 598 })
+  })
+
+  it('pathToPointerActions builds a W3C down→moves(with real ms)→up sequence', () => {
+    const path: DkPathPoint[] = [
+      { x: 100, y: 700, t: 1000 },
+      { x: 100, y: 500, t: 1100 },
+      { x: 100, y: 300, t: 1250 }
+    ]
+    const a = pathToPointerActions(path)
+    expect(a[0]).toEqual({ type: 'pointerMove', duration: 0, x: 100, y: 700 })
+    expect(a[1]).toEqual({ type: 'pointerDown', button: 0 })
+    expect(a[2]).toEqual({ type: 'pointerMove', duration: 100, x: 100, y: 500 }) // real 100ms preserved
+    expect(a[3]).toEqual({ type: 'pointerMove', duration: 150, x: 100, y: 300 }) // → velocity for momentum
+    expect(a[4]).toEqual({ type: 'pointerUp', button: 0 })
+  })
+
+  it('pathToPointerActions on a single point is a bare tap (down→up, no move segment)', () => {
+    const a = pathToPointerActions([{ x: 5, y: 6, t: 0 }])
+    expect(a.map((x) => x.type)).toEqual(['pointerMove', 'pointerDown', 'pointerUp'])
+  })
+
+  it('pathToPointerActions caps a huge path at MAX_POINTER_ACTION_POINTS, keeping first + last', () => {
+    const path: DkPathPoint[] = Array.from({ length: 300 }, (_, i) => ({ x: i, y: i * 2, t: i * 10 }))
+    const a = pathToPointerActions(path)
+    const moves = a.filter((x) => x.type === 'pointerMove')
+    // one pointerMove is the initial move-to-first (before pointerDown); total kept ≤ cap
+    expect(moves.length).toBeLessThanOrEqual(MAX_POINTER_ACTION_POINTS)
+    expect(a[0]).toMatchObject({ type: 'pointerMove', x: 0, y: 0 })
+    expect(moves[moves.length - 1]).toMatchObject({ x: 299, y: 598 }) // last real sample preserved
+    expect(a[a.length - 1]).toMatchObject({ type: 'pointerUp' })
+  })
+})
+
+describe('computeFlick (hybrid drag momentum finish)', () => {
+  const size = { width: 400, height: 800 }
+
+  it('projects a fast upward flick along the release velocity', () => {
+    // moving up ~2000 pt/s over the last 60ms (y decreasing)
+    const path = [
+      { x: 200, y: 600, t: 0 },
+      { x: 200, y: 540, t: 30 },
+      { x: 200, y: 480, t: 60 }
+    ]
+    const f = computeFlick(path, { x: 200, y: 480 }, size)
+    expect(f).toBeDefined()
+    expect(f!.durMs).toBe(90)
+    expect(f!.x).toBe(200)
+    // velocity ≈ -2000 pt/s, projected 90ms → ~180pt further up
+    expect(f!.y).toBeGreaterThan(280)
+    expect(f!.y).toBeLessThan(320)
+  })
+
+  it('returns undefined for a slow release (settle, not a flick)', () => {
+    const path = [
+      { x: 200, y: 600, t: 0 },
+      { x: 200, y: 596, t: 60 },
+      { x: 200, y: 594, t: 120 } // ~50 pt/s
+    ]
+    expect(computeFlick(path, { x: 200, y: 594 }, size)).toBeUndefined()
+  })
+
+  it('clamps the projected target to the device bounds', () => {
+    const path = [
+      { x: 200, y: 120, t: 0 },
+      { x: 200, y: 40, t: 30 },
+      { x: 200, y: 5, t: 60 } // very fast toward the top edge
+    ]
+    const f = computeFlick(path, { x: 200, y: 5 }, size)
+    expect(f).toBeDefined()
+    expect(f!.y).toBeGreaterThanOrEqual(0) // never negative / off-screen
+  })
+
+  it('returns undefined without enough samples', () => {
+    expect(computeFlick([{ x: 1, y: 1, t: 0 }], { x: 1, y: 1 }, size)).toBeUndefined()
+    expect(computeFlick([], { x: 0, y: 0 }, size)).toBeUndefined()
   })
 })
 

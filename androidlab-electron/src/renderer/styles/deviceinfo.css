@@ -206,6 +206,161 @@
   }
 }
 
+/* ---- Front + drawn back, side by side --------------------------------- */
+.dinfo-media {
+  flex: 0 0 auto;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* The CSS-drawn back, tinted to the enclosure colour (AppleDB has no back
+   photo). --body is the real device colour; the module below is the cameras. */
+.dinfo-back {
+  position: relative;
+  flex: 0 0 auto;
+  align-self: center;
+  height: 150px;
+  aspect-ratio: 72 / 150;
+  border-radius: 21px;
+  background:
+    radial-gradient(120% 70% at 16% 6%, rgba(255, 255, 255, 0.22), transparent 44%),
+    linear-gradient(
+      155deg,
+      color-mix(in srgb, var(--body) 86%, white 14%),
+      var(--body) 52%,
+      color-mix(in srgb, var(--body) 80%, black 20%)
+    );
+  box-shadow:
+    0 10px 26px -10px rgba(0, 0, 0, 0.55),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.14);
+  animation: dinfo-photo-in 0.45s ease both;
+}
+/* Don't let the per-element dinfo-in animation jitter the drawn parts — the
+   whole back scales in as one via dinfo-photo-in above. */
+.dinfo-back .dinfo-cam,
+.dinfo-back .dinfo-lens,
+.dinfo-back .dinfo-flash,
+.dinfo-back .dinfo-logo {
+  animation: none;
+}
+
+/* Camera module: rounded square in the top-left corner. */
+.dinfo-cam {
+  position: absolute;
+  top: 7%;
+  left: 9%;
+  aspect-ratio: 1;
+  border-radius: 27%;
+  background: linear-gradient(
+    150deg,
+    color-mix(in srgb, var(--body) 74%, white 8%),
+    color-mix(in srgb, var(--body) 70%, black 30%)
+  );
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+    inset 0 2px 5px rgba(0, 0, 0, 0.35);
+}
+.dinfo-back.layout-triple .dinfo-cam {
+  width: 48%;
+}
+.dinfo-back.layout-dual .dinfo-cam {
+  width: 44%;
+}
+.dinfo-back.layout-single .dinfo-cam {
+  width: 32%;
+}
+
+/* Lenses — a dark glass dot with a rim and a glint. */
+.dinfo-lens {
+  position: absolute;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle at 36% 30%, #55555f 0%, #14141a 55%, #050507 100%);
+  box-shadow:
+    0 0 0 1.4px rgba(255, 255, 255, 0.14),
+    inset 0 0 3px rgba(0, 0, 0, 0.9);
+}
+.dinfo-lens::after {
+  content: '';
+  position: absolute;
+  top: 20%;
+  left: 26%;
+  width: 24%;
+  height: 24%;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.42);
+}
+/* triple = triangle (TL / TR / BL) */
+.layout-triple .dinfo-lens {
+  width: 38%;
+}
+.layout-triple .dinfo-lens:nth-child(1) {
+  top: 9%;
+  left: 9%;
+}
+.layout-triple .dinfo-lens:nth-child(2) {
+  top: 9%;
+  right: 9%;
+}
+.layout-triple .dinfo-lens:nth-child(3) {
+  bottom: 9%;
+  left: 9%;
+}
+/* dual = diagonal pair (TL / BR) */
+.layout-dual .dinfo-lens {
+  width: 42%;
+}
+.layout-dual .dinfo-lens:nth-child(1) {
+  top: 8%;
+  left: 8%;
+}
+.layout-dual .dinfo-lens:nth-child(2) {
+  bottom: 8%;
+  right: 8%;
+}
+/* single = one centred lens */
+.layout-single .dinfo-lens {
+  width: 54%;
+  top: 12%;
+  left: 12%;
+}
+
+/* Flash / sensor dot (inside the module). */
+.dinfo-flash {
+  position: absolute;
+  width: 15%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #fff6d8, #d9c07a 70%);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+.layout-triple .dinfo-flash {
+  bottom: 12%;
+  right: 11%;
+}
+.layout-dual .dinfo-flash {
+  top: 11%;
+  right: 11%;
+}
+.layout-single .dinfo-flash {
+  bottom: 16%;
+  right: 16%;
+}
+
+/* Apple mark, centred and inlaid. */
+.dinfo-logo {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 30%;
+  aspect-ratio: 1;
+  display: block;
+  line-height: 0;
+}
+
 /* ---- Rings ------------------------------------------------------------ */
 .dinfo-rings {
   display: flex;

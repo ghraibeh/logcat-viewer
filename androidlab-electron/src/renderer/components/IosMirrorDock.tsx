@@ -10,6 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnnexBDemuxer } from '@core/mirror'
+import { computeFlick } from '@core/iosinput'
 import type { IosMirrorState, SaveResult } from '@shared/types'
 import { Icon } from './Icon'
 
@@ -145,6 +146,40 @@ class H264Engine {
     }
   }
 
+  // The single source of truth for pane geometry: source-pixels → CSS-px scale + the
+  // letterboxed fit box, for the CURRENT pane size + view rotation. Both the painter
+  // (drawSource) and the click→device mapping read this — like Apple's iPhone Mirroring
+  // keeps one `coordinateTransform` (CGAffineTransform) that maps host coords → device
+  // coords, so paint and hit-testing can never disagree.
+  private computeFit(cw: number, ch: number): { scale: number; fit: Fit } {
+    // At 90/270 the fit box swaps W/H, so a portrait phone fills the pane horizontally.
+    const rot = ((this.rotation % 360) + 360) % 360
+    const swap = rot === 90 || rot === 270
+    const effW = swap ? this.srcH : this.srcW
+    const effH = swap ? this.srcW : this.srcH
+    const scale = Math.min(cw / effW, ch / effH)
+    const boxW = effW * scale
+    const boxH = effH * scale
+    return { scale, fit: { x: (cw - boxW) / 2, y: (ch - boxH) / 2, w: boxW, h: boxH } }
+  }
+
+  /** Recompute scale/fit for the CURRENT pane size from the last frame's dimensions,
+   *  WITHOUT waiting for the next decoded frame. Called on resize / rotation so the
+   *  click→device mapping stays correct the instant the layout changes — the stream may
+   *  not repaint for a frame or two (or at all, on a static screen), and hit-testing must
+   *  not lag it. No-op until the first frame has set srcW/srcH. */
+  relayout(): void {
+    const canvas = this.canvas
+    const parent = canvas?.parentElement
+    if (!canvas || !parent || this.srcW === 0 || this.srcH === 0) return
+    const cw = parent.clientWidth
+    const ch = parent.clientHeight
+    if (cw === 0 || ch === 0) return
+    const { scale, fit } = this.computeFit(cw, ch)
+    this.scale = scale
+    this.fit = fit
+  }
+
   private drawSource(src: CanvasImageSource, sw: number, sh: number): void {
     const canvas = this.canvas
     const parent = canvas?.parentElement
@@ -152,6 +187,8 @@ class H264Engine {
     const cw = parent.clientWidth
     const ch = parent.clientHeight
     if (cw === 0 || ch === 0) return
+    this.srcW = sw
+    this.srcH = sh
     const dpr = window.devicePixelRatio || 1
     if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(ch * dpr)) {
       canvas.width = Math.round(cw * dpr)
@@ -161,13 +198,8 @@ class H264Engine {
     }
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    // Rotate the view about the canvas centre: at 90/270 the fit box swaps W/H, so a
-    // portrait phone fills the pane horizontally (and vice-versa).
     const rot = ((this.rotation % 360) + 360) % 360
-    const swap = rot === 90 || rot === 270
-    const effW = swap ? sh : sw
-    const effH = swap ? sw : sh
-    const scale = Math.min(cw / effW, ch / effH)
+    const { scale, fit } = this.computeFit(cw, ch)
     const dw = sw * scale
     const dh = sh * scale
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -178,12 +210,8 @@ class H264Engine {
     ctx.imageSmoothingEnabled = true
     ctx.drawImage(src, -dw / 2, -dh / 2, dw, dh)
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    this.srcW = sw
-    this.srcH = sh
     this.scale = scale
-    const boxW = effW * scale
-    const boxH = effH * scale
-    this.fit = { x: (cw - boxW) / 2, y: (ch - boxH) / 2, w: boxW, h: boxH }
+    this.fit = fit
   }
 
   /** PNG data URL of just the mirrored content (letterbox cropped out), or null. */
@@ -302,10 +330,24 @@ export function IosMirrorDock({
     return () => eng.close()
   }, [])
 
-  // Push the view rotation to the engine; the next painted frame applies it.
+  // Push the view rotation to the engine; the next painted frame applies it. Recompute
+  // the fit immediately too so click→device mapping is correct before that frame lands.
   useEffect(() => {
     engineRef.current.setRotation(rotation)
+    engineRef.current.relayout()
   }, [rotation])
+
+  // Keep the hit-test geometry in lockstep with the pane's actual size. drawSource only
+  // recomputes scale/fit when a frame paints; a resize (window drag, fullscreen, popout)
+  // or a stalled stream would otherwise leave taps mapped against the old geometry. This
+  // is the layout-driven recompute Apple's iPhone Mirroring does for its coordinateTransform.
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => engineRef.current.relayout())
+    ro.observe(wrap)
+    return () => ro.disconnect()
+  }, [])
 
   // (Re)start the feed whenever the device changes.
   useEffect(() => {
@@ -359,51 +401,81 @@ export function IosMirrorDock({
   }, [onCaptured])
 
   // --- touch/keyboard forwarding ------------------------------------------
-  // Toggle input: confirm the agent is reachable, then read the device size (the
-  // points `ui tap/swipe` expect) so canvas clicks can be mapped.
+  // Enable input: bring up the agent (confirm it's reachable), then read the device size
+  // (the points `ui tap/swipe` expect) so canvas clicks can be mapped. Returns success.
+  const enableInput = useCallback(async (): Promise<boolean> => {
+    if (!serial) return false
+    setInputMsg('Checking touch agent…')
+    const up = await window.androidlab.iosInput.status(serial)
+    if (!up) {
+      setInputMsg('Touch agent not set up — open the ⚙ iOS touch input settings and provision it.')
+      return false
+    }
+    const sz = await window.androidlab.iosInput.size(serial)
+    if (!sz) {
+      setInputMsg('Agent is up but the device size could not be read.')
+      return false
+    }
+    uiSizeRef.current = sz
+    setInputOn(true)
+    setInputMsg(null)
+    return true
+  }, [serial])
+
   const toggleInput = useCallback(async () => {
     if (inputOn) {
       setInputOn(false)
       setInputMsg(null)
       return
     }
-    if (!serial) return
-    setInputMsg('Checking touch agent…')
-    const up = await window.androidlab.iosInput.status(serial)
-    if (!up) {
-      setInputMsg('Touch agent not set up — open the ⚙ iOS touch input settings and provision it.')
-      return
-    }
-    const sz = await window.androidlab.iosInput.size(serial)
-    if (!sz) {
-      setInputMsg('Agent is up but the device size could not be read.')
-      return
-    }
-    uiSizeRef.current = sz
-    setInputOn(true)
-    setInputMsg(null)
-  }, [inputOn, serial])
+    await enableInput()
+  }, [inputOn, enableInput])
+
+  // Auto-enable touch once the mirror is live — but only if the agent is already
+  // provisioned (otherwise stay view-only; provisioning is a deliberate ⚙ step). One
+  // attempt per device so a manual disable isn't fought, and re-armed on device switch.
+  const autoTriedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!serial || !hasFrame || inputOn) return
+    if (autoTriedRef.current === serial) return
+    autoTriedRef.current = serial
+    void (async () => {
+      const cfg = await window.androidlab.iosInput.getConfig()
+      if (cfg?.provisioned) void enableInput()
+    })()
+  }, [serial, hasFrame, inputOn, enableInput])
 
   // Canvas client point → device POINTS: invert the view rotation + scale to device
-  // PIXELS (same as the Android mapping), then scale pixels→points via `ui size`.
-  const toDevicePoints = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
-    const eng = engineRef.current
-    const canvas = canvasRef.current
-    const sz = uiSizeRef.current
-    if (!canvas || eng.srcW === 0 || !eng.scale || !sz) return null
-    const rect = canvas.getBoundingClientRect()
-    const X = clientX - (rect.left + rect.width / 2)
-    const Y = clientY - (rect.top + rect.height / 2)
-    const rad = (-eng.rotation * Math.PI) / 180
-    const c = Math.cos(rad)
-    const s = Math.sin(rad)
-    const ux = X * c - Y * s
-    const uy = X * s + Y * c
-    const pxX = ux / eng.scale + eng.srcW / 2
-    const pxY = uy / eng.scale + eng.srcH / 2
-    if (pxX < 0 || pxX >= eng.srcW || pxY < 0 || pxY >= eng.srcH) return null
-    return { x: (pxX * sz.width) / eng.srcW, y: (pxY * sz.height) / eng.srcH }
-  }, [])
+  // PIXELS (same as the Android mapping), then scale pixels→points via `ui size`. With
+  // `clamp`, a point in the letterbox (or past the pane edge) is pinned to the nearest
+  // device pixel instead of rejected — so an in-progress drag that runs off the edge
+  // (swipe-up-for-home, pull-down Control Center, edge-swipe back) keeps tracking to the
+  // screen bound. A fresh press (clamp off) still requires landing on the screen itself.
+  const toDevicePoints = useCallback(
+    (clientX: number, clientY: number, clamp = false): { x: number; y: number } | null => {
+      const eng = engineRef.current
+      const canvas = canvasRef.current
+      const sz = uiSizeRef.current
+      if (!canvas || eng.srcW === 0 || !eng.scale || !sz) return null
+      const rect = canvas.getBoundingClientRect()
+      const X = clientX - (rect.left + rect.width / 2)
+      const Y = clientY - (rect.top + rect.height / 2)
+      const rad = (-eng.rotation * Math.PI) / 180
+      const c = Math.cos(rad)
+      const s = Math.sin(rad)
+      const ux = X * c - Y * s
+      const uy = X * s + Y * c
+      let pxX = ux / eng.scale + eng.srcW / 2
+      let pxY = uy / eng.scale + eng.srcH / 2
+      if (pxX < 0 || pxX >= eng.srcW || pxY < 0 || pxY >= eng.srcH) {
+        if (!clamp) return null
+        pxX = Math.min(Math.max(pxX, 0), eng.srcW - 1)
+        pxY = Math.min(Math.max(pxY, 0), eng.srcH - 1)
+      }
+      return { x: (pxX * sz.width) / eng.srcW, y: (pxY * sz.height) / eng.srcH }
+    },
+    []
+  )
 
   // Touch indicator: a finger-sized ring positioned relative to the canvas wrapper.
   // Driven straight through the DOM (no React re-render) so it tracks the cursor 1:1.
@@ -429,12 +501,21 @@ export function IosMirrorDock({
   const hideDot = useCallback((): void => dotRef.current?.classList.remove('show', 'press'), [])
 
   const movedRef = useRef(false)
+  // Recent finger samples (device points + ms timestamps), used only to compute the RELEASE
+  // velocity so a flick can carry momentum. iOS can't stream touch (every injected gesture is
+  // one atomic XCTest event that lifts the finger — verified on-device), so the drag is a
+  // HYBRID: while the mouse moves we stream short swipe segments (content tracks live, but
+  // coarse ~2-3 steps/sec — the XCTest floor), and on release we hand the service a projected
+  // `flick` so a fast release keeps scrolling with native momentum. The touch-dot follows the
+  // cursor 1:1 for instant visual feedback throughout.
+  const pathRef = useRef<Array<{ x: number; y: number; t: number }>>([])
   const onCanvasDown = useCallback(
     (e: React.MouseEvent) => {
       if (!inputOn) return
       const p = toDevicePoints(e.clientX, e.clientY)
       pressRef.current = p ? { ...p, t: e.timeStamp } : null
       movedRef.current = false
+      pathRef.current = p ? [{ x: p.x, y: p.y, t: e.timeStamp }] : []
       if (p) {
         wrapRef.current?.focus() // capture the keyboard for live forwarding
         showDot(e.clientX, e.clientY)
@@ -444,38 +525,42 @@ export function IosMirrorDock({
     },
     [inputOn, serial, toDevicePoints, showDot]
   )
-  // Stream the move to XCTest as it happens (don't wait for release). The service
-  // coalesces + sends a scroll segment whenever the previous one finishes, so the
-  // content moves DURING the drag. The indicator follows the cursor instantly too.
+  // Stream the move to the device as it happens so content tracks live, and record the sample
+  // for the release-velocity calc. The dot follows the cursor instantly regardless.
   const onCanvasMove = useCallback(
     (e: React.MouseEvent) => {
       if (!inputOn || !pressRef.current) return
       moveDot(e.clientX, e.clientY)
-      const p = toDevicePoints(e.clientX, e.clientY)
+      const p = toDevicePoints(e.clientX, e.clientY, true)
       if (!p) return
       const press = pressRef.current
       if (Math.abs(p.x - press.x) + Math.abs(p.y - press.y) >= 8) movedRef.current = true
+      pathRef.current.push({ x: p.x, y: p.y, t: e.timeStamp })
+      if (pathRef.current.length > 64) pathRef.current.shift() // keep it bounded; we only need the tail
       if (serial) void window.androidlab.iosInput.drag(serial, 'move', p.x, p.y)
     },
     [inputOn, serial, toDevicePoints, moveDot]
   )
-  // A short press (never moved) = tap; otherwise end the streamed drag at the release point.
+  // A short press (never moved) = tap; otherwise end the streamed drag, adding a velocity-matched
+  // momentum flick from the release point so a fast flick keeps scrolling.
   const onCanvasUp = useCallback(
     (e: React.MouseEvent) => {
       hideDot()
       if (!inputOn || !serial) return
       const press = pressRef.current
       const moved = movedRef.current
+      const path = pathRef.current
       pressRef.current = null
       movedRef.current = false
+      pathRef.current = []
       if (!press) return
-      const up = toDevicePoints(e.clientX, e.clientY) ?? { x: press.x, y: press.y }
+      const up = toDevicePoints(e.clientX, e.clientY, true) ?? { x: press.x, y: press.y }
       const dist = Math.abs(up.x - press.x) + Math.abs(up.y - press.y)
       if (!moved && dist < 8) {
-        void window.androidlab.iosInput.drag(serial, 'end', press.x, press.y) // clears anchor
+        void window.androidlab.iosInput.drag(serial, 'end', press.x, press.y) // clears the anchor
         void window.androidlab.iosInput.tap(serial, press.x, press.y)
       } else {
-        void window.androidlab.iosInput.drag(serial, 'end', up.x, up.y)
+        void window.androidlab.iosInput.drag(serial, 'end', up.x, up.y, computeFlick(path, up, uiSizeRef.current))
       }
     },
     [inputOn, serial, toDevicePoints, hideDot]
@@ -646,6 +731,26 @@ export function IosMirrorDock({
           onClick={() => serial && void window.androidlab.iosInput.button(serial, 'appswitcher')}
         >
           <Icon name="recents" size={24} />
+        </button>
+
+        <div className="rail-div" />
+
+        {/* hardware volume keys */}
+        <button
+          className="rail-btn"
+          title="Volume up"
+          disabled={!serial}
+          onClick={() => serial && void window.androidlab.iosInput.button(serial, 'volumeup')}
+        >
+          <Icon name="volUp" size={24} />
+        </button>
+        <button
+          className="rail-btn"
+          title="Volume down"
+          disabled={!serial}
+          onClick={() => serial && void window.androidlab.iosInput.button(serial, 'volumedown')}
+        >
+          <Icon name="volDown" size={24} />
         </button>
 
         <div className="rail-div" />

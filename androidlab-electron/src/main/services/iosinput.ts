@@ -33,7 +33,7 @@ import {
   type IosInputConfig,
   type UiDriverOpts
 } from '@core/iosinput'
-import { deviceKitKey, pathToGestureActions, wdaKeyValue, type DkPathPoint } from '@core/iosinput'
+import { deviceKitKey, pathToGestureActions, pathToPointerActions, wdaKeyValue, type DkPathPoint } from '@core/iosinput'
 import * as devicekit from './devicekit'
 import { startTunnel } from './goios'
 
@@ -395,8 +395,25 @@ async function wdaReady(bin: string, udid: string, timeout = 8000): Promise<bool
  *  WebSocket path is only a win if a newer DeviceKit with fast text/`device.io.keys` is
  *  installed). Sets `activeAgent` so the injection hot-path routes correctly. */
 export async function ensureAgent(bin: string, udid: string, onProgress: (line: string) => void = () => {}): Promise<boolean> {
-  // Prefer WDA. If it comes up, make sure any DeviceKit runner is torn down (one XCUITest
-  // session at a time) and route to WDA.
+  // Honor the user's configured agent. Only ONE XCUITest session can run at a time, so
+  // whichever we pick, the other runner is torn down first. DeviceKit is required for
+  // hardware buttons other than home (lock / volume) — WDA's pressButton can't do them.
+  const prefer = loadConfig().agent
+  if (prefer === 'devicekit') {
+    stopAgent() // tear down any WDA runner first
+    if (await devicekit.ensure(bin, udid, onProgress)) {
+      activeAgent = 'devicekit'
+      return true
+    }
+    // DeviceKit couldn't come up — fall back to WDA (home + gestures still work; volume won't).
+    if (await ensureWda(bin, udid, onProgress)) {
+      activeAgent = 'wda'
+      return true
+    }
+    activeAgent = null
+    return false
+  }
+  // Prefer WDA. If it comes up, tear down any DeviceKit runner and route to WDA.
   if (await ensureWda(bin, udid, onProgress)) {
     devicekit.stop()
     activeAgent = 'wda'
@@ -661,9 +678,13 @@ export function tap(_bin: string, _udid: string, x: number, y: number): void {
   })
 }
 
-/** A drag as the user's FULL captured finger path (device points + ms timestamps). On
- *  DeviceKit it's one `device.io.gesture` (press→moves→release) reproducing the real
- *  motion + velocity over the WebSocket; WDA falls back to a first→last swipe. */
+/** A drag as the user's FULL captured finger path (device points + ms timestamps). Replayed
+ *  as ONE faithful gesture so the drag's real velocity carries iOS momentum-scroll — on
+ *  DeviceKit via `device.io.gesture`, on WebDriverAgent via a multi-waypoint W3C `/actions`
+ *  sequence (`pathToPointerActions`, every kept sample with its real inter-sample duration).
+ *  iOS still synthesizes it as one atomic event — there is no streaming touch on a stock device
+ *  (see the mirror input notes) — but a single velocity-accurate gesture feels far smoother than
+ *  repeated lifting swipe segments. */
 export function gesture(_bin: string, _udid: string, points: DkPathPoint[]): void {
   if (!points || points.length === 0) return
   enqueue(async () => {
@@ -671,53 +692,86 @@ export function gesture(_bin: string, _udid: string, points: DkPathPoint[]): voi
       await devicekit.gesture(pathToGestureActions(points))
       return
     }
-    const a = points[0]
-    const b = points[points.length - 1]
-    const moveMs = Math.max(20, Math.min(300, b.t - a.t))
-    await withSession((sid) => wda('POST', `/session/${sid}/actions`, pointerGesture(a.x, a.y, b.x, b.y, moveMs), 12000))
+    const actions = pathToPointerActions(points)
+    if (actions.length === 0) return
+    await withSession((sid) =>
+      wda('POST', `/session/${sid}/actions`, { actions: [{ type: 'pointer', id: 'finger1', parameters: { pointerType: 'touch' }, actions }] }, 15000)
+    )
   })
 }
 
-// --- live drag streaming: inject gesture SEGMENTS during the drag ------------
-// Instead of one gesture on release, send a short swipe segment from the last position
-// to the newest one WHENEVER the previous segment finishes (coalescing — no backlog).
-// The content moves during the drag (mostly useful for SCROLLING). Ceiling: each XCTest
-// gesture is ~360ms and only one can be in flight, so it's ~2-3 steps/sec — the finger
-// lifts between steps, so it scrolls incrementally rather than dragging continuously.
+// --- live drag streaming + momentum finish (the mirror's HYBRID drag) ---------
+// While the finger moves we stream short swipe SEGMENTS so the content tracks the cursor
+// live (coalesced — a fast drag never backs up a queue). On release the renderer can hand
+// us a `flick` (a velocity-matched final swipe from the release point) so a flick keeps
+// scrolling with native momentum. iOS can't stream touch — each segment is one atomic
+// ~360ms XCTest gesture that LIFTS the finger (see the mirror input notes) — so live
+// tracking is coarse (~2-3 steps/sec, choppy); the release flick is what makes it feel
+// smooth. Everything runs on this one dragPump chain (one segment in flight at a time),
+// so the tracking segments and the final flick are strictly ordered and never overlap.
 let dragActive = false
 let dragAnchor: { x: number; y: number } | null = null
 let dragTarget: { x: number; y: number } | null = null
 let dragInFlight = false
-const DRAG_MIN_DELTA = 3 // device points — ignore jitter below this
+let dragFlick: { x: number; y: number; durMs: number } | null = null
+// Each streamed segment is a full down→move→up touch, so it must move MORE than iOS's
+// tap-vs-pan slop (~10 device points) — otherwise iOS treats the little segment as a TAP at
+// its press point and, on the home screen or a list, OPENS whatever is under it (the reported
+// "drag opens the app under the start point" bug). Measured on-device: a ~4pt segment did
+// nothing / could tap, a 20pt segment reliably registered as a pan (paged the home screen).
+// So gate every segment (incl. the first, which presses at the drag's start point) at 20pt.
+// The trade-off is coarser live tracking; a slow sub-20pt drag simply injects nothing.
+const DRAG_MIN_DELTA = 20 // device points — below this a segment would be a tap, not a drag
+
+/** Inject one swipe segment from→to over `moveMs` (DeviceKit WebSocket or WDA HTTP). */
+function dragSegment(from: { x: number; y: number }, to: { x: number; y: number }, moveMs: number): Promise<unknown> {
+  if (activeAgent === 'devicekit') {
+    return devicekit.gesture([
+      { type: 'press', duration: 0, x: Math.round(from.x), y: Math.round(from.y), button: 0 },
+      { type: 'move', duration: moveMs / 1000, x: Math.round(to.x), y: Math.round(to.y), button: 0 },
+      { type: 'release', duration: 0, x: Math.round(to.x), y: Math.round(to.y), button: 0 }
+    ])
+  }
+  return withSession((sid) => wda('POST', `/session/${sid}/actions`, pointerGesture(from.x, from.y, to.x, to.y, moveMs), 12000))
+}
 
 async function dragPump(): Promise<void> {
   if (dragInFlight || !dragAnchor || !dragTarget) return
   const from = dragAnchor
   const to = dragTarget
   const moved = Math.abs(to.x - from.x) + Math.abs(to.y - from.y)
-  if (moved < DRAG_MIN_DELTA) {
-    if (!dragActive) {
-      dragAnchor = null
-      dragTarget = null
+  if (moved >= DRAG_MIN_DELTA) {
+    // Tracking segment: 50ms swipe from the last position to the newest target.
+    dragInFlight = true
+    try {
+      await dragSegment(from, to, 50)
+    } finally {
+      dragAnchor = to // next segment starts where this one ended → contiguous scroll
+      dragInFlight = false
+      void dragPump() // chase the latest target
     }
     return
   }
-  dragInFlight = true
-  try {
-    if (activeAgent === 'devicekit') {
-      await devicekit.gesture([
-        { type: 'press', duration: 0, x: Math.round(from.x), y: Math.round(from.y), button: 0 },
-        { type: 'move', duration: 0.05, x: Math.round(to.x), y: Math.round(to.y), button: 0 },
-        { type: 'release', duration: 0, x: Math.round(to.x), y: Math.round(to.y), button: 0 }
-      ])
-    } else {
-      await withSession((sid) => wda('POST', `/session/${sid}/actions`, pointerGesture(from.x, from.y, to.x, to.y, 50), 12000))
+  // Tracking has caught up to the release point.
+  if (dragActive) return // still dragging — wait for the next move
+  if (dragFlick) {
+    // Momentum finish: one fast swipe from the release point at the real release velocity,
+    // so iOS applies native momentum-scroll. Playing it over `durMs` with the caller-projected
+    // distance encodes that velocity. This is the last drag action for this gesture.
+    const flick = dragFlick
+    dragFlick = null
+    dragInFlight = true
+    try {
+      await dragSegment(to, { x: flick.x, y: flick.y }, flick.durMs)
+    } finally {
+      dragAnchor = null
+      dragTarget = null
+      dragInFlight = false
     }
-  } finally {
-    dragAnchor = to // next segment starts where this one ended → contiguous scroll
-    dragInFlight = false
-    void dragPump() // chase the latest target
+    return
   }
+  dragAnchor = null
+  dragTarget = null
 }
 
 /** Begin a streamed drag at the down point (no injection yet — just the anchor). */
@@ -725,6 +779,7 @@ export function dragStart(_bin: string, _udid: string, x: number, y: number): vo
   dragActive = true
   dragAnchor = { x, y }
   dragTarget = { x, y }
+  dragFlick = null
 }
 /** Update the target as the finger moves; the pump sends a segment when it's free. */
 export function dragMove(_bin: string, _udid: string, x: number, y: number): void {
@@ -732,10 +787,12 @@ export function dragMove(_bin: string, _udid: string, x: number, y: number): voi
   dragTarget = { x, y }
   void dragPump()
 }
-/** Finish the drag — flush a final segment to the release point. */
-export function dragEnd(_bin: string, _udid: string, x: number, y: number): void {
+/** Finish the drag at (x,y). If `flick` is given (a projected target + duration), a final
+ *  velocity-matched momentum swipe follows once live tracking catches up to the release point. */
+export function dragEnd(_bin: string, _udid: string, x: number, y: number, flick?: { x: number; y: number; durMs: number }): void {
   dragActive = false
   dragTarget = { x, y }
+  dragFlick = flick && flick.durMs > 0 ? { x: flick.x, y: flick.y, durMs: flick.durMs } : null
   void dragPump()
 }
 
@@ -853,7 +910,8 @@ export function button(bin: string, udid: string, name: string): void {
         }
         return
       }
-      await devicekit.button(name) // home / lock / volumeup / volumedown
+      // DeviceKit's XCUIDevice button names are camelCase (home / volumeUp / volumeDown / lock).
+      await devicekit.button(DK_BUTTON_NAME[name] ?? name)
       return
     }
 
@@ -894,6 +952,26 @@ export function button(bin: string, udid: string, name: string): void {
       wdaSession = null
       return
     }
-    await withSession((sid) => wda('POST', `/session/${sid}/wda/pressButton`, { name }))
+    // WDA's pressButton wants camelCase (volumeUp/volumeDown); the renderer sends the
+    // DeviceKit-style lowercase canonical name, so map it here. (WDA only reliably does
+    // home/volume via pressButton on newer builds; volume needs DeviceKit on go-ios's fork.)
+    const wdaName = WDA_BUTTON_NAME[name] ?? name
+    await withSession((sid) => wda('POST', `/session/${sid}/wda/pressButton`, { name: wdaName }))
   })
+}
+
+/** Canonical (lowercase) button name → WebDriverAgent's pressButton spelling. */
+const WDA_BUTTON_NAME: Record<string, string> = {
+  volumeup: 'volumeUp',
+  volumedown: 'volumeDown',
+  home: 'home',
+  lock: 'lock'
+}
+
+/** Canonical (lowercase) button name → DeviceKit's XCUIDevice.Button spelling (camelCase). */
+const DK_BUTTON_NAME: Record<string, string> = {
+  volumeup: 'volumeUp',
+  volumedown: 'volumeDown',
+  home: 'home',
+  lock: 'lock'
 }

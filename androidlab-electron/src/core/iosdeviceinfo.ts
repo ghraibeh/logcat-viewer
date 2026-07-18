@@ -47,6 +47,32 @@ export interface IosDeviceInfo {
   details: Array<[string, string]>
 }
 
+/** The device-render bundle for the hero: AppleDB's front photo plus the
+ *  enclosure colour we tint the drawn back with (AppleDB has front renders
+ *  only — no back photo exists for any iPhone — so the back is drawn). */
+export interface IosDeviceRender {
+  /** Front render as a data: URI, or null when unavailable/offline. */
+  front: string | null
+  /** Enclosure colour as a hex string WITHOUT a leading '#', e.g. '464646'. */
+  colorHex: string | null
+  /** Human colour name, e.g. 'Black Titanium'. */
+  colorName: string | null
+}
+
+/** Rear-camera arrangement for the drawn device back. */
+export type BackCameraLayout = 'triple' | 'dual' | 'single'
+
+/** Pick the rear-camera arrangement from the marketing name: Pro/Pro Max carry a
+ *  triangular three-lens module, the SE a single lens, and every other modern
+ *  iPhone a diagonal pair. Unknown models (name falls back to the raw
+ *  ProductType) get the common dual layout. */
+export function backCameraLayout(marketingName: string): BackCameraLayout {
+  const n = (marketingName || '').toLowerCase()
+  if (/\bse\b/.test(n)) return 'single'
+  if (n.includes('pro')) return 'triple'
+  return 'dual'
+}
+
 interface Spec {
   name: string
   chip?: string

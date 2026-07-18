@@ -234,7 +234,7 @@ const api: AndroidLabApi = {
     swipe: (udid, x1, y1, x2, y2, durationSec) =>
       ipcRenderer.invoke(IPC.iosInputSwipe, udid, x1, y1, x2, y2, durationSec),
     gesture: (udid, points) => ipcRenderer.invoke(IPC.iosInputGesture, udid, points),
-    drag: (udid, phase, x, y) => ipcRenderer.invoke(IPC.iosInputDrag, udid, phase, x, y),
+    drag: (udid, phase, x, y, flick) => ipcRenderer.invoke(IPC.iosInputDrag, udid, phase, x, y, flick),
     type: (udid, text) => ipcRenderer.invoke(IPC.iosInputType, udid, text),
     key: (udid, domKey, modifiers) => ipcRenderer.invoke(IPC.iosInputKey, udid, domKey, modifiers),
     button: (udid, name) => ipcRenderer.invoke(IPC.iosInputButton, udid, name),

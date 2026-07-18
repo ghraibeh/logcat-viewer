@@ -1167,14 +1167,17 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     if (bin && udid && Array.isArray(points)) iosinput.gesture(bin, udid, points)
     return true
   })
-  ipcMain.handle(IPC.iosInputDrag, (_e, udid: string, phase: 'start' | 'move' | 'end', x: number, y: number) => {
-    const bin = goios.findGoIos()
-    if (!bin || !udid) return true
-    if (phase === 'start') iosinput.dragStart(bin, udid, x, y)
-    else if (phase === 'move') iosinput.dragMove(bin, udid, x, y)
-    else iosinput.dragEnd(bin, udid, x, y)
-    return true
-  })
+  ipcMain.handle(
+    IPC.iosInputDrag,
+    (_e, udid: string, phase: 'start' | 'move' | 'end', x: number, y: number, flick?: { x: number; y: number; durMs: number }) => {
+      const bin = goios.findGoIos()
+      if (!bin || !udid) return true
+      if (phase === 'start') iosinput.dragStart(bin, udid, x, y)
+      else if (phase === 'move') iosinput.dragMove(bin, udid, x, y)
+      else iosinput.dragEnd(bin, udid, x, y, flick)
+      return true
+    }
+  )
   ipcMain.handle(IPC.iosInputType, (_e, udid: string, text: string) => {
     const bin = goios.findGoIos()
     if (bin && udid) iosinput.type(bin, udid, text)

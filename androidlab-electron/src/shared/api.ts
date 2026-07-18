@@ -52,7 +52,7 @@ import type { IosInputConfig } from '@core/iosinput'
 import type { Pref } from '@core/prefs'
 import type { DisplayInfo } from '@core/mirror'
 import type { AndroidDeviceInfo } from '@core/deviceinfo'
-import type { IosDeviceInfo } from '@core/iosdeviceinfo'
+import type { IosDeviceInfo, IosDeviceRender } from '@core/iosdeviceinfo'
 import type { IosNetworkInfo } from '@core/goios'
 
 export type Unsubscribe = () => void
@@ -312,9 +312,10 @@ export interface AndroidLabApi {
     /** Detect the device's current Wi-Fi/LAN IP (`ios ip` pcapd sniff; classic-tier,
      *  no tunnel). `ipv4` is '' when idle / off Wi-Fi / not caught in time. */
     deviceIp(udid: string): Promise<IosNetworkInfo | null>
-    /** A real device render (data: URI) for `identifier` from the AppleDB CDN,
-     *  cached per-user; null when offline / no render exists. */
-    deviceImage(identifier: string): Promise<string | null>
+    /** The device-render bundle for `identifier` from the AppleDB CDN (front
+     *  photo + enclosure colour for the drawn back), cached per-user; fields are
+     *  null when offline / no render exists. */
+    deviceImage(identifier: string): Promise<IosDeviceRender>
     listApps(udid: string): Promise<IosAppListResult>
     /** Open a file dialog for a signed .ipa; returns its path or null. */
     chooseIpa(): Promise<string | null>
@@ -371,16 +372,23 @@ export interface AndroidLabApi {
     size(udid: string): Promise<{ width: number; height: number } | null>
     tap(udid: string, x: number, y: number): Promise<boolean>
     swipe(udid: string, x1: number, y1: number, x2: number, y2: number, durationSec?: number): Promise<boolean>
-    /** A drag as the full captured finger path (device points + ms timestamps). On the
-     *  DeviceKit agent it's replayed as ONE `device.io.gesture` (press→moves→release) over
-     *  the live WebSocket, reproducing the real motion + momentum; WDA falls back to a
-     *  first→last swipe. */
+    /** Replay a full captured finger path (device points + ms timestamps) as ONE gesture —
+     *  DeviceKit via `device.io.gesture`, WebDriverAgent via a multi-waypoint W3C `/actions`
+     *  sequence (`pathToPointerActions`). Available as an alternative "replay on release" drag;
+     *  the mirror itself uses the hybrid `drag` (live tracking + momentum flick) below. */
     gesture(udid: string, points: Array<{ x: number; y: number; t: number }>): Promise<boolean>
-    /** Streamed drag: inject gesture SEGMENTS during the drag (content moves before you
-     *  release). `start` at press, `move` as the finger moves (coalesced), `end` on release.
-     *  Best for scrolling — ~2-3 steps/sec (XCTest ~360ms floor), the finger lifts between
-     *  steps so it scrolls incrementally rather than dragging continuously. */
-    drag(udid: string, phase: 'start' | 'move' | 'end', x: number, y: number): Promise<boolean>
+    /** The mirror's HYBRID drag. `start` at press, `move` as the finger moves (streams short
+     *  swipe segments so content tracks live — coarse ~2-3 steps/sec, the XCTest floor), `end`
+     *  on release. Pass `flick` on `end` (a velocity-projected target + duration) to append a
+     *  momentum swipe from the release point so a flick keeps scrolling. iOS can't stream touch,
+     *  so live tracking is choppy; the flick is what makes it feel smooth. */
+    drag(
+      udid: string,
+      phase: 'start' | 'move' | 'end',
+      x: number,
+      y: number,
+      flick?: { x: number; y: number; durMs: number }
+    ): Promise<boolean>
     type(udid: string, text: string): Promise<boolean>
     /** Forward one physical keystroke live. `domKey` is a DOM KeyboardEvent.key (a char, or
      *  'Enter'/'Backspace'/'ArrowUp'/…); `modifiers` are held (command/control/option/shift/fn).

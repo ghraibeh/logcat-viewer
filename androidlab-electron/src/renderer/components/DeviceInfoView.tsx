@@ -11,8 +11,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { AndroidDeviceInfo } from '@core/deviceinfo'
 import { fmtGB as fmtGBAndroid } from '@core/deviceinfo'
-import type { IosDeviceInfo } from '@core/iosdeviceinfo'
-import { fmtGB } from '@core/iosdeviceinfo'
+import type { BackCameraLayout, IosDeviceInfo, IosDeviceRender } from '@core/iosdeviceinfo'
+import { backCameraLayout, fmtGB } from '@core/iosdeviceinfo'
 import type { IosNetworkInfo } from '@core/goios'
 import type { Controller } from '../state/useAppController'
 import { Icon, type IconName } from './Icon'
@@ -131,16 +131,79 @@ function CenterMessage({ children }: { children: React.ReactNode }) {
   )
 }
 
+// The classic Apple mark (same path as the Network tab glyph), inlaid on the
+// drawn back. `ink` contrasts the enclosure colour so it reads on any body.
+function AppleMark({ ink }: { ink: string }) {
+  return (
+    <svg viewBox="0 0 16 16" width="100%" height="100%" aria-hidden>
+      <path
+        d="M11.2 8.4c0-1.5 1.2-2.2 1.3-2.3-.7-1-1.8-1.2-2.2-1.2-.9-.1-1.8.5-2.3.5s-1.2-.5-2-.5c-1 0-2 .6-2.5 1.5-1.1 1.9-.3 4.6.8 6.1.5.7 1.1 1.5 1.9 1.5.8 0 1-.5 2-.5s1.1.5 2 .5c.8 0 1.4-.7 1.9-1.4.6-.9.8-1.7.8-1.8 0 0-1.6-.6-1.6-2.4z"
+        fill={ink}
+      />
+      <path d="M9.6 4.1c.4-.5.7-1.2.6-1.9-.6 0-1.4.4-1.8.9-.4.4-.7 1.1-.6 1.8.7.1 1.4-.3 1.8-.8z" fill={ink} />
+    </svg>
+  )
+}
+
+/** Contrast ink for the Apple mark: dark on light enclosures, light on dark. */
+function logoInk(hex: string | null): string {
+  if (!hex || !/^[0-9a-fA-F]{6}$/.test(hex)) return 'rgba(255,255,255,0.34)'
+  const r = parseInt(hex.slice(0, 2), 16)
+  const g = parseInt(hex.slice(2, 4), 16)
+  const b = parseInt(hex.slice(4, 6), 16)
+  const lum = 0.299 * r + 0.587 * g + 0.114 * b
+  return lum > 150 ? 'rgba(0,0,0,0.32)' : 'rgba(255,255,255,0.34)'
+}
+
+/**
+ * The CSS-drawn back of the device, tinted to the real enclosure colour (AppleDB
+ * gives us the hex; it has no back photo). The rear-camera module — triple
+ * (Pro), dual, or single lens — is picked from the model. Purely decorative, so
+ * it's aria-hidden with a title for the colour name.
+ */
+function PhoneBack({
+  colorHex,
+  colorName,
+  layout
+}: {
+  colorHex: string | null
+  colorName: string | null
+  layout: BackCameraLayout
+}) {
+  const body = colorHex && /^[0-9a-fA-F]{6}$/.test(colorHex) ? `#${colorHex}` : '#2b2d36'
+  const lenses = layout === 'triple' ? 3 : layout === 'dual' ? 2 : 1
+  return (
+    <div
+      className={`dinfo-back layout-${layout}`}
+      style={{ ['--body' as string]: body } as React.CSSProperties}
+      title={colorName ?? undefined}
+      aria-hidden
+    >
+      <div className="dinfo-cam">
+        {Array.from({ length: lenses }, (_, i) => (
+          <span className="dinfo-lens" key={i} />
+        ))}
+        <span className="dinfo-flash" />
+      </div>
+      <span className="dinfo-logo">
+        <AppleMark ink={logoInk(colorHex)} />
+      </span>
+    </div>
+  )
+}
+
 // ---- shared presentational dashboard ---------------------------------------
 function Dashboard({
   vm,
   photo,
+  back,
   onRefresh,
   copiedKey,
   copyDetail
 }: {
   vm: DashboardVM
   photo?: string | null
+  back?: React.ReactNode
   onRefresh: () => void
   copiedKey: string | null
   copyDetail: (key: string, value: string) => void
@@ -150,14 +213,17 @@ function Dashboard({
       <div className="dinfo-scroll">
         {/* Hero */}
         <div className="dinfo-hero">
-          {photo ? (
-            <img className="dinfo-photo" src={photo} alt={vm.model} draggable={false} />
-          ) : (
-            <div className="dinfo-phone" aria-hidden>
-              <div className="dinfo-phone-screen" />
-              <div className="dinfo-phone-island" />
-            </div>
-          )}
+          <div className="dinfo-media">
+            {photo ? (
+              <img className="dinfo-photo" src={photo} alt={vm.model} draggable={false} />
+            ) : (
+              <div className="dinfo-phone" aria-hidden>
+                <div className="dinfo-phone-screen" />
+                <div className="dinfo-phone-island" />
+              </div>
+            )}
+            {back}
+          </div>
           <div className="dinfo-hero-text">
             <div className="dinfo-name">{vm.name}</div>
             <div className="dinfo-model">{vm.model}</div>
@@ -236,7 +302,7 @@ function Dashboard({
 // ---- iOS panel -------------------------------------------------------------
 function IosPanel({ serial }: { serial: string }) {
   const [info, setInfo] = useState<IosDeviceInfo | null>(null)
-  const [photo, setPhoto] = useState<string | null>(null)
+  const [render, setRender] = useState<IosDeviceRender | null>(null)
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const { copiedKey, copy } = useCopyKey()
@@ -258,19 +324,19 @@ function IosPanel({ serial }: { serial: string }) {
   const load = useCallback(async () => {
     setLoading(true)
     setErr(null)
-    setPhoto(null)
+    setRender(null)
     setIp(null)
     try {
       const d = await window.androidlab.ios.deviceInfo(serial)
       setInfo(d)
       if (!d) setErr('Could not read device info')
-      // Progressive enhancement: fetch a real render (cached) and swap it in
-      // when ready; the CSS phone shows until/unless it arrives.
+      // Progressive enhancement: fetch the render bundle (front photo + enclosure
+      // colour, cached) and swap it in when ready; the CSS phone shows until then.
       if (d?.productType) {
         void window.androidlab.ios
           .deviceImage(d.productType)
-          .then((uri) => setPhoto(uri))
-          .catch(() => setPhoto(null))
+          .then((r) => setRender(r))
+          .catch(() => setRender(null))
       }
       // Kick off the (slower) Wi-Fi IP sniff in parallel — it fills its tile in
       // when ready rather than holding up the dashboard.
@@ -414,7 +480,26 @@ function IosPanel({ serial }: { serial: string }) {
   if (info.chip) pills.push({ text: info.chip, kind: 'chip' })
 
   const vm: DashboardVM = { name: info.name, model: info.marketingName, pills, rings, tiles, details: info.details }
-  return <Dashboard vm={vm} photo={photo} onRefresh={() => void load()} copiedKey={copiedKey} copyDetail={copy} />
+  // The drawn back is iPhone-shaped, so only pair it with iPhones (iPad/Watch
+  // keep the front render alone). Tinted to the enclosure colour when known.
+  const back =
+    info.deviceClass.toLowerCase() === 'iphone' ? (
+      <PhoneBack
+        colorHex={render?.colorHex ?? null}
+        colorName={render?.colorName ?? null}
+        layout={backCameraLayout(info.marketingName)}
+      />
+    ) : null
+  return (
+    <Dashboard
+      vm={vm}
+      photo={render?.front ?? null}
+      back={back}
+      onRefresh={() => void load()}
+      copiedKey={copiedKey}
+      copyDetail={copy}
+    />
+  )
 }
 
 // ---- Android panel ---------------------------------------------------------
