@@ -70,7 +70,6 @@ import type {
   MockResult,
   PrefsListResult,
   PrefsLoadResult,
-  Transport,
   TunnelStatus
 } from '@shared/types'
 
@@ -185,37 +184,18 @@ function goiosError(stderr: string, stdout: string, fallback: string): string {
   return best || lastLine(stderr, stdout, fallback)
 }
 
-/** usbmux HIDES the Wi-Fi (Network) entry while a device is on USB, so a cabled
- *  device shows only 'usb' in `ios list`. But if it has "Show when on Wi-Fi"
- *  enabled it is still reachable wirelessly — so we probe that lockdown value and
- *  synthesize a 'wifi' transport, making the picker always list the Wi-Fi option
- *  alongside USB (the mirror uses the AirPlay path over it; unplugging switches
- *  the rest). A device already reported over Network needs no probe. */
-async function resolveTransports(bin: string, udid: string, transports: Transport[]): Promise<Transport[]> {
-  const t: Transport[] = transports.length ? [...transports] : ['usb']
-  if (t.includes('usb') && !t.includes('wifi')) {
-    try {
-      const wc = await run(bin, wifiConnectionsArgs(udid, 'get'), 8000)
-      if (parseWifiConnections(wc.stdout) === true) t.push('wifi')
-    } catch {
-      /* probe failed — leave transports as reported */
-    }
-  }
-  return t
-}
-
 /** `ios list --details` + a per-device `ios info` → Device[] tagged
- *  platform:'ios'. --details carries each usbmuxd entry's transport; a cabled but
- *  Wi-Fi-enrolled device also gets a synthesized 'wifi' transport (see
- *  resolveTransports) so the picker offers both USB and Wi-Fi. */
+ *  platform:'ios'. Transports come STRAIGHT from what usbmux actually reports, so
+ *  a transport is listed only when the device is genuinely connected on it (USB
+ *  and/or "Network"/Wi-Fi). We do NOT infer Wi-Fi from the "Show when on Wi-Fi"
+ *  lockdown setting — that means enabled, not currently reachable. Caveat: usbmux
+ *  suppresses the Network entry while a device is on USB, so a cabled device shows
+ *  Wi-Fi only once unplugged (or when usbmux happens to list both). */
 export async function listDevices(bin: string): Promise<Device[]> {
   const entries = parseDeviceListDetails((await run(bin, listArgs(), 15000)).stdout)
   const devices: Device[] = []
   for (const { udid, transports } of entries) {
-    const [info, resolved] = await Promise.all([
-      run(bin, infoArgs(udid), 10000).then((r) => parseInfo(r.stdout)),
-      resolveTransports(bin, udid, transports)
-    ])
+    const info = parseInfo((await run(bin, infoArgs(udid), 10000)).stdout)
     const { label, description } = deviceLabel(udid, info)
     devices.push({
       serial: udid,
@@ -224,7 +204,7 @@ export async function listDevices(bin: string): Promise<Device[]> {
       online: true,
       label,
       platform: 'ios',
-      transports: resolved
+      transports: transports.length ? transports : ['usb']
     })
   }
   return devices
@@ -513,6 +493,14 @@ async function ensureTunnel(bin: string, udid: string): Promise<AppActionResult>
     ok: false,
     message: 'Developer tunnel did not come up — check the device is unlocked, trusted, and has Developer Mode enabled.'
   }
+}
+
+/** Proactively bring up the shared tunnel agent (no specific device). Once it's
+ *  running it creates a tunnel for EVERY connected device on its own loop (USB and
+ *  — with our patch — Wi-Fi), so dev-tier is ready the moment a device appears
+ *  without the user opening a dev-tier tab. Idempotent (reuses a live agent). */
+export async function ensureAgentRunning(bin: string): Promise<AppActionResult> {
+  return ensureAgent(bin)
 }
 
 /** Kill the shared tunnel agent, stopping every device's tunnel (called on the

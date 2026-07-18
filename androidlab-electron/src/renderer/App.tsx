@@ -382,6 +382,8 @@ export default function App() {
   // receiver (waiting for a phone to pick "AndroidLab"); closing tears it down.
   const toggleAirplayReceiver = useCallback(() => {
     if (airplayReceiverRef.current) {
+      // Also close the detached window if the receiver is currently popped out.
+      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
       setAirplayReceiver(false)
       setMirrorMode('closed')
     } else {
@@ -394,7 +396,12 @@ export default function App() {
 
   // Detach the docked mirror into its own OS window (Android Studio-style).
   const popOutMirror = useCallback(() => {
-    void window.androidlab.mirror.openPopout({ serial: c.serial, platform: c.platform, connection: c.connection })
+    void window.androidlab.mirror.openPopout({
+      serial: c.serial,
+      platform: c.platform,
+      connection: c.connection,
+      receiver: airplayReceiverRef.current
+    })
     setMirrorMode('popped')
   }, [c.serial, c.platform, c.connection])
 
@@ -414,9 +421,14 @@ export default function App() {
   // Keep the popout tracking the currently-selected device.
   useEffect(() => {
     if (mirrorMode === 'popped') {
-      void window.androidlab.mirror.updatePopout({ serial: c.serial, platform: c.platform, connection: c.connection })
+      void window.androidlab.mirror.updatePopout({
+        serial: c.serial,
+        platform: c.platform,
+        connection: c.connection,
+        receiver: airplayReceiver
+      })
     }
-  }, [mirrorMode, c.serial, c.platform, c.connection])
+  }, [mirrorMode, c.serial, c.platform, c.connection, airplayReceiver])
 
   // Context-menu target computation (mirrors _show_table_menu).
   const ctxTarget = (() => {
@@ -558,6 +570,7 @@ export default function App() {
               <IosMirrorDock
                 receiver
                 serial={null}
+                onPopout={popOutMirror}
                 onClose={() => {
                   setAirplayReceiver(false)
                   setMirrorMode('closed')

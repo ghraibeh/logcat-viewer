@@ -19,13 +19,15 @@ const HAS_WEBCODECS = typeof (globalThis as { VideoDecoder?: unknown }).VideoDec
 const MAX_DECODE_QUEUE = 6
 
 // AirPlay advertised-display presets (the phone mirrors at up to this resolution).
-// The device's own screen is the ceiling, so "Max" just asks for as much as it sends.
+// An iPhone panel is ~1290×2796, so 1440p already exceeds what it can source —
+// there's no 4K option because asking for more than the device's native produces an
+// oversized stream the hardware decoder can't handle (a black screen), not a sharper
+// picture. 1080p is the safe default; 1440p is the sharpest useful setting.
 type Resolution = { label: string; width: number; height: number }
 const RES_PRESETS: Resolution[] = [
   { label: '720p', width: 1280, height: 720 },
   { label: '1080p', width: 1920, height: 1080 },
-  { label: '1440p', width: 2560, height: 1440 },
-  { label: 'Max (4K)', width: 3840, height: 2160 }
+  { label: '1440p', width: 2560, height: 1440 }
 ]
 const RES_STORAGE_KEY = 'ios-airplay-resolution'
 function loadResolution(): Resolution {
@@ -54,6 +56,13 @@ class H264Engine {
   private pending: { frame: VideoFrame; w: number; h: number } | null = null
   private rafId = 0
   private running = false
+  private retagGen = 0
+  // The AirPlay feed's H.264 is FULL-range (color_range=pc) BT.709/sRGB, but the
+  // WebCodecs decoder doesn't propagate that flag, so the canvas renders it as
+  // limited-range (16-235) and the colors crush/over-contrast. When true, re-tag each
+  // decoded frame as full-range so drawImage converts it correctly. The USB feed is
+  // genuinely limited-range and renders fine as-is, so this stays off for it.
+  fullRange = false
   srcW = 0
   srcH = 0
   scale = 1
@@ -146,6 +155,18 @@ class H264Engine {
   }
 
   private setPending(frame: VideoFrame): void {
+    // AirPlay full-range correction: the decoded frame's colorSpace lost the pc flag,
+    // so rebuild it with an explicit full-range BT.709/sRGB colorSpace. Skip if the
+    // frame is already full-range (correction unnecessary). Async (copyTo) — the rAF
+    // loop paints whatever's pending, so the corrected frame lands a beat later.
+    if (this.fullRange && frame.colorSpace?.fullRange !== true) {
+      void this.retagFullRange(frame)
+      return
+    }
+    this.storePending(frame)
+  }
+
+  private storePending(frame: VideoFrame): void {
     if (this.pending) {
       try {
         this.pending.frame.close()
@@ -154,6 +175,42 @@ class H264Engine {
       }
     }
     this.pending = { frame, w: frame.displayWidth, h: frame.displayHeight }
+  }
+
+  private async retagFullRange(frame: VideoFrame): Promise<void> {
+    const gen = this.retagGen
+    try {
+      const size = frame.allocationSize()
+      const buf = new Uint8Array(size)
+      const layout = await frame.copyTo(buf)
+      const init: VideoFrameBufferInit = {
+        format: frame.format as VideoPixelFormat,
+        codedWidth: frame.codedWidth,
+        codedHeight: frame.codedHeight,
+        timestamp: frame.timestamp,
+        visibleRect: {
+          x: frame.visibleRect?.x ?? 0,
+          y: frame.visibleRect?.y ?? 0,
+          width: frame.visibleRect?.width ?? frame.codedWidth,
+          height: frame.visibleRect?.height ?? frame.codedHeight
+        },
+        displayWidth: frame.displayWidth,
+        displayHeight: frame.displayHeight,
+        layout,
+        colorSpace: { primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'bt709', fullRange: true }
+      }
+      frame.close()
+      // The engine was reset/closed mid-copy — drop this frame.
+      if (gen !== this.retagGen || !this.running) return
+      this.storePending(new VideoFrame(buf, init))
+    } catch {
+      // Correction failed — fall back to the raw frame rather than dropping video.
+      try {
+        this.storePending(frame)
+      } catch {
+        /* frame already closed */
+      }
+    }
   }
 
   private paintPending(): void {
@@ -258,6 +315,7 @@ class H264Engine {
     this.demuxer.reset()
     this.configured = false
     this.ts = 0
+    this.retagGen++ // drop any in-flight full-range corrections
     if (this.pending) {
       try {
         this.pending.frame.close()
@@ -388,6 +446,12 @@ export function IosMirrorDock({
     engineRef.current.setRotation(rotation)
     engineRef.current.relayout()
   }, [rotation])
+
+  // The AirPlay feed is full-range H.264; the USB feed is limited-range. Tell the
+  // engine which so it only applies the full-range colour correction to AirPlay.
+  useEffect(() => {
+    engineRef.current.fullRange = mode === 'airplay'
+  }, [mode])
 
   // Keep the hit-test geometry in lockstep with the pane's actual size. drawSource only
   // recomputes scale/fit when a frame paints; a resize (window drag, fullscreen, popout)

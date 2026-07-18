@@ -139,7 +139,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     const android = adb ? await listDevices(adb) : []
     const iosBin = goios.findGoIos()
     const ios = iosBin ? await goios.listDevices(iosBin).catch(() => []) : []
-    if (iosBin) autoEnableWifi(iosBin, ios)
+    if (iosBin) {
+      autoEnableWifi(iosBin, ios)
+      // Auto-start the developer tunnel: the moment any iOS device is present,
+      // bring up the shared agent (it then tunnels every device on its own loop,
+      // USB or Wi-Fi) so dev-tier is ready without the user enabling it.
+      if (ios.length > 0 && loadSettings().autoTunnel) {
+        void goios.ensureAgentRunning(iosBin).catch(() => {})
+      }
+    }
     return [...android, ...ios]
   }
 

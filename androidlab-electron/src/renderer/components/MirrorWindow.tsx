@@ -60,8 +60,16 @@ export function MirrorWindow() {
               <div className="mirror-msg">Connecting…</div>
             </div>
           </div>
-        ) : platform === 'ios' ? (
-          <IosMirrorDock serial={serial} connection={info?.connection} popped onClose={redock} onPopout={redock} onCaptured={onCaptured} />
+        ) : info?.receiver || platform === 'ios' ? (
+          <IosMirrorDock
+            serial={serial}
+            connection={info?.connection}
+            receiver={info?.receiver}
+            popped
+            onClose={redock}
+            onPopout={redock}
+            onCaptured={onCaptured}
+          />
         ) : (
           <MirrorDock
             serial={serial}

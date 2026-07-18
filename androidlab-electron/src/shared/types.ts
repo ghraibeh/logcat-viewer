@@ -43,6 +43,10 @@ export interface AppSettings {
   /** UDIDs the user explicitly turned Wi-Fi off for in the dialog — never
    *  auto-re-enable these even while autoWifi is on. */
   wifiOptOut: string[]
+  /** Bring the iOS developer tunnel up automatically as soon as a device is
+   *  connected (USB or Wi-Fi), so dev-tier features are ready without the user
+   *  enabling it. Default on. */
+  autoTunnel: boolean
 }
 
 /** One app entry for the picker. `clone` marks a VA-host clone package. */
@@ -114,6 +118,9 @@ export interface MirrorPopoutInfo {
   /** iOS transport, so the detached mirror defaults to the same feed path (AirPlay
    *  for a Wi-Fi-only device) as the docked view. */
   connection?: 'usb' | 'wifi'
+  /** Standalone AirPlay-receiver mode (top-bar toggle) — the popped window mirrors
+   *  any phone that picks "AndroidLab", independent of the selected device. */
+  receiver?: boolean
 }
 
 // --- Database Inspector payloads (mirror dbinspect.py's worker signals) -------

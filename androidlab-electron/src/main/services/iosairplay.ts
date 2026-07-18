@@ -22,6 +22,7 @@ import { app } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { AnnexBDemuxer } from '@core/mirror'
 import type { IosMirrorState } from '@shared/types'
 
 export interface IosAirplayCallbacks {
@@ -56,6 +57,14 @@ export class IosAirplayService {
   private gotData = false
   private teardownTimer: ReturnType<typeof setTimeout> | null = null
   private resKey = `${DEFAULT_RES.width}x${DEFAULT_RES.height}`
+  // Keyframe cache for the dock<->popout hand-off. iOS emits IDRs infrequently (rarely
+  // on a static screen), so a freshly-mounted decoder in the other window would stay
+  // black until the next one. We demux the outgoing stream, cache the last keyframe
+  // access unit (SPS+PPS+IDR — iOS bundles them), and replay it on reattach so the new
+  // decoder configures + paints immediately. (The USB path forces a keyframe via
+  // SIGUSR1; we can't ask the phone, hence the cache.)
+  private demuxer = new AnnexBDemuxer()
+  private lastKeyframe: Uint8Array | null = null
   // Host-audio mute preference vs the receiver's actual state (a fresh receiver
   // starts unmuted). SIGUSR2 only toggles, so sync compares the two.
   private mutedWanted = false
@@ -69,11 +78,28 @@ export class IosAirplayService {
   start(resolution: AirplayResolution = DEFAULT_RES): void {
     this.cancelTeardown()
     const key = `${resolution.width}x${resolution.height}`
-    if (this.proc && this.alive && this.resKey === key) return // reattach — keep streaming
+    if (this.proc && this.alive && this.resKey === key) {
+      // Reattach (dock<->popout): keep streaming and replay the cached keyframe so the
+      // newly-mounted decoder in the other window paints at once instead of black.
+      this.replayKeyframe()
+      return
+    }
     this.hardStop()
     this.resKey = key
     const token = ++this.runToken
     void this.startReceiver(token)
+  }
+
+  /** Re-broadcast the last cached keyframe. Deferred (and repeated) so it lands after
+   *  the freshly-mounted window has subscribed to the H.264 broadcast. */
+  private replayKeyframe(): void {
+    const kf = this.lastKeyframe
+    if (!kf) return
+    const send = (): void => {
+      if (this.alive && this.lastKeyframe) this.cb.onH264(kf)
+    }
+    setTimeout(send, 60)
+    setTimeout(send, 220)
   }
 
   /** Stop the receiver. Defaults to a grace timer so a dock<->popout hand-off can
@@ -136,6 +162,8 @@ export class IosAirplayService {
       this.proc = null
     }
     this.gotData = false
+    this.demuxer.reset()
+    this.lastKeyframe = null
   }
 
   private async startReceiver(token: number): Promise<void> {
@@ -168,7 +196,12 @@ export class IosAirplayService {
         this.cb.onState({ mode: 'airplay', waiting: false, message: 'Live stream (AirPlay)' })
         this.syncMute()
       }
-      this.cb.onH264(new Uint8Array(chunk))
+      const bytes = new Uint8Array(chunk)
+      // Cache the latest keyframe AU (SPS+PPS+IDR) for the dock<->popout replay.
+      for (const au of this.demuxer.push(bytes)) {
+        if (au.key) this.lastKeyframe = au.data.slice()
+      }
+      this.cb.onH264(bytes)
     })
     proc.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8')

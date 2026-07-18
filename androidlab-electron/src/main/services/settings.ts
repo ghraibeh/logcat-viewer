@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
 import { app } from 'electron'
 import type { AppSettings } from '@shared/types'
 
-const DEFAULTS: AppSettings = { autoWifi: true, wifiOptOut: [] }
+const DEFAULTS: AppSettings = { autoWifi: true, wifiOptOut: [], autoTunnel: true }
 
 function settingsPath(): string {
   return join(app.getPath('userData'), 'settings.json')
@@ -21,7 +21,8 @@ export function loadSettings(): AppSettings {
       autoWifi: typeof raw.autoWifi === 'boolean' ? raw.autoWifi : DEFAULTS.autoWifi,
       wifiOptOut: Array.isArray(raw.wifiOptOut)
         ? raw.wifiOptOut.filter((s): s is string => typeof s === 'string')
-        : []
+        : [],
+      autoTunnel: typeof raw.autoTunnel === 'boolean' ? raw.autoTunnel : DEFAULTS.autoTunnel
     }
   } catch {
     return { ...DEFAULTS }
