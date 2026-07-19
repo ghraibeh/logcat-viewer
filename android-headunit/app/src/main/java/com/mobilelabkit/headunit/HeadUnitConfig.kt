@@ -41,11 +41,32 @@ object HeadUnitConfig {
     private const val KEY_ORIENTATION = "orientation"
     private const val KEY_SCALING = "scaling"
     private const val KEY_WIRELESS = "wireless"
+    private const val KEY_DENSITY = "density_dpi"   // 0 = auto
     // Car-screen densities (dpi) — AA UI scale. Higher dpi ⇒ AA treats the panel as smaller ⇒
     // LARGER on-screen elements. The phone's real dpi (~480) is far too large; a car-screen 160
     // was too small on a hand-held panel. ~280 is the comfortable middle for touch use.
     private const val CAR_DENSITY_DPI = 240
     private const val CAR_DENSITY_DPI_HIGH = 280
+
+    /** User-selectable UI-size levels (dpi). Higher = bigger icons/text. 0 = Auto (by resolution). */
+    val DENSITY_LEVELS = listOf(0, 200, 240, 280, 320, 360, 400)
+    fun densityLabel(dpi: Int): String = when (dpi) {
+        0 -> "Auto"
+        200 -> "Smallest (200)"
+        240 -> "Small (240)"
+        280 -> "Medium (280)"
+        320 -> "Large (320)"
+        360 -> "Extra large (360)"
+        400 -> "Largest (400)"
+        else -> "$dpi dpi"
+    }
+
+    fun savedDensityDpi(ctx: Context): Int =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_DENSITY, 0)
+
+    fun saveDensityDpi(ctx: Context, dpi: Int) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(KEY_DENSITY, dpi).apply()
+    }
 
     fun isConfigured(ctx: Context): Boolean =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).contains(KEY_ORIENTATION)
@@ -101,7 +122,8 @@ object HeadUnitConfig {
         // ~400-500dpi, which makes Android Auto draw phone-sized (huge) UI on a "car" screen.
         // Real head units report ~160dpi, so AA lays out car-sized elements; the video is then
         // scaled onto the physical panel. (Higher-res picks a slightly higher dpi for crispness.)
-        val densityDpi = if (maxOf(w, h) >= 1900) CAR_DENSITY_DPI_HIGH else CAR_DENSITY_DPI
+        val autoDpi = if (maxOf(w, h) >= 1900) CAR_DENSITY_DPI_HIGH else CAR_DENSITY_DPI
+        val densityDpi = savedDensityDpi(ctx).let { if (it > 0) it else autoDpi }
 
         val res = if (orientation == Orientation.PORTRAIT) {
             if (w > 720 || h > 1280) ResType._1080x1920 else ResType._720x1280

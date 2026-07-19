@@ -27,11 +27,13 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.WindowManager
+import android.widget.ArrayAdapter
 import android.widget.CheckBox
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import com.andrerinas.headunitrevived.aap.protocol.proto.Common
@@ -493,10 +495,17 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             isChecked = HeadUnitConfig.wirelessEnabled(this@MainActivity)
             setPadding(0, dp(12), 0, 0)
         }
+        // Icon / UI size — maps to the car density we advertise. Higher = bigger icons & text.
+        val densityLabel = TextView(this).apply { text = "Icon / UI size"; setPadding(0, dp(14), 0, dp(2)) }
+        val densitySpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                HeadUnitConfig.DENSITY_LEVELS.map { HeadUnitConfig.densityLabel(it) })
+            setSelection(HeadUnitConfig.DENSITY_LEVELS.indexOf(HeadUnitConfig.savedDensityDpi(this@MainActivity)).coerceAtLeast(0))
+        }
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), 0)
-            addView(group); addView(stretch); addView(wireless)
+            addView(group); addView(stretch); addView(wireless); addView(densityLabel); addView(densitySpinner)
         }
         val builder = AlertDialog.Builder(this)
             .setTitle(if (firstRun) "Choose head-unit display" else "Head-unit display")
@@ -505,6 +514,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 val chosen = if (group.checkedRadioButtonId == 2) HeadUnitConfig.Orientation.LANDSCAPE else HeadUnitConfig.Orientation.PORTRAIT
                 HeadUnitConfig.saveScaling(this, if (stretch.isChecked) HeadUnitConfig.Scaling.FILL else HeadUnitConfig.Scaling.FIT)
                 HeadUnitConfig.saveWireless(this, wireless.isChecked)
+                HeadUnitConfig.saveDensityDpi(this, HeadUnitConfig.DENSITY_LEVELS[densitySpinner.selectedItemPosition])
                 applyConfig(chosen)
                 updateWirelessMode()
                 if (firstRun) startFromIntentOrScan()
