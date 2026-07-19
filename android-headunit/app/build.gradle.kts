@@ -11,8 +11,8 @@ android {
         applicationId = "com.mobilelabkit.headunit"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.21"
+        versionCode = 2
+        versionName = "0.24"
     }
 
     buildTypes {
