@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.util.Rational
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -14,6 +16,7 @@ import android.graphics.Color
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.media.AudioAttributes
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -50,6 +53,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var control: ControlChannel? = null
     private var input: InputChannel? = null
     private var decoder: VideoDecoder? = null
+    private var audioSinks: List<AudioSink> = emptyList()
     private var focusWatchdog: Thread? = null
     @Volatile private var busy = false
     @Volatile private var streaming = false
@@ -135,6 +139,34 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig); goImmersive(); rootView.post { layoutSurface() }
+    }
+
+    // --- picture-in-picture (keep projecting when backgrounded) -----------------
+    /** Pressing Home/Recents while projecting drops the app into a floating PiP window instead
+     *  of stopping — the USB link + decode threads keep running, so Android Auto stays live. */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        enterPipIfActive()
+    }
+
+    private fun enterPipIfActive() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return
+        if (link == null && !streaming) return // nothing running → don't float an empty window
+        val w = videoConfig.width.coerceAtLeast(1)
+        val h = videoConfig.height.coerceAtLeast(1)
+        val params = PictureInPictureParams.Builder().setAspectRatio(Rational(w, h)).build()
+        runCatching { enterPictureInPictureMode(params) }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPip: Boolean, newConfig: android.content.res.Configuration) {
+        super.onPictureInPictureModeChanged(isInPip, newConfig)
+        runOnUiThread {
+            // Clean floating video: hide the ⚙ / status; restore chrome when expanded back.
+            gear.visibility = if (isInPip || streaming) View.GONE else View.VISIBLE
+            if (!isInPip) goImmersive()
+        }
+        rootView.post { layoutSurface() }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) { decoder?.setSurface(holder.surface) }
@@ -237,9 +269,15 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             media[AapProto.CH_VIDEO] = MediaChannel(AapProto.CH_VIDEO, tp, dec) { setStatus(it) }
             // When the decoder desyncs (dropped/late frame), ask the phone for a fresh keyframe.
             dec.onNeedKeyframe = { media[AapProto.CH_VIDEO]?.gainVideoFocus() }
-            for (a in intArrayOf(AapProto.CH_AUDIO_MEDIA, AapProto.CH_AUDIO_SPEECH, AapProto.CH_AUDIO_SYSTEM)) {
-                media[a] = MediaChannel(a, tp, null) { setStatus(it) }
-            }
+            // Audio sinks — play the phone's media / speech(nav+assistant) / system PCM out the
+            // receiver's speaker. Sample rate + channels match what discovery advertised.
+            val mediaSink = AudioSink(48000, 2, AudioAttributes.USAGE_MEDIA)
+            val speechSink = AudioSink(16000, 1, AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+            val systemSink = AudioSink(16000, 1, AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+            audioSinks = listOf(mediaSink, speechSink, systemSink)
+            media[AapProto.CH_AUDIO_MEDIA] = MediaChannel(AapProto.CH_AUDIO_MEDIA, tp, null, audioSink = mediaSink) { setStatus(it) }
+            media[AapProto.CH_AUDIO_SPEECH] = MediaChannel(AapProto.CH_AUDIO_SPEECH, tp, null, audioSink = speechSink) { setStatus(it) }
+            media[AapProto.CH_AUDIO_SYSTEM] = MediaChannel(AapProto.CH_AUDIO_SYSTEM, tp, null, audioSink = systemSink) { setStatus(it) }
             // Mic channel captures the receiver's microphone for Assistant/voice (RECORD_AUDIO).
             media[AapProto.CH_MIC] = MediaChannel(AapProto.CH_MIC, tp, null, MicRecorder()) { setStatus(it) }
             val ctrl = ControlChannel(tp, crypto, videoConfig) { setStatus(it) }
@@ -272,6 +310,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         focusWatchdog?.interrupt(); focusWatchdog = null
         control?.stop(); transport?.stop(); transport = null
         control = null; input = null; decoder?.release(); decoder = null
+        audioSinks.forEach { it.release() }; audioSinks = emptyList()
     }
 
     // --- helpers ---------------------------------------------------------------

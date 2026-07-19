@@ -18,6 +18,7 @@ class MediaChannel(
     private val transport: AapTransport,
     private val decoder: VideoDecoder?,
     private val micRecorder: MicRecorder? = null,
+    private val audioSink: AudioSink? = null,
     private val onStatus: (String) -> Unit
 ) {
     @Volatile private var session = 0
@@ -78,9 +79,10 @@ class MediaChannel(
     }
 
     private fun onData(content: ByteArray, hasTimestamp: Boolean) {
-        if (decoder != null) {
-            val off = if (hasTimestamp && content.size > 8) 8 else 0 // strip 8-byte timestamp
-            if (content.size > off) decoder.submit(content.copyOfRange(off, content.size))
+        val off = if (hasTimestamp && content.size > 8) 8 else 0 // strip 8-byte timestamp
+        if (content.size > off) {
+            if (decoder != null) decoder.submit(content.copyOfRange(off, content.size))
+            else audioSink?.submit(content.copyOfRange(off, content.size))
         }
         ack()
     }
