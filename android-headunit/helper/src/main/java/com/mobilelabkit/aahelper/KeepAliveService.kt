@@ -32,6 +32,7 @@ import android.util.Log
 class KeepAliveService : Service() {
 
     private var wifiLock: WifiManager.WifiLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private val nsd by lazy { getSystemService(Context.NSD_SERVICE) as NsdManager }
     private var discoveryListener: NsdManager.DiscoveryListener? = null
@@ -112,11 +113,18 @@ class KeepAliveService : Service() {
 
     // --- locks ----------------------------------------------------------------
     private fun acquireLocks() {
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         if (wifiLock == null) {
-            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             @Suppress("DEPRECATION")
             wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "$TAG:wifi")
                 .also { runCatching { it.acquire() } }
+        }
+        // NSD/mDNS discovery for auto-reconnect uses multicast, which Android filters out when the
+        // screen is off unless a MulticastLock is held — exactly the idle "after a while" case.
+        // (The official Wireless Helper holds this too.)
+        if (multicastLock == null) {
+            multicastLock = wm.createMulticastLock("$TAG:mcast")
+                .also { it.setReferenceCounted(false); runCatching { it.acquire() } }
         }
         if (wakeLock == null) {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -127,6 +135,7 @@ class KeepAliveService : Service() {
 
     private fun releaseLocks() {
         wifiLock?.let { runCatching { if (it.isHeld) it.release() } }; wifiLock = null
+        multicastLock?.let { runCatching { if (it.isHeld) it.release() } }; multicastLock = null
         wakeLock?.let { runCatching { if (it.isHeld) it.release() } }; wakeLock = null
     }
 
