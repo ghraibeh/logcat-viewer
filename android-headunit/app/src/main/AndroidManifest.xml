@@ -4,6 +4,12 @@
     <!-- Head unit = USB host: it powers + drives the phone plugged into it. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
 
+    <!-- Microphone: Android Auto routes the phone's voice/Assistant + voice-search capture to
+         the head unit's mic. Needs RECORD_AUDIO (requested at runtime). MODIFY_AUDIO_SETTINGS
+         lets us set the capture routing. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"

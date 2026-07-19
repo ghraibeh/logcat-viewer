@@ -1,5 +1,6 @@
 package com.mobilelabkit.headunit
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.PendingIntent
@@ -8,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
@@ -76,6 +78,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         goImmersive()
         usb = getSystemService(Context.USB_SERVICE) as UsbManager
+        ensureMicPermission()
 
         // Apply the saved orientation + auto-detect the panel resolution BEFORE the UI/protocol,
         // so the service-discovery we send the phone advertises the right display.
@@ -234,9 +237,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             media[AapProto.CH_VIDEO] = MediaChannel(AapProto.CH_VIDEO, tp, dec) { setStatus(it) }
             // When the decoder desyncs (dropped/late frame), ask the phone for a fresh keyframe.
             dec.onNeedKeyframe = { media[AapProto.CH_VIDEO]?.gainVideoFocus() }
-            for (a in intArrayOf(AapProto.CH_AUDIO_MEDIA, AapProto.CH_AUDIO_SPEECH, AapProto.CH_AUDIO_SYSTEM, AapProto.CH_MIC)) {
+            for (a in intArrayOf(AapProto.CH_AUDIO_MEDIA, AapProto.CH_AUDIO_SPEECH, AapProto.CH_AUDIO_SYSTEM)) {
                 media[a] = MediaChannel(a, tp, null) { setStatus(it) }
             }
+            // Mic channel captures the receiver's microphone for Assistant/voice (RECORD_AUDIO).
+            media[AapProto.CH_MIC] = MediaChannel(AapProto.CH_MIC, tp, null, MicRecorder()) { setStatus(it) }
             val ctrl = ControlChannel(tp, crypto, videoConfig) { setStatus(it) }
             transport = tp; control = ctrl; input = inp
             tp.start(); ctrl.begin()
@@ -286,6 +291,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val y = (e.y / v.height.coerceAtLeast(1) * videoConfig.height).toInt()
         inp.sendTouch(action, x, y)
         return true
+    }
+
+    /** Ask for the mic at launch so Android Auto voice / Assistant works once connected. */
+    private fun ensureMicPermission() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            runCatching { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC) }
+        }
     }
 
     // --- display configuration -------------------------------------------------
@@ -370,6 +382,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     companion object {
         private const val TAG = "headunit"
         private const val ACTION_PERM = "com.mobilelabkit.headunit.USB_PERMISSION"
+        private const val REQ_MIC = 101
         private const val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
         private const val WRAP = FrameLayout.LayoutParams.WRAP_CONTENT
     }

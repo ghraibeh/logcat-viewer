@@ -17,6 +17,7 @@ class MediaChannel(
     val channelId: Int,
     private val transport: AapTransport,
     private val decoder: VideoDecoder?,
+    private val micRecorder: MicRecorder? = null,
     private val onStatus: (String) -> Unit
 ) {
     @Volatile private var session = 0
@@ -94,6 +95,18 @@ class MediaChannel(
         val resp = Media.MicrophoneResponse.newBuilder().setStatus(0).setSessionId(session).build()
         send(Media.MsgType.MEDIA_MESSAGE_MICROPHONE_RESPONSE_VALUE, resp.toByteArray())
         Log.i(TAG, "mic request open=$open")
+        // Stream the receiver's mic back to the phone (Assistant / voice search) while open.
+        if (open) micRecorder?.start { buf, len -> sendMicData(buf, len) } else micRecorder?.stop()
+        onStatus(if (open) "Mic open — listening…" else "Mic closed.")
+    }
+
+    /** Frame a chunk of captured PCM as MEDIA_DATA: [timestamp:8 BE µs][pcm] (mirrors video data). */
+    private fun sendMicData(buf: ByteArray, len: Int) {
+        val ts = android.os.SystemClock.elapsedRealtime() * 1000L
+        val content = ByteArray(8 + len)
+        for (i in 0 until 8) content[i] = (ts shr (56 - i * 8)).toByte()
+        System.arraycopy(buf, 0, content, 8, len)
+        send(Media.MsgType.MEDIA_MESSAGE_DATA_VALUE, content)
     }
 
     private fun send(messageId: Int, content: ByteArray) {
