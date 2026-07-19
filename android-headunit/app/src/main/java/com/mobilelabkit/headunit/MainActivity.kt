@@ -52,7 +52,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var usb: UsbManager
     private lateinit var videoConfig: HeadUnitConfig.VideoConfig
 
-    private var link: UsbAoap.Link? = null
+    private var link: AapLink? = null
+    private var wirelessServer: WirelessServer? = null
+    private var nsdAdvertiser: NsdAdvertiser? = null
+    private var btBootstrap: BtBootstrap? = null
+    private var wifiDirect: WifiDirectHost? = null
     private var transport: AapTransport? = null
     private var control: ControlChannel? = null
     private var input: InputChannel? = null
@@ -119,6 +123,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(permReceiver, filter, Context.RECEIVER_EXPORTED)
         else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(permReceiver, filter)
 
+        // Wireless: always listen on TCP:5288 for a phone to connect; the Bluetooth bootstrap
+        // (opt-in via ⚙) points the phone here. Harmless when only USB is used.
+        startWireless()
+        updateWirelessMode()
+
         // First launch: ask portrait vs landscape before touching the phone.
         if (!HeadUnitConfig.isConfigured(this)) showConfigDialog(firstRun = true)
         else startFromIntentOrScan()
@@ -136,6 +145,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         super.onDestroy(); runCatching { unregisterReceiver(permReceiver) }
+        wirelessServer?.stop(); wirelessServer = null
+        nsdAdvertiser?.stop(); nsdAdvertiser = null
+        btBootstrap?.stop(); btBootstrap = null; wifiDirect?.stop(); wifiDirect = null
         teardownProtocol(); link?.close(); link = null; decoder?.release(); decoder = null
     }
 
@@ -223,8 +235,31 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }, "aoap").start()
     }
 
+    // --- wireless (TCP:5288) ---------------------------------------------------
+    /** Start listening for a wireless AA connection (phone → our IP:5288). Safe to call repeatedly. */
+    private fun startWireless() {
+        if (wirelessServer?.isRunning == true) return
+        wirelessServer = WirelessServer { socketLink ->
+            // A phone connected over TCP. Run the (identical) AA protocol over the socket, unless a
+            // session is already active on USB/another socket.
+            runOnUiThread {
+                if (busy || link != null) { socketLink.close(); return@runOnUiThread }
+                link = socketLink
+                setStatus("Wireless phone connected — starting Android Auto…")
+                busy = true
+                startAaProtocol(socketLink)
+            }
+        }.also { it.start() }
+
+        // Advertise on the LAN so the phone-side "AA Wireless Helper" can auto-discover us.
+        if (nsdAdvertiser == null) {
+            nsdAdvertiser = NsdAdvertiser(this, 5288, "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+                .also { it.start() }
+        }
+    }
+
     // --- AA protocol (modern) --------------------------------------------------
-    private fun startAaProtocol(l: UsbAoap.Link) {
+    private fun startAaProtocol(l: AapLink) {
         try {
             val crypto = AapCrypto(assets.open("headunit_cert.pem").readBytes(), assets.open("headunit_key.pem").readBytes())
             val dec = VideoDecoder(videoConfig.width, videoConfig.height).also { it.start() }
@@ -266,7 +301,17 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                     (id == com.andrerinas.headunitrevived.aap.protocol.proto.Media.MsgType.MEDIA_MESSAGE_DATA_VALUE ||
                         id == com.andrerinas.headunitrevived.aap.protocol.proto.Media.MsgType.MEDIA_MESSAGE_CODEC_CONFIG_VALUE)
                 ) { streaming = true; runOnUiThread { status.visibility = View.GONE; gear.visibility = View.GONE } }
-            }.apply { onError = AapTransport.OnError { m -> busy = false; setStatus("Link error: $m") } }
+            }.apply {
+                onError = AapTransport.OnError { m ->
+                    // USB has a DETACHED broadcast; a wireless socket only signals via this error,
+                    // so fully tear down + free the link so the next connection can start.
+                    runOnUiThread {
+                        teardownProtocol(); link?.close(); link = null
+                        busy = false; streaming = false
+                        setStatus("Link ended: $m"); showWaiting()
+                    }
+                }
+            }
 
             sensor = SensorChannel(tp) { setStatus(it) }
             inp = InputChannel(tp, videoConfig.width, videoConfig.height) { setStatus(it) }
@@ -343,6 +388,44 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    /**
+     * Wireless mode is the TCP:5288 server (always running) + NSD advertising + the on-screen
+     * "AA Wireless Helper" instructions. The old Bluetooth→Wi-Fi-Direct bootstrap
+     * ([BtBootstrap]/[WifiDirectHost]) is intentionally NOT started: on Android it can't hold the
+     * Bluetooth ACL / present the HFP "car" role that stock Android Auto requires, so it never
+     * latches (verified on-device). The working path is the phone-side helper firing AA's
+     * WirelessStartup trigger at us over the shared Wi-Fi. Kept as reference, not invoked.
+     */
+    private fun updateWirelessMode() {
+        // Make sure any previously-started bootstrap is torn down, then refresh the waiting screen.
+        btBootstrap?.stop(); btBootstrap = null
+        wifiDirect?.stop(); wifiDirect = null
+        if (!streaming) showWaiting()
+    }
+
+    private fun wirelessPerms(): Array<String> {
+        val p = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= 31) {
+            p += Manifest.permission.BLUETOOTH_CONNECT
+            p += Manifest.permission.BLUETOOTH_ADVERTISE
+            p += Manifest.permission.BLUETOOTH_SCAN
+        }
+        if (Build.VERSION.SDK_INT >= 33) p += Manifest.permission.NEARBY_WIFI_DEVICES
+        return p.toTypedArray()
+    }
+
+    private fun hasWirelessPermissions(): Boolean =
+        wirelessPerms().all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+
+    private fun requestWirelessPermissions() {
+        runCatching { requestPermissions(wirelessPerms(), REQ_WIRELESS) }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_WIRELESS) updateWirelessMode()
+    }
+
     // --- display configuration -------------------------------------------------
     private fun applyOrientation(o: HeadUnitConfig.Orientation) {
         requestedOrientation = if (o == HeadUnitConfig.Orientation.LANDSCAPE)
@@ -383,10 +466,15 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             isChecked = HeadUnitConfig.savedScaling(this@MainActivity) == HeadUnitConfig.Scaling.FILL
             setPadding(0, dp(12), 0, 0)
         }
+        val wireless = CheckBox(this).apply {
+            text = "Wireless Android Auto (Bluetooth + Wi-Fi Direct)"
+            isChecked = HeadUnitConfig.wirelessEnabled(this@MainActivity)
+            setPadding(0, dp(12), 0, 0)
+        }
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), 0)
-            addView(group); addView(stretch)
+            addView(group); addView(stretch); addView(wireless)
         }
         val builder = AlertDialog.Builder(this)
             .setTitle(if (firstRun) "Choose head-unit display" else "Head-unit display")
@@ -394,7 +482,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             .setPositiveButton("OK") { _, _ ->
                 val chosen = if (group.checkedRadioButtonId == 2) HeadUnitConfig.Orientation.LANDSCAPE else HeadUnitConfig.Orientation.PORTRAIT
                 HeadUnitConfig.saveScaling(this, if (stretch.isChecked) HeadUnitConfig.Scaling.FILL else HeadUnitConfig.Scaling.FIT)
+                HeadUnitConfig.saveWireless(this, wireless.isChecked)
                 applyConfig(chosen)
+                updateWirelessMode()
                 if (firstRun) startFromIntentOrScan()
             }
             .setCancelable(!firstRun)
@@ -421,12 +511,21 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun dp(v: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
 
-    private fun showWaiting() = setStatus(
-        "MobileLabKit — Android Auto head unit\n\n" +
-            "Plug an Android phone into this device.\n" +
-            "(This device is the USB host — USB-C↔USB-C or an OTG adapter; set up Android Auto on the phone first.)\n\n" +
-            "Display: ${videoConfig.label}   —   tap ⚙ to change"
-    )
+    private fun showWaiting() {
+        val wireless = if (HeadUnitConfig.wirelessEnabled(this)) {
+            val ip = NsdAdvertiser.localIpv4()
+            "\n\nWIRELESS: on the phone, open “AA Wireless Helper” and connect to\n" +
+                (if (ip != null) "     $ip : 5288     (or just tap Scan — this head unit is discoverable)"
+                 else "     this device’s Wi-Fi IP : 5288   (join the same Wi-Fi first)")
+        } else ""
+        setStatus(
+            "MobileLabKit — Android Auto head unit\n\n" +
+                "Plug an Android phone into this device (USB host — USB-C↔USB-C or OTG), " +
+                "or use wireless below. Set up Android Auto on the phone first." +
+                wireless +
+                "\n\nDisplay: ${videoConfig.label}   —   tap ⚙ to change"
+        )
+    }
 
     private fun setStatus(text: String) = runOnUiThread {
         if (!streaming) { status.visibility = View.VISIBLE; status.text = text; gear.visibility = View.VISIBLE }
@@ -445,6 +544,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         private const val TAG = "headunit"
         private const val ACTION_PERM = "com.mobilelabkit.headunit.USB_PERMISSION"
         private const val REQ_MIC = 101
+        private const val REQ_WIRELESS = 102
         private const val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
         private const val WRAP = FrameLayout.LayoutParams.WRAP_CONTENT
     }

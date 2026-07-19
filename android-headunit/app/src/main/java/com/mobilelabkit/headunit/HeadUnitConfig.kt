@@ -40,6 +40,7 @@ object HeadUnitConfig {
     private const val PREFS = "headunit_config"
     private const val KEY_ORIENTATION = "orientation"
     private const val KEY_SCALING = "scaling"
+    private const val KEY_WIRELESS = "wireless"
     // Car-screen densities (dpi) — AA UI scale. Higher dpi ⇒ AA treats the panel as smaller ⇒
     // LARGER on-screen elements. The phone's real dpi (~480) is far too large; a car-screen 160
     // was too small on a hand-held panel. ~280 is the comfortable middle for touch use.
@@ -66,6 +67,14 @@ object HeadUnitConfig {
 
     fun saveScaling(ctx: Context, s: Scaling) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_SCALING, s.name).apply()
+    }
+
+    /** Wireless AA (Bluetooth + Wi-Fi Direct) — off by default (USB only). */
+    fun wirelessEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_WIRELESS, false)
+
+    fun saveWireless(ctx: Context, on: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_WIRELESS, on).apply()
     }
 
     /** Physical panel size in pixels (ignores current rotation): (longSide, shortSide-agnostic raw w,h). */

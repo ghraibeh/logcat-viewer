@@ -56,16 +56,16 @@ object UsbAoap {
         private val iface: UsbInterface,
         private val epIn: UsbEndpoint,
         private val epOut: UsbEndpoint
-    ) {
-        fun write(data: ByteArray, offset: Int = 0, len: Int = data.size, timeoutMs: Int = 3000): Int =
-            conn.bulkTransfer(epOut, if (offset == 0) data else data.copyOfRange(offset, offset + len), len, timeoutMs)
+    ) : AapLink {
+        override fun write(data: ByteArray): Int =
+            conn.bulkTransfer(epOut, data, data.size, 3000)
 
-        fun read(buf: ByteArray, timeoutMs: Int): Int =
+        override fun read(buf: ByteArray, timeoutMs: Int): Int =
             conn.bulkTransfer(epIn, buf, buf.size, timeoutMs)
 
         val maxPacketIn: Int get() = epIn.maxPacketSize
 
-        fun close() {
+        override fun close() {
             runCatching { conn.releaseInterface(iface) }
             runCatching { conn.close() }
         }

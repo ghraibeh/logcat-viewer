@@ -14,7 +14,7 @@ import java.io.ByteArrayOutputStream
  * One reader thread owns the bulk-IN endpoint; sends are serialized on a lock.
  */
 class AapTransport(
-    private val link: UsbAoap.Link,
+    private val link: AapLink,
     private val crypto: AapCrypto,
     private val handler: (channel: Int, encrypted: Boolean, messageId: Int, content: ByteArray) -> Unit
 ) {
