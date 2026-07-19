@@ -1,5 +1,6 @@
 package com.mobilelabkit.aahelper
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -21,6 +22,7 @@ import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -118,6 +120,46 @@ class MainActivity : Activity() {
         val battery = Button(this).apply { text = "Keep Android Auto awake (battery settings)" }
         battery.setOnClickListener { openAaBatterySettings() }
         root.addView(battery, lp(dp(28)))
+
+        // --- Auto-start (hands-free): kick off wireless AA without opening this app ---
+        root.addView(label("Auto-start (hands-free)"))
+
+        val wifiAuto = CheckBox(this).apply {
+            text = "When I join this Wi-Fi network"
+            isChecked = prefs.getBoolean(TriggerReceiver.KEY_WIFI, false)
+        }
+        wifiAuto.setOnCheckedChangeListener { _, checked ->
+            if (checked) {
+                val ssid = currentSsid()
+                if (ssid.isEmpty() || ssid == "<unknown ssid>") {
+                    Toast.makeText(this, "Join the head unit's Wi-Fi first, then enable this.", Toast.LENGTH_LONG).show()
+                    wifiAuto.isChecked = false
+                } else {
+                    prefs.edit().putString(TriggerReceiver.KEY_WIFI_SSID, ssid)
+                        .putBoolean(TriggerReceiver.KEY_WIFI, true).apply()
+                    Toast.makeText(this, "Will auto-start on “$ssid”", Toast.LENGTH_SHORT).show()
+                    requestSelfBatteryExemption()
+                }
+            } else prefs.edit().putBoolean(TriggerReceiver.KEY_WIFI, false).apply()
+        }
+        root.addView(wifiAuto, lp(dp(16)))
+
+        val btAuto = CheckBox(this).apply {
+            text = "When Bluetooth connects (car / head unit)"
+            isChecked = prefs.getBoolean(TriggerReceiver.KEY_BT, false)
+        }
+        btAuto.setOnCheckedChangeListener { _, checked ->
+            if (checked) {
+                val mac = connectedBtMac()
+                prefs.edit().putString(TriggerReceiver.KEY_BT_MAC, mac)
+                    .putBoolean(TriggerReceiver.KEY_BT, true).apply()
+                Toast.makeText(this,
+                    if (mac.isEmpty()) "Enabled (any paired device — connect the car's BT first to pin it)"
+                    else "Will auto-start when that device connects", Toast.LENGTH_LONG).show()
+                requestSelfBatteryExemption()
+            } else prefs.edit().putBoolean(TriggerReceiver.KEY_BT, false).apply()
+        }
+        root.addView(btAuto, lp(dp(4)))
 
         setContentView(root)
 
@@ -231,6 +273,33 @@ class MainActivity : Activity() {
         try { startActivity(i) } catch (e: Exception) {
             Toast.makeText(this, "Couldn't open Android Auto settings", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    @SuppressLint("HardwareIds")
+    private fun currentSsid(): String = try {
+        @Suppress("DEPRECATION")
+        (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
+            .connectionInfo.ssid?.trim('"') ?: ""
+    } catch (e: Exception) { "" }
+
+    /** The currently-connected classic Bluetooth device's MAC (to pin the BT auto-start), or "". */
+    @SuppressLint("MissingPermission")
+    private fun connectedBtMac(): String = try {
+        val bm = getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager
+        bm.adapter?.bondedDevices?.firstOrNull { d ->
+            runCatching { d.javaClass.getMethod("isConnected").invoke(d) as? Boolean }.getOrNull() == true
+        }?.address ?: ""
+    } catch (e: Exception) { "" }
+
+    /** Ask to exempt THIS helper (not Android Auto) from battery optimization, so its auto-start
+     *  receiver + keep-alive service survive in the background. */
+    private fun requestSelfBatteryExemption() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        @SuppressLint("BatteryLife")
+        val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+        runCatching { startActivity(i) }
     }
 
     companion object {

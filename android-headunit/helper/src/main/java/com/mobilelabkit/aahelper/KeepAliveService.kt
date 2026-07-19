@@ -54,6 +54,7 @@ class KeepAliveService : Service() {
         intent?.getStringExtra(EXTRA_IP)?.let { host = it }
         port = intent?.getIntExtra(EXTRA_PORT, port) ?: port
 
+        isRunning = true
         startForegroundCompat()
         acquireLocks()
 
@@ -181,12 +182,15 @@ class KeepAliveService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        isRunning = false
         stopNsd()
         releaseLocks()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true)
     }
 
     companion object {
+        @Volatile var isRunning = false
+            private set
         private const val TAG = "aahelper-keepalive"
         private const val CHANNEL = "keepalive"
         private const val NOTIF_ID = 42
@@ -200,7 +204,20 @@ class KeepAliveService : Service() {
             val i = Intent(ctx, KeepAliveService::class.java).apply {
                 putExtra(EXTRA_IP, ip); putExtra(EXTRA_PORT, port)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i) else ctx.startService(i)
+            launch(ctx, i)
+        }
+
+        /** Start with no known IP — the service relies on NSD discovery to find the head unit and
+         *  fire. Used by auto-start (Wi-Fi/Bluetooth) where we may not know the IP up front. */
+        fun startAuto(ctx: Context) = launch(ctx, Intent(ctx, KeepAliveService::class.java))
+
+        private fun launch(ctx: Context, i: Intent) {
+            // Started from a background receiver (BT/Wi-Fi) we're on a short temp-allowlist; guard
+            // against the Android 12+ ForegroundServiceStartNotAllowedException just in case.
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
+                else ctx.startService(i)
+            }.onFailure { Log.w(TAG, "start blocked: ${it.message}") }
         }
 
         fun stop(ctx: Context) {

@@ -17,6 +17,11 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Auto-start triggers: read the connected Bluetooth device (BT trigger); ask to be exempt
+         from battery optimization so our own receiver/service survive in the background. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Android 11+ package visibility: without this we can't resolve/launch Android Auto's
          components (the whole point of this app). -->
     <queries>
@@ -42,5 +47,17 @@
             android:name=".KeepAliveService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Auto-start on Bluetooth-connect or joining the configured Wi-Fi. Both actions are still
+             delivered to manifest receivers on modern Android (exempt from the implicit-broadcast
+             ban); the receiver no-ops unless the matching toggle is on. -->
+        <receiver
+            android:name=".TriggerReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.net.wifi.STATE_CHANGE" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
