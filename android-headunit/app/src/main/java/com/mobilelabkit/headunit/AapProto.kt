@@ -64,6 +64,11 @@ object AapProto {
     const val AV_VIDEO_FOCUS_REQUEST = 0x8007
     const val AV_VIDEO_FOCUS_INDICATION = 0x8008
 
+    // --- input channel message ids (InputChannelMessageIdsEnum.proto) ---
+    const val INPUT_EVENT_INDICATION = 0x8001
+    const val INPUT_BINDING_REQUEST = 0x8002
+    const val INPUT_BINDING_RESPONSE = 0x8003
+
     // Protocol version we advertise (aasdk Version.hpp: 1.1).
     const val VERSION_MAJOR = 1
     const val VERSION_MINOR = 1

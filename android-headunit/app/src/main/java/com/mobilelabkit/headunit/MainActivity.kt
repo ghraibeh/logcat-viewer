@@ -14,12 +14,14 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
+import f1x.aasdk.proto.enums.TouchActionEnum.TouchAction
 import f1x.aasdk.proto.messages.ServiceDiscoveryResponseMessage.ServiceDiscoveryResponse
 
 /**
@@ -40,6 +42,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var transport: AapTransport? = null
     private var control: ControlChannel? = null
     private var video: VideoChannel? = null
+    private var input: InputChannel? = null
     private var decoder: VideoDecoder? = null
     @Volatile private var busy = false
     @Volatile private var streaming = false
@@ -73,6 +76,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         surfaceView = SurfaceView(this).apply { holder.addCallback(this@MainActivity) }
+        @Suppress("ClickableViewAccessibility")
+        surfaceView.setOnTouchListener { v, e -> onSurfaceTouch(v, e) }
         root.addView(surfaceView, FrameLayout.LayoutParams(MATCH, MATCH))
         status = TextView(this).apply {
             setTextColor(Color.WHITE); textSize = 18f; gravity = Gravity.CENTER
@@ -176,11 +181,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             surfaceView.holder.surface?.let { if (it.isValid) dec.setSurface(it) }
 
             lateinit var vid: VideoChannel
+            lateinit var inp: InputChannel
             val tp = AapTransport(l, crypto) { ch, _, id, content ->
                 when (ch) {
                     AapProto.CH_CONTROL -> control?.onMessage(id, content)
                     AapProto.CH_VIDEO -> vid.onMessage(id, content)
-                    else -> Log.d(TAG, "msg on ${AapProto.channelName(ch)} id=0x%04x (phase 4+)".format(id))
+                    AapProto.CH_INPUT -> inp.onMessage(id, content)
+                    else -> Log.d(TAG, "msg on ${AapProto.channelName(ch)} id=0x%04x (phase 5+)".format(id))
                 }
                 if (ch == AapProto.CH_VIDEO && !streaming &&
                     (id == AapProto.AV_MEDIA_INDICATION || id == AapProto.AV_MEDIA_WITH_TIMESTAMP_INDICATION)
@@ -188,8 +195,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             }.apply { onError = AapTransport.OnError { m -> busy = false; setStatus("Link error: $m") } }
 
             vid = VideoChannel(tp, dec) { setStatus(it) }
-            val ctrl = ControlChannel(tp, crypto, onStatus = { setStatus(it) }, buildDiscoveryResponse = { buildDiscovery(vid) })
-            transport = tp; control = ctrl; video = vid
+            inp = InputChannel(tp, VideoChannel.WIDTH, VideoChannel.HEIGHT) { setStatus(it) }
+            val ctrl = ControlChannel(tp, crypto, onStatus = { setStatus(it) }, buildDiscoveryResponse = { buildDiscovery(vid, inp) })
+            transport = tp; control = ctrl; video = vid; input = inp
             tp.start(); ctrl.begin()
         } catch (e: Exception) {
             busy = false; Log.e(TAG, "AA protocol start failed", e)
@@ -197,7 +205,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun buildDiscovery(vid: VideoChannel): ByteArray {
+    private fun buildDiscovery(vid: VideoChannel, inp: InputChannel): ByteArray {
         val b = ServiceDiscoveryResponse.newBuilder()
             .setHeadUnitName("MobileLabKit")
             .setCarModel("MobileLabKit")
@@ -207,11 +215,27 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             .setHeadunitManufacturer("MobileLabKit")
             .setHeadunitModel("MobileLabKit HeadUnit")
             .setSwBuild("1")
-            .setSwVersion("0.3")
+            .setSwVersion("0.4")
             .setCanPlayNativeMediaDuringVr(false)
             .setHideClock(false)
-        vid.fillFeatures(b) // Phase 4+ adds input/audio here
+        vid.fillFeatures(b)
+        inp.fillFeatures(b) // Phase 5+ adds audio here
         return b.build().toByteArray()
+    }
+
+    /** Map a touch on the head-unit surface into display coordinates and forward it. */
+    private fun onSurfaceTouch(v: View, e: MotionEvent): Boolean {
+        val inp = input ?: return false
+        val action = when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> TouchAction.Enum.PRESS
+            MotionEvent.ACTION_MOVE -> TouchAction.Enum.DRAG
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> TouchAction.Enum.RELEASE
+            else -> return false
+        }
+        val x = (e.x / v.width.coerceAtLeast(1) * VideoChannel.WIDTH).toInt()
+        val y = (e.y / v.height.coerceAtLeast(1) * VideoChannel.HEIGHT).toInt()
+        inp.sendTouch(action, x, y)
+        return true
     }
 
     private fun teardownProtocol() {

@@ -48,7 +48,11 @@ This is built from the spec in **[aasdk](https://github.com/f1xpl/aasdk)** / **O
   [VideoDecoder.kt](app/src/main/java/com/mobilelabkit/headunit/VideoDecoder.kt)).
   Fixed a Phase-2 direction bug in the same pass: **the phone sends the service-discovery
   request and the head unit answers** (not the other way around).
-- **Phase 4:** input channel → touch / back / home → the phone.
+- **Phase 4 ✓ (implemented, compile-verified; live input needs the rig):** the input
+  channel — the touch-forwarding path. Advertises a touchscreen sized to the display,
+  answers channel-open + key-binding, and forwards `InputEventIndication` touch events
+  (PRESS/DRAG/RELEASE, mapped into display coordinates) to the phone as you touch the
+  head-unit surface. ([InputChannel.kt](app/src/main/java/com/mobilelabkit/headunit/InputChannel.kt))
 - **Phase 5:** audio (media + guidance + speech) via `AudioTrack`.
 - **Phase 6:** wireless (Bluetooth RFCOMM bootstrap + Wi-Fi TCP).
 
