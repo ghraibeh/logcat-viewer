@@ -2,6 +2,7 @@ package com.mobilelabkit.headunit
 
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.util.concurrent.LinkedBlockingQueue
@@ -27,6 +28,24 @@ class VideoDecoder(private val width: Int, private val height: Int) {
     private var pps: ByteArray? = null
     private var ptsIndex = 0L
 
+    /** Elapsed-realtime ms of the last frame actually rendered to the Surface (0 = none yet). */
+    @Volatile var lastFrameRenderedMs = 0L
+        private set
+
+    /** Set by the owner to request a keyframe from the phone (unsolicited video focus) when the
+     *  H.264 stream desyncs — a dropped/late frame otherwise freezes the picture until the next
+     *  natural keyframe, which AA sends rarely. Throttled internally to ~1/sec. */
+    @Volatile var onNeedKeyframe: () -> Unit = {}
+    private var lastKeyframeReqMs = 0L
+
+    private fun requestKeyframe() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastKeyframeReqMs > 1000) {
+            lastKeyframeReqMs = now
+            runCatching { onNeedKeyframe() }
+        }
+    }
+
     fun start() {
         if (running) return
         running = true
@@ -41,7 +60,10 @@ class VideoDecoder(private val width: Int, private val height: Int) {
     /** Feed one Annex-B access unit (may contain SPS/PPS/IDR or a P-frame). */
     fun submit(au: ByteArray) {
         if (!running || au.isEmpty()) return
-        if (!queue.offer(au)) { queue.poll(); queue.offer(au) }
+        if (!queue.offer(au)) {
+            // Queue backed up — drop the oldest. That desyncs H.264, so ask for a keyframe.
+            queue.poll(); queue.offer(au); requestKeyframe()
+        }
     }
 
     fun release() {
@@ -60,7 +82,7 @@ class VideoDecoder(private val width: Int, private val height: Int) {
             } catch (ie: InterruptedException) {
                 break
             } catch (e: Exception) {
-                Log.w(TAG, "decode error, resetting", e); resetCodec()
+                Log.w(TAG, "decode error, resetting", e); resetCodec(); requestKeyframe()
             }
         }
     }
@@ -74,7 +96,7 @@ class VideoDecoder(private val width: Int, private val height: Int) {
         }
         val mc = codec ?: return
         val idx = mc.dequeueInputBuffer(8_000)
-        if (idx < 0) return
+        if (idx < 0) { requestKeyframe(); return } // input backed up → this AU is lost → resync
         val buf = mc.getInputBuffer(idx) ?: return
         buf.clear(); buf.put(au)
         mc.queueInputBuffer(idx, 0, au.size, ptsIndex++ * 16_666L, 0)
@@ -85,7 +107,7 @@ class VideoDecoder(private val width: Int, private val height: Int) {
         while (true) {
             val idx = mc.dequeueOutputBuffer(info, 0)
             when {
-                idx >= 0 -> mc.releaseOutputBuffer(idx, true) // render to Surface
+                idx >= 0 -> { mc.releaseOutputBuffer(idx, true); lastFrameRenderedMs = SystemClock.elapsedRealtime() }
                 idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Log.i(TAG, "format ${mc.outputFormat}")
                 else -> break
             }

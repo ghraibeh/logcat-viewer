@@ -40,9 +40,9 @@ object AapProto {
     const val MSG_SPECIFIC = 0
     const val MSG_CONTROL = 1 shl 2   // 0x04
 
-    // Protocol version we advertise (major.minor).
+    // Protocol version we advertise (major.minor). headunit-revived sends 1.2.
     const val VERSION_MAJOR = 1
-    const val VERSION_MINOR = 1
+    const val VERSION_MINOR = 2
 
     // Control message ids that aren't the SSL/version raw path (rest come from Control proto).
     const val VERSION_REQUEST = 1

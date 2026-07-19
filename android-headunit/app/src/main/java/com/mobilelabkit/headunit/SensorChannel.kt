@@ -20,6 +20,25 @@ class SensorChannel(
         }
     }
 
+    /**
+     * THE projection gate. Android Auto will NOT start video (won't send Media Sink Setup)
+     * until it knows the car is parked. headunit-revived pushes this UNSOLICITED the moment
+     * the sensor channel opens — it does NOT wait for a SensorStartRequest (the phone often
+     * never sends one). Driving status = UNRESTRICTED → AA lifts restrictions and projects.
+     */
+    fun pushDrivingStatus() {
+        val batch = Sensors.SensorBatch.newBuilder()
+            .addDrivingStatus(
+                Sensors.SensorBatch.DrivingStatusData.newBuilder()
+                    .setStatus(Sensors.SensorBatch.DrivingStatusData.Status.UNRESTRICTED_VALUE)
+            ).build()
+        transport.sendMessage(
+            AapProto.CH_SENSOR, Sensors.SensorsMsgType.SENSOR_EVENT_VALUE, batch.toByteArray(), encrypted = true
+        )
+        Log.i(TAG, "pushed unsolicited driving status = UNRESTRICTED (projection gate)")
+        onStatus("Driving status → parked (projection unlocked).")
+    }
+
     private fun onSensorStart(content: ByteArray) {
         val type = runCatching { Sensors.SensorRequest.parseFrom(content).type }.getOrNull()
         transport.sendMessage(

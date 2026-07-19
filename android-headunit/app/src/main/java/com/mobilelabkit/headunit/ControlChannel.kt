@@ -19,8 +19,7 @@ import com.mobilelabkit.headunit.AapTransport.Companion.u16be
 class ControlChannel(
     private val transport: AapTransport,
     private val crypto: AapCrypto,
-    private val videoW: Int,
-    private val videoH: Int,
+    private val videoConfig: HeadUnitConfig.VideoConfig,
     private val onStatus: (String) -> Unit
 ) {
     // Control message ids (Control.ControlMsgType).
@@ -79,7 +78,7 @@ class ControlChannel(
     private fun onServiceDiscoveryRequest() {
         transport.sendMessage(
             AapProto.CH_CONTROL, MSG_SERVICE_DISCOVERY_RESPONSE,
-            DiscoveryResponse.build(videoW, videoH), encrypted = true
+            DiscoveryResponse.build(videoConfig), encrypted = true
         )
         onStatus("Service discovery answered (modern) — waiting for channels…")
     }

@@ -1,11 +1,13 @@
 package com.mobilelabkit.headunit
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
@@ -13,6 +15,7 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.SurfaceHolder
@@ -21,6 +24,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 import com.andrerinas.headunitrevived.aap.protocol.proto.Common
 import com.andrerinas.headunitrevived.aap.protocol.proto.Control
 import com.andrerinas.headunitrevived.aap.protocol.proto.Input
@@ -32,9 +36,12 @@ import com.andrerinas.headunitrevived.aap.protocol.proto.Input
  */
 class MainActivity : Activity(), SurfaceHolder.Callback {
 
+    private lateinit var rootView: FrameLayout
     private lateinit var surfaceView: SurfaceView
     private lateinit var status: TextView
+    private lateinit var gear: TextView
     private lateinit var usb: UsbManager
+    private lateinit var videoConfig: HeadUnitConfig.VideoConfig
 
     private var link: UsbAoap.Link? = null
     private var transport: AapTransport? = null
@@ -70,16 +77,29 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         goImmersive()
         usb = getSystemService(Context.USB_SERVICE) as UsbManager
 
-        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        // Apply the saved orientation + auto-detect the panel resolution BEFORE the UI/protocol,
+        // so the service-discovery we send the phone advertises the right display.
+        val orientation = HeadUnitConfig.savedOrientation(this)
+        applyOrientation(orientation)
+        videoConfig = HeadUnitConfig.detect(this, orientation)
+
+        rootView = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         surfaceView = SurfaceView(this).apply { holder.addCallback(this@MainActivity) }
         @Suppress("ClickableViewAccessibility")
         surfaceView.setOnTouchListener { v, e -> onSurfaceTouch(v, e) }
-        root.addView(surfaceView, FrameLayout.LayoutParams(MATCH, MATCH))
+        rootView.addView(surfaceView, FrameLayout.LayoutParams(MATCH, MATCH, Gravity.CENTER))
         status = TextView(this).apply {
             setTextColor(Color.WHITE); textSize = 18f; gravity = Gravity.CENTER; setPadding(64, 64, 64, 64)
         }
-        root.addView(status, FrameLayout.LayoutParams(MATCH, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
-        setContentView(root)
+        rootView.addView(status, FrameLayout.LayoutParams(MATCH, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        gear = TextView(this).apply {
+            text = "⚙"; setTextColor(Color.WHITE); textSize = 26f
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            setOnClickListener { showConfigDialog(firstRun = false) }
+        }
+        rootView.addView(gear, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END))
+        setContentView(rootView)
+        rootView.post { layoutSurface() }
 
         showWaiting()
         val filter = IntentFilter(ACTION_PERM).apply {
@@ -88,6 +108,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(permReceiver, filter, Context.RECEIVER_EXPORTED)
         else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(permReceiver, filter)
 
+        // First launch: ask portrait vs landscape before touching the phone.
+        if (!HeadUnitConfig.isConfigured(this)) showConfigDialog(firstRun = true)
+        else startFromIntentOrScan()
+    }
+
+    private fun startFromIntentOrScan() {
         (intent?.let { deviceExtra(it) })?.let { ensureAndHandle(it) } ?: scan()
     }
 
@@ -103,6 +129,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus) goImmersive() }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig); goImmersive(); rootView.post { layoutSurface() }
+    }
 
     override fun surfaceCreated(holder: SurfaceHolder) { decoder?.setSurface(holder.surface) }
     override fun surfaceChanged(holder: SurfaceHolder, f: Int, w: Int, h: Int) { decoder?.setSurface(holder.surface) }
@@ -158,7 +188,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun startAaProtocol(l: UsbAoap.Link) {
         try {
             val crypto = AapCrypto(assets.open("headunit_cert.pem").readBytes(), assets.open("headunit_key.pem").readBytes())
-            val dec = VideoDecoder(VIDEO_W, VIDEO_H).also { it.start() }
+            val dec = VideoDecoder(videoConfig.width, videoConfig.height).also { it.start() }
             decoder = dec
             surfaceView.holder.surface?.let { if (it.isValid) dec.setSurface(it) }
 
@@ -176,6 +206,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                             .build().toByteArray(),
                         encrypted = true
                     )
+                    // The moment the SENSOR channel opens, push driving status = UNRESTRICTED
+                    // UNSOLICITED. This is the projection safety gate: AA refuses to set up video
+                    // until it knows the car is parked, and it does NOT ask (no SensorStartRequest).
+                    if (ch == AapProto.CH_SENSOR) sensor.pushDrivingStatus()
                     // Once the video channel is open, tell the phone we're displaying AA so it
                     // sets up + streams video. headunit-revived re-sends this (unsolicited video
                     // focus) every 1.5s until video arrives — so run a watchdog, not a one-shot.
@@ -192,16 +226,18 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 if (ch == AapProto.CH_VIDEO && !streaming &&
                     (id == com.andrerinas.headunitrevived.aap.protocol.proto.Media.MsgType.MEDIA_MESSAGE_DATA_VALUE ||
                         id == com.andrerinas.headunitrevived.aap.protocol.proto.Media.MsgType.MEDIA_MESSAGE_CODEC_CONFIG_VALUE)
-                ) { streaming = true; runOnUiThread { status.visibility = View.GONE } }
+                ) { streaming = true; runOnUiThread { status.visibility = View.GONE; gear.visibility = View.GONE } }
             }.apply { onError = AapTransport.OnError { m -> busy = false; setStatus("Link error: $m") } }
 
             sensor = SensorChannel(tp) { setStatus(it) }
-            inp = InputChannel(tp, VIDEO_W, VIDEO_H) { setStatus(it) }
+            inp = InputChannel(tp, videoConfig.width, videoConfig.height) { setStatus(it) }
             media[AapProto.CH_VIDEO] = MediaChannel(AapProto.CH_VIDEO, tp, dec) { setStatus(it) }
+            // When the decoder desyncs (dropped/late frame), ask the phone for a fresh keyframe.
+            dec.onNeedKeyframe = { media[AapProto.CH_VIDEO]?.gainVideoFocus() }
             for (a in intArrayOf(AapProto.CH_AUDIO_MEDIA, AapProto.CH_AUDIO_SPEECH, AapProto.CH_AUDIO_SYSTEM, AapProto.CH_MIC)) {
                 media[a] = MediaChannel(a, tp, null) { setStatus(it) }
             }
-            val ctrl = ControlChannel(tp, crypto, VIDEO_W, VIDEO_H) { setStatus(it) }
+            val ctrl = ControlChannel(tp, crypto, videoConfig) { setStatus(it) }
             transport = tp; control = ctrl; input = inp
             tp.start(); ctrl.begin()
         } catch (e: Exception) {
@@ -215,11 +251,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun startVideoFocusWatchdog(video: MediaChannel) {
         focusWatchdog?.interrupt()
         focusWatchdog = Thread({
-            var tries = 0
-            while (!streaming && tries < 60 && transport != null) {
-                runCatching { video.gainVideoFocus() }
+            while (transport != null) {
+                val rendered = decoder?.lastFrameRenderedMs ?: 0L
+                // Before streaming: nudge the phone to project. During streaming: if rendering
+                // has stalled >2s, the picture is frozen → request a keyframe to recover.
+                val stalled = streaming && rendered > 0L &&
+                    android.os.SystemClock.elapsedRealtime() - rendered > 2000
+                if (!streaming || stalled) runCatching { video.gainVideoFocus() }
                 try { Thread.sleep(1500) } catch (e: InterruptedException) { break }
-                tries++
             }
         }, "video-focus-wd").also { it.start() }
     }
@@ -243,20 +282,80 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> Input.TouchEvent.PointerAction.TOUCH_ACTION_UP
             else -> return false
         }
-        val x = (e.x / v.width.coerceAtLeast(1) * VIDEO_W).toInt()
-        val y = (e.y / v.height.coerceAtLeast(1) * VIDEO_H).toInt()
+        val x = (e.x / v.width.coerceAtLeast(1) * videoConfig.width).toInt()
+        val y = (e.y / v.height.coerceAtLeast(1) * videoConfig.height).toInt()
         inp.sendTouch(action, x, y)
         return true
     }
 
+    // --- display configuration -------------------------------------------------
+    private fun applyOrientation(o: HeadUnitConfig.Orientation) {
+        requestedOrientation = if (o == HeadUnitConfig.Orientation.LANDSCAPE)
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
+
+    /** Letterbox the surface to the negotiated video aspect ratio, centered in the screen. */
+    private fun layoutSurface() {
+        val rw = rootView.width; val rh = rootView.height
+        if (rw == 0 || rh == 0 || !::videoConfig.isInitialized) return
+        val vw = videoConfig.width.toFloat(); val vh = videoConfig.height.toFloat()
+        val scale = minOf(rw / vw, rh / vh)
+        val sw = (vw * scale).toInt().coerceAtLeast(1)
+        val sh = (vh * scale).toInt().coerceAtLeast(1)
+        surfaceView.layoutParams = FrameLayout.LayoutParams(sw, sh, Gravity.CENTER)
+        surfaceView.requestLayout()
+    }
+
+    /** Portrait/Landscape chooser. Auto-detected resolution is shown for each. */
+    private fun showConfigDialog(firstRun: Boolean) {
+        val current = if (::videoConfig.isInitialized) videoConfig.orientation else HeadUnitConfig.savedOrientation(this)
+        val portrait = HeadUnitConfig.detect(this, HeadUnitConfig.Orientation.PORTRAIT)
+        val landscape = HeadUnitConfig.detect(this, HeadUnitConfig.Orientation.LANDSCAPE)
+        val items = arrayOf(
+            "Portrait — ${portrait.width}×${portrait.height} @ ${portrait.densityDpi}dpi",
+            "Landscape — ${landscape.width}×${landscape.height} @ ${landscape.densityDpi}dpi"
+        )
+        val checked = if (current == HeadUnitConfig.Orientation.LANDSCAPE) 1 else 0
+        AlertDialog.Builder(this)
+            .setTitle(if (firstRun) "Choose head-unit display" else "Head-unit display")
+            .setSingleChoiceItems(items, checked) { dialog, which ->
+                val chosen = if (which == 1) HeadUnitConfig.Orientation.LANDSCAPE else HeadUnitConfig.Orientation.PORTRAIT
+                dialog.dismiss()
+                applyConfig(chosen)
+                if (firstRun) startFromIntentOrScan()
+            }
+            .setCancelable(!firstRun)
+            .show()
+    }
+
+    /** Persist + apply an orientation choice; detect its resolution and relayout. */
+    private fun applyConfig(o: HeadUnitConfig.Orientation) {
+        val changed = !::videoConfig.isInitialized || videoConfig.orientation != o
+        HeadUnitConfig.saveOrientation(this, o)
+        applyOrientation(o)
+        videoConfig = HeadUnitConfig.detect(this, o)
+        rootView.post { layoutSurface() }
+        if (!streaming) showWaiting()
+        if (changed && transport != null) {
+            Toast.makeText(
+                this, "Re-plug the phone to apply ${o.name.lowercase()} ${videoConfig.width}×${videoConfig.height}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun dp(v: Int): Int =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
+
     private fun showWaiting() = setStatus(
         "MobileLabKit — Android Auto head unit\n\n" +
             "Plug an Android phone into this device.\n" +
-            "(This device is the USB host — USB-C↔USB-C or an OTG adapter; set up Android Auto on the phone first.)"
+            "(This device is the USB host — USB-C↔USB-C or an OTG adapter; set up Android Auto on the phone first.)\n\n" +
+            "Display: ${videoConfig.label}   —   tap ⚙ to change"
     )
 
     private fun setStatus(text: String) = runOnUiThread {
-        if (!streaming) { status.visibility = View.VISIBLE; status.text = text }
+        if (!streaming) { status.visibility = View.VISIBLE; status.text = text; gear.visibility = View.VISIBLE }
         Log.i(TAG, text.replace("\n", " · "))
     }
 
@@ -272,7 +371,6 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         private const val TAG = "headunit"
         private const val ACTION_PERM = "com.mobilelabkit.headunit.USB_PERMISSION"
         private const val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
-        const val VIDEO_W = 800
-        const val VIDEO_H = 480
+        private const val WRAP = FrameLayout.LayoutParams.WRAP_CONTENT
     }
 }

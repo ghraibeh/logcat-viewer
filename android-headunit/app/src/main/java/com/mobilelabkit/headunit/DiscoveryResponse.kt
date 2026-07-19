@@ -13,7 +13,7 @@ import com.andrerinas.headunitrevived.aap.protocol.proto.Sensors
  */
 object DiscoveryResponse {
 
-    fun build(videoW: Int, videoH: Int): ByteArray {
+    fun build(video: HeadUnitConfig.VideoConfig): ByteArray {
         val services = ArrayList<Control.Service>()
 
         // Sensor: driving status (safety gate) + night.
@@ -25,7 +25,9 @@ object DiscoveryResponse {
                 .build()
         }.build())
 
-        // Video sink (H.264).
+        // Video sink (H.264). Resolution/density come from the user's orientation choice +
+        // the auto-detected panel size (HeadUnitConfig). AA only starts video when an advertised
+        // config matches the display's orientation, so this MUST reflect portrait vs landscape.
         services.add(Control.Service.newBuilder().apply {
             id = AapProto.CH_VIDEO
             mediaSinkService = Control.Service.MediaSinkService.newBuilder().apply {
@@ -34,22 +36,22 @@ object DiscoveryResponse {
                 availableWhileInCall = true
                 addVideoConfigs(
                     Control.Service.MediaSinkService.VideoConfiguration.newBuilder()
-                        .setCodecResolution(Control.Service.MediaSinkService.VideoConfiguration.VideoCodecResolutionType._800x480)
+                        .setCodecResolution(video.resolution)
                         .setFrameRate(Control.Service.MediaSinkService.VideoConfiguration.VideoFrameRateType._30)
-                        .setMarginWidth(0).setMarginHeight(0).setDensity(160)
+                        .setMarginWidth(0).setMarginHeight(0).setDensity(video.densityDpi)
                         .setVideoCodecType(Media.MediaCodecType.MEDIA_CODEC_VIDEO_H264_BP)
                         .build()
                 )
             }.build()
         }.build())
 
-        // Input (touchscreen).
+        // Input (touchscreen) — sized to the negotiated video resolution.
         services.add(Control.Service.newBuilder().apply {
             id = AapProto.CH_INPUT
             inputSourceService = Control.Service.InputSourceService.newBuilder()
                 .setTouchscreen(
                     Control.Service.InputSourceService.TouchConfig.newBuilder()
-                        .setWidth(videoW).setHeight(videoH).build()
+                        .setWidth(video.width).setHeight(video.height).build()
                 ).build()
         }.build())
 
@@ -92,10 +94,22 @@ object DiscoveryResponse {
             .setHeadUnitMake("MobileLabKit")
             .setHeadUnitModel("MobileLabKit HeadUnit")
             .setHeadUnitSoftwareBuild("1")
-            .setHeadUnitSoftwareVersion("0.6")
+            .setHeadUnitSoftwareVersion("0.7")
             .setCanPlayNativeMediaDuringVr(false)
             .setHideProjectedClock(false)
             .setDisplayName("MobileLabKit")
+            .setHeadunitInfo(
+                com.andrerinas.headunitrevived.aap.protocol.proto.Common.HeadUnitInfo.newBuilder()
+                    .setHeadUnitMake("MobileLabKit")
+                    .setHeadUnitModel("MobileLabKit HeadUnit")
+                    .setMake("MobileLabKit")
+                    .setModel("MobileLabKit")
+                    .setYear("2026")
+                    .setVehicleId("MLK0001")
+                    .setHeadUnitSoftwareBuild("1")
+                    .setHeadUnitSoftwareVersion("0.7")
+                    .build()
+            )
             .build().toByteArray()
     }
 

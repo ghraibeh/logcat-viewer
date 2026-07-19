@@ -65,7 +65,14 @@ class AapTransport(
                 }
                 val header = ByteArrayOutputStream()
                 header.write(channel)
-                header.write(frameType or enc or AapProto.MSG_SPECIFIC)
+                // Control-type messages (msgId 1..26, e.g. CHANNEL_OPEN_RESPONSE=8) carried on a
+                // NON-control channel must set the 0x04 "control" bit so the phone routes them to
+                // its control parser, not the channel's media namespace. Media/channel-specific
+                // messages (video focus 0x8008, driving status 0x8003, …) and everything on the
+                // control channel stay "specific" (0x0b). Mirrors headunit-revived AapMessage.flags().
+                val msgFlag = if (channel != AapProto.CH_CONTROL && messageId in 1..26)
+                    AapProto.MSG_CONTROL else AapProto.MSG_SPECIFIC
+                header.write(frameType or enc or msgFlag)
                 header.write(u16be(n))
                 if (frameType == AapProto.FRAME_FIRST) header.write(u32be(total))
                 val frame = header.toByteArray() + body.copyOfRange(off, off + n)
@@ -86,7 +93,6 @@ class AapTransport(
                 if (running) fail("bulk read error: ${e.message}"); return
             }
             if (n <= 0) continue // timeout / empty; keep waiting
-            Log.i(TAG, "bulk read $n bytes")
             rx += buf.copyOf(n)
             drainFrames()
         }
@@ -114,30 +120,38 @@ class AapTransport(
 
     private fun handleFrame(channel: Int, flags: Int, frameType: Int, payload: ByteArray) {
         val encrypted = (flags and AapProto.ENC_ENCRYPTED) != 0
+        // CRITICAL: decrypt EACH frame here, in receive order. TLS is one ordered record stream,
+        // and the phone interleaves frames across channels (e.g. an audio frame slotted between a
+        // large video keyframe's fragments). Reassembling ciphertext per-channel and decrypting on
+        // completion unwraps records OUT OF ORDER → the stream cipher desyncs and every later
+        // decrypt fails → the picture freezes for the rest of the session. Decrypting per-frame in
+        // receive order keeps TLS in sync; reassembly then happens on the PLAINTEXT.
+        val plain = if (encrypted) {
+            try { crypto.decrypt(payload) } catch (e: Exception) {
+                Log.w(TAG, "decrypt failed on ${AapProto.channelName(channel)}", e); return
+            }
+        } else payload
+
         val complete: ByteArray = when (frameType) {
-            AapProto.FRAME_BULK -> payload
+            AapProto.FRAME_BULK -> plain
             AapProto.FRAME_FIRST -> {
-                assembling[channel] = ByteArrayOutputStream().apply { write(payload) }
+                assembling[channel] = ByteArrayOutputStream().apply { write(plain) }
                 return
             }
             AapProto.FRAME_MIDDLE -> {
-                assembling[channel]?.write(payload); return
+                assembling[channel]?.write(plain); return
             }
             AapProto.FRAME_LAST -> {
                 val acc = assembling.remove(channel) ?: return
-                acc.write(payload); acc.toByteArray()
+                acc.write(plain); acc.toByteArray()
             }
             else -> return
         }
         dispatch(channel, encrypted, complete)
     }
 
-    private fun dispatch(channel: Int, encrypted: Boolean, framePayload: ByteArray) {
-        val plain = if (encrypted) {
-            try { crypto.decrypt(framePayload) } catch (e: Exception) {
-                Log.w(TAG, "decrypt failed on ${AapProto.channelName(channel)}", e); return
-            }
-        } else framePayload
+    /** [plain] is the fully-reassembled DECRYPTED message: [msgId:2 BE][protobuf]. */
+    private fun dispatch(channel: Int, encrypted: Boolean, plain: ByteArray) {
         if (plain.size < 2) return
         val messageId = readU16(plain, 0)
         val content = plain.copyOfRange(2, plain.size)
