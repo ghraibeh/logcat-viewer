@@ -29,6 +29,7 @@ class VideoDecoder(private val width: Int, private val height: Int) {
     private var codec: MediaCodec? = null
     private var configured = false
     private var ptsIndex = 0L
+    @Volatile private var resetRequested = false
 
     fun start() {
         if (running) return
@@ -39,7 +40,9 @@ class VideoDecoder(private val width: Int, private val height: Int) {
     /** The SurfaceView's surface just became available (or was destroyed → null). */
     fun setSurface(s: Surface?) {
         surface = s
-        if (s == null) resetCodec() // surface gone: tear the codec down, reconfigure on the next config
+        // Surface gone: tear the codec down (on the decode thread) and reconfigure on the
+        // next config. Flagged rather than reset here so codec ops stay on one thread.
+        if (s == null) resetRequested = true
     }
 
     /** Feed one Annex-B unit from the native receiver. Non-blocking (drops when full). */
@@ -51,15 +54,17 @@ class VideoDecoder(private val width: Int, private val height: Int) {
         }
     }
 
-    /** A client disconnected — flush so the next connection reconfigures cleanly. */
+    /** A client disconnected — flush so the next connection reconfigures cleanly. Safe to
+     *  call from any thread; the actual codec teardown happens on the decode thread. */
     fun onDisconnected() {
         queue.clear()
-        resetCodec()
+        resetRequested = true
     }
 
     fun release() {
         running = false
         thread?.interrupt()
+        try { thread?.join(200) } catch (_: InterruptedException) {} // let the loop stop touching the codec
         thread = null
         resetCodec()
         queue.clear()
@@ -69,6 +74,10 @@ class VideoDecoder(private val width: Int, private val height: Int) {
         val info = MediaCodec.BufferInfo()
         while (running) {
             try {
+                if (resetRequested) {
+                    resetRequested = false
+                    resetCodec() // handle disconnect / surface-loss on this thread only
+                }
                 val u = queue.poll(10, TimeUnit.MILLISECONDS)
                 if (u != null) feed(u)
                 drain(info)

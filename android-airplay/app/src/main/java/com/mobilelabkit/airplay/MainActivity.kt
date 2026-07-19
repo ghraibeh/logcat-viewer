@@ -11,6 +11,7 @@ import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.util.TypedValue
@@ -40,6 +41,7 @@ import java.net.NetworkInterface
 class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback {
 
     private lateinit var surfaceView: SurfaceView
+    private lateinit var cover: View
     private lateinit var status: TextView
     private lateinit var controls: LinearLayout
     private lateinit var muteBtn: TextView
@@ -55,8 +57,25 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     private val ui = Handler(Looper.getMainLooper())
     private val hideControls = Runnable { if (streaming) controls.visibility = View.GONE }
 
+    // The mirror video and the HTTP control connection are separate TCP streams: when the
+    // iPhone drops ungracefully (leaves Wi-Fi, crashes, out of range) the frames just stop
+    // while the control connection lingers, so onClientDisconnected() can fire late or not
+    // at all. This watchdog treats "no frame for a while" as a disconnect and resets.
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (streaming && SystemClock.elapsedRealtime() - lastFrameMs > STALL_MS) {
+                Log.i(TAG, "no video for >${STALL_MS}ms — treating as disconnect")
+                streaming = false
+                decoder?.onDisconnected()
+                resetScreen()
+            }
+            ui.postDelayed(this, WATCHDOG_INTERVAL_MS)
+        }
+    }
+
     @Volatile private var streaming = false
     @Volatile private var restarting = false
+    @Volatile private var lastFrameMs = 0L
     private var muted = false
 
     private val advertisedName: String = DEFAULT_NAME
@@ -74,6 +93,17 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
         surfaceView = SurfaceView(this).apply { holder.addCallback(this@MainActivity) }
         root.addView(
             surfaceView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        // Opaque black layer ON TOP of the SurfaceView (a bottom SurfaceView punches a
+        // transparent hole in the window, so the black root background can't hide a frozen
+        // last frame — this can). Visible while waiting/disconnected, hidden once frames flow.
+        cover = View(this).apply { setBackgroundColor(Color.BLACK) }
+        root.addView(
+            cover,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -104,6 +134,7 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
         val (w, h) = parseRes(resKey)
         decoder = VideoDecoder(w, h).also { it.start() }
         showWaiting()
+        ui.postDelayed(watchdog, WATCHDOG_INTERVAL_MS)
         acquireWifi()
         // Pin the whole process to the Wi-Fi network BEFORE creating the native sockets.
         // Android routes each app's sockets by fwmark; without this, our mDNS multicast
@@ -206,7 +237,7 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
         restarting = true
         streaming = false
         decoder?.onDisconnected()
-        showWaiting()
+        resetScreen()
         Thread({
             NativeReceiver.stop()
             runOnUiThread {
@@ -219,23 +250,30 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     // --- NativeReceiver.Listener (called on native threads) --------------------
     override fun onVideoFrame(data: ByteArray, pts: Long, isConfig: Boolean) {
         decoder?.submit(data, isConfig)
+        lastFrameMs = SystemClock.elapsedRealtime() // feeds the stall watchdog
         if (!streaming && !isConfig) {
             streaming = true
             runOnUiThread {
                 hideWaiting()
+                cover.visibility = View.GONE // reveal the live video
                 showControlsBriefly()
             }
         }
     }
 
     override fun onClientConnected() {
-        runOnUiThread { status.text = "Connecting…" }
+        streaming = false
+        runOnUiThread {
+            cover.visibility = View.VISIBLE // blank any stale frame until new frames arrive
+            status.visibility = View.VISIBLE
+            status.text = "Connecting…"
+        }
     }
 
     override fun onClientDisconnected() {
         streaming = false
         decoder?.onDisconnected()
-        runOnUiThread { showWaiting() }
+        resetScreen()
     }
 
     // --- SurfaceHolder.Callback -----------------------------------------------
@@ -249,6 +287,7 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     override fun onDestroy() {
         super.onDestroy()
         ui.removeCallbacks(hideControls)
+        ui.removeCallbacks(watchdog)
         NativeReceiver.stop()
         decoder?.release()
         decoder = null
@@ -275,6 +314,12 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     }
 
     private fun hideWaiting() { status.visibility = View.GONE }
+
+    /** Blank the mirror (cover the frozen last frame) and show the waiting prompt again. */
+    private fun resetScreen() = runOnUiThread {
+        cover.visibility = View.VISIBLE
+        showWaiting()
+    }
 
     /** Bind the process to the active Wi-Fi network (if any), then run [start]. All sockets
      *  created after this (the native mDNS + RAOP sockets) egress Wi-Fi regardless of the
@@ -355,6 +400,12 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     companion object {
         private const val TAG = "airplay"
         private const val DEFAULT_NAME = "MobileLabKit.android"
+
+        /** Reset the screen if no video frame arrives for this long while streaming — the
+         *  AirPlay mirror sends continuously, so a multi-second gap means the client is gone.
+         *  Generous enough not to trip on a brief network hiccup. */
+        private const val STALL_MS = 4000L
+        private const val WATCHDOG_INTERVAL_MS = 1000L
 
         /** Advertised AirPlay display sizes (GET /info widthPixels/heightPixels — the
          *  iPhone streams at up to this). Default = highest; the hardware decoder
