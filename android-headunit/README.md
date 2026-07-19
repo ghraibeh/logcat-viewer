@@ -30,9 +30,15 @@ This is built from the spec in **[aasdk](https://github.com/f1xpl/aasdk)** / **O
   accessory (VID `0x18D1` / PID `0x2D00`|`0x2D01`) and we open its bulk IN/OUT link.
   Files: [UsbAoap.kt](app/src/main/java/com/mobilelabkit/headunit/UsbAoap.kt),
   [MainActivity.kt](app/src/main/java/com/mobilelabkit/headunit/MainActivity.kt).
-- **Phase 2:** frame codec (`[chan][flags][len][payload]`) + version request/response +
-  SSL handshake with the head-unit cert + service discovery. (`.proto` files are staged
-  in `app/src/main/proto/`; the protobuf Gradle plugin gets wired here.)
+- **Phase 2 ✓ (implemented, compile-verified; live handshake needs the rig):** frame
+  codec + multi-frame reassembly ([AapTransport.kt](app/src/main/java/com/mobilelabkit/headunit/AapTransport.kt)),
+  TLSv1.2 client with the head-unit cert driven over `SSL_HANDSHAKE` messages
+  ([AapCrypto.kt](app/src/main/java/com/mobilelabkit/headunit/AapCrypto.kt)), and the
+  control-channel handshake — version → TLS → auth-complete → service discovery
+  ([ControlChannel.kt](app/src/main/java/com/mobilelabkit/headunit/ControlChannel.kt)).
+  The 96 aasdk `.proto` are compiled to protobuf-lite. On success the screen lists the
+  phone's offered channels. **Not yet verified against a real phone** — the TLS
+  handshake-over-messages is the most likely thing to need tuning on the rig.
 - **Phase 3:** video channel → H.264 → `MediaCodec` → `SurfaceView` (car UI appears).
 - **Phase 4:** input channel → touch / back / home → the phone.
 - **Phase 5:** audio (media + guidance + speech) via `AudioTrack`.

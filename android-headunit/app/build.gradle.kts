@@ -1,6 +1,9 @@
+import com.google.protobuf.gradle.id
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.protobuf") version "0.9.4"
 }
 
 android {
@@ -12,7 +15,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1"
+        versionName = "0.2"
     }
 
     buildTypes {
@@ -31,7 +34,19 @@ android {
     }
 }
 
+// The Android Auto message set — aasdk's .proto files in src/main/proto, generated as
+// protobuf-lite (small runtime, fine for Android). Mixed proto2/proto3; protoc handles both.
+protobuf {
+    protoc { artifact = "com.google.protobuf:protoc:3.25.3" }
+    generateProtoTasks {
+        all().forEach { task ->
+            task.builtins {
+                id("java") { option("lite") }
+            }
+        }
+    }
+}
+
 dependencies {
-    // Phase 1 is pure Android USB Host API + platform TLS/MediaCodec — no third-party deps.
-    // Phase 2 adds protobuf-javalite (compiled from the aasdk .proto in src/main/proto).
+    implementation("com.google.protobuf:protobuf-javalite:3.25.3")
 }

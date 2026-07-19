@@ -33,6 +33,8 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var usb: UsbManager
     private var link: UsbAoap.Link? = null
+    private var transport: AapTransport? = null
+    private var control: ControlChannel? = null
     @Volatile private var busy = false
 
     private val permReceiver = object : BroadcastReceiver() {
@@ -48,6 +50,7 @@ class MainActivity : Activity() {
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val dev = deviceExtra(intent)
                     Log.i(TAG, "detached: ${dev?.deviceName}")
+                    teardownProtocol()
                     link?.close(); link = null
                     busy = false
                     showWaiting()
@@ -109,6 +112,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         runCatching { unregisterReceiver(permReceiver) }
+        teardownProtocol()
         link?.close(); link = null
     }
 
@@ -152,11 +156,8 @@ class MainActivity : Activity() {
                     val l = UsbAoap.openLink(usb, dev)
                     if (l != null) {
                         link = l
-                        setStatus(
-                            "✓ Android Auto link open\n\n" +
-                                "Bulk endpoints ready (in ${l.maxPacketIn}B).\n" +
-                                "Phase 2 (protocol / video) plugs in here."
-                        )
+                        setStatus("Android Auto link open — starting protocol…")
+                        startAaProtocol(l)
                     } else {
                         busy = false
                         setStatus("Phone is in accessory mode but the bulk link failed to open.")
@@ -189,6 +190,40 @@ class MainActivity : Activity() {
                 setStatus("USB error: ${e.message}")
             }
         }, "aoap").start()
+    }
+
+    /** Phase 2: run the Android Auto handshake (version → TLS → discovery) over the link. */
+    private fun startAaProtocol(l: UsbAoap.Link) {
+        try {
+            val cert = assets.open("headunit_cert.pem").readBytes()
+            val key = assets.open("headunit_key.pem").readBytes()
+            val crypto = AapCrypto(cert, key)
+            val ctrl: ControlChannel
+            val tp = AapTransport(l, crypto) { ch, enc, id, content ->
+                control?.onMessage(ch, enc, id, content)
+            }.apply {
+                onError = AapTransport.OnError { msg -> busy = false; setStatus("Link error: $msg") }
+            }
+            ctrl = ControlChannel(
+                transport = tp,
+                crypto = crypto,
+                onStatus = { setStatus(it) },
+                onReady = { /* Phase 3 opens channels from here */ }
+            )
+            transport = tp
+            control = ctrl
+            tp.start()
+            ctrl.begin()
+        } catch (e: Exception) {
+            busy = false
+            android.util.Log.e(TAG, "AA protocol start failed", e)
+            setStatus("Couldn’t start the Android Auto protocol: ${e.message}")
+        }
+    }
+
+    private fun teardownProtocol() {
+        transport?.stop(); transport = null
+        control = null
     }
 
     // --- helpers ---------------------------------------------------------------
