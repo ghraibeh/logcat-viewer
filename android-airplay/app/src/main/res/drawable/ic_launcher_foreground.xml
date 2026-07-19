@@ -1,0 +1,15 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Screen bezel (rectangular ring via even-odd). -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M22,30 H86 V62 H22 Z M30,38 H78 V54 H30 Z" />
+    <!-- AirPlay beam: upward triangle below the screen. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,62 L40,80 H68 Z" />
+</vector>

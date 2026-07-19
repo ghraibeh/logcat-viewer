@@ -742,25 +742,58 @@ mdns_string_make(void* buffer, size_t capacity, void* data, const char* name, si
 	if (name[length - 1] == '.')
 		--length;
 	while (last_pos < length) {
-		size_t pos = mdns_string_find(name, length, '.', last_pos);
+		/* AndroidLab edit (see PROVENANCE.md): find the next UNESCAPED dot — a "\."
+		 * sequence stays inside the label, so DNS-SD instance names may contain
+		 * literal dots (RFC 6763 §4.3, e.g. "MobileLabKit.android"). Behaviour is
+		 * unchanged for names without backslashes. */
+		size_t pos = last_pos;
+		int has_esc = 0;
+		while (pos < length && name[pos] != '.') {
+			if (name[pos] == '\\' && (pos + 1) < length) {
+				has_esc = 1;
+				++pos;
+			}
+			++pos;
+		}
+		if (pos >= length)
+			pos = MDNS_INVALID_POS;
 		size_t sub_length = ((pos != MDNS_INVALID_POS) ? pos : length) - last_pos;
 		size_t total_length = length - last_pos;
 
-		size_t ref_offset =
-		    mdns_string_table_find(string_table, buffer, capacity,
-		                           (char*)MDNS_POINTER_OFFSET(name, last_pos), sub_length,
-		                           total_length);
-		if (ref_offset != MDNS_INVALID_POS)
-			return mdns_string_make_ref(data, remain, ref_offset);
+		if (!has_esc) {
+			size_t ref_offset =
+			    mdns_string_table_find(string_table, buffer, capacity,
+			                           (char*)MDNS_POINTER_OFFSET(name, last_pos), sub_length,
+			                           total_length);
+			if (ref_offset != MDNS_INVALID_POS)
+				return mdns_string_make_ref(data, remain, ref_offset);
 
-		if (remain <= (sub_length + 1))
-			return 0;
+			if (remain <= (sub_length + 1))
+				return 0;
 
-		*(unsigned char*)data = (unsigned char)sub_length;
-		memcpy(MDNS_POINTER_OFFSET(data, 1), name + last_pos, sub_length);
-		mdns_string_table_add(string_table, MDNS_POINTER_DIFF(data, buffer));
+			*(unsigned char*)data = (unsigned char)sub_length;
+			memcpy(MDNS_POINTER_OFFSET(data, 1), name + last_pos, sub_length);
+			mdns_string_table_add(string_table, MDNS_POINTER_DIFF(data, buffer));
 
-		data = MDNS_POINTER_OFFSET(data, sub_length + 1);
+			data = MDNS_POINTER_OFFSET(data, sub_length + 1);
+		} else {
+			/* AndroidLab edit: unescape while copying ("\X" -> "X"); this label skips
+			 * the compression string table (harmless — slightly larger packet). */
+			size_t out_len = 0, i;
+			if (remain <= (sub_length + 1))
+				return 0;
+			unsigned char* dst = (unsigned char*)MDNS_POINTER_OFFSET(data, 1);
+			for (i = 0; i < sub_length; ++i) {
+				char c = name[last_pos + i];
+				if (c == '\\' && (i + 1) < sub_length) {
+					++i;
+					c = name[last_pos + i];
+				}
+				dst[out_len++] = (unsigned char)c;
+			}
+			*(unsigned char*)data = (unsigned char)out_len;
+			data = MDNS_POINTER_OFFSET(data, out_len + 1);
+		}
 		last_pos = ((pos != MDNS_INVALID_POS) ? pos + 1 : length);
 		remain = capacity - MDNS_POINTER_DIFF(data, buffer);
 	}

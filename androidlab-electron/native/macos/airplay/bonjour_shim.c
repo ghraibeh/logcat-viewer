@@ -34,6 +34,16 @@
 
 #include "threads.h"
 #include "mdns.h"
+#include <errno.h>
+
+/* Android-only trace to logcat (tag "airplay-mdns"): diagnoses whether the phone
+ * receives iOS/Mac browse queries and whether we answer. No-op off Android. */
+#ifdef __ANDROID__
+#  include <android/log.h>
+#  define BSHIM_LOG(...) __android_log_print(ANDROID_LOG_INFO, "airplay-mdns", __VA_ARGS__)
+#else
+#  define BSHIM_LOG(...) ((void)0)
+#endif
 
 #define BSHIM_MAX_SERVICES 4
 #define BSHIM_MAX_TXT 48
@@ -43,7 +53,12 @@
 typedef struct {
     int used;
     char service[256];          /* "_raop._tcp.local." (answer target for PTR)          */
-    char instance[320];         /* "<name>._raop._tcp.local." (SRV/TXT owner)           */
+    char instance[320];         /* WIRE form: dots in <name> escaped "\." so the writer
+                                   emits ONE label (SRV/TXT owner, PTR rdata)           */
+    char instance_plain[320];   /* PLAIN form: for matching extracted query names
+                                   (mdns_string_extract joins labels with plain dots)   */
+    int goodbye;                /* >0: unregistered — send that many TTL-0 goodbye
+                                   bursts from the responder thread, then free the slot */
     uint16_t port;              /* host byte order                                      */
     mdns_record_t record_ptr;   /* name=service        -> ptr.name=instance             */
     mdns_record_t record_srv;   /* name=instance       -> srv{port, name=host}          */
@@ -197,6 +212,16 @@ static void build_host_identity(void) {
     }
 #endif
 
+#ifdef __ANDROID__
+    /* Android's gethostname() is almost always "localhost" — a guaranteed A-record
+     * collision if two receivers share a LAN. Derive a unique host label from our
+     * IPv4 instead (unique per LAN by definition; re-derived on every start). */
+    if (g_addr4.sin_family == AF_INET) {
+        const uint8_t *ip = (const uint8_t *)&g_addr4.sin_addr.s_addr;
+        snprintf(g_host, sizeof(g_host), "mlk-%u-%u-%u-%u.local.", ip[0], ip[1], ip[2], ip[3]);
+    }
+#endif
+
     g_record_a.name.str = g_host;
     g_record_a.name.length = strlen(g_host);
     g_record_a.type = MDNS_RECORDTYPE_A;
@@ -268,7 +293,9 @@ static int responder_cb(int sock, const struct sockaddr *from, size_t addrlen,
     for (int i = 0; i < BSHIM_MAX_SERVICES; ++i) {
         bshim_service *s = &g_services[i];
         if (!s->used) continue;
-        size_t slen = strlen(s->service), ilen = strlen(s->instance), hlen = strlen(g_host);
+        /* Instance queries arrive as wire labels; extraction joins them with plain
+         * dots — so match against instance_plain (not the escaped wire form). */
+        size_t slen = strlen(s->service), ilen = strlen(s->instance_plain), hlen = strlen(g_host);
 
         if (name.length == slen && strncmp(name.str, s->service, slen) == 0 &&
             (rtype == MDNS_RECORDTYPE_PTR || rtype == MDNS_RECORDTYPE_ANY)) {
@@ -282,15 +309,17 @@ static int responder_cb(int sock, const struct sockaddr *from, size_t addrlen,
             else
                 mdns_query_answer_multicast(sock, g_sendbuf, sizeof(g_sendbuf), ans, 0, 0,
                                             additional, na);
-        } else if (name.length == ilen && strncmp(name.str, s->instance, ilen) == 0 &&
+        } else if (name.length == ilen && strncmp(name.str, s->instance_plain, ilen) == 0 &&
                    (rtype == MDNS_RECORDTYPE_SRV || rtype == MDNS_RECORDTYPE_TXT ||
                     rtype == MDNS_RECORDTYPE_ANY)) {
-            /* SRV/TXT for the instance -> SRV answer + A/AAAA/TXT additional. */
+            /* SRV/TXT for the instance -> SRV answer + A/AAAA/TXT additional. The
+             * unicast answer echoes the question; pass the ESCAPED form so the echoed
+             * qname re-encodes to the same single-label wire name the querier sent. */
             mdns_record_t ans = s->record_srv;
             size_t na = build_additional(s, 0, additional, sizeof(additional) / sizeof(additional[0]));
             if (unicast)
                 mdns_query_answer_unicast(sock, from, addrlen, g_sendbuf, sizeof(g_sendbuf),
-                                          query_id, rtype, name.str, name.length, ans, 0, 0,
+                                          query_id, rtype, s->instance, strlen(s->instance), ans, 0, 0,
                                           additional, na);
             else
                 mdns_query_answer_multicast(sock, g_sendbuf, sizeof(g_sendbuf), ans, 0, 0,
@@ -330,12 +359,28 @@ static int open_sockets(int *socks, int max) {
         memset(&sa, 0, sizeof(sa));
         sa.sin_family = AF_INET;
         sa.sin_addr.s_addr = INADDR_ANY;
+#ifdef __ANDROID__
+        /* Android does NOT egress/join multicast on wlan0 for INADDR_ANY — the kernel's
+         * default multicast route isn't the Wi-Fi interface, so our announcements never
+         * reach the iPhone. Pin the discovered LAN IPv4 (g_addr4) so mdns.h sets
+         * IP_MULTICAST_IF + imr_interface to wlan0. It still bind()s the socket to
+         * INADDR_ANY, so inbound query RX is unaffected. (Gated to Android; the desktop
+         * path — verified working — is left byte-for-byte unchanged.) */
+        if (g_addr4.sin_family == AF_INET) sa.sin_addr = g_addr4.sin_addr;
+#endif
         sa.sin_port = htons(MDNS_PORT);
 #ifdef __APPLE__
         sa.sin_len = sizeof(sa);
 #endif
         int s = mdns_socket_open_ipv4(&sa);
-        if (s >= 0) socks[n++] = s;
+        if (s >= 0) {
+            /* RFC 6762 §11: mDNS packets MUST go out with IP TTL 255. mdns.h sets TTL=1,
+             * which Apple's mDNSResponder (and iOS) silently DROP as off-link — so the
+             * receiver was invisible cross-network despite valid packets arriving. */
+            unsigned char ttl = 255;
+            setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, (const char *)&ttl, sizeof(ttl));
+            socks[n++] = s;
+        }
     }
     if (n < max) {
         struct sockaddr_in6 sa;
@@ -359,9 +404,30 @@ static void announce_all(int *socks, int nsock) {
         bshim_service *s = &g_services[i];
         if (!s->used) continue;
         size_t na = build_additional(s, 1, additional, sizeof(additional) / sizeof(additional[0]));
+        for (int k = 0; k < nsock; ++k) {
+            errno = 0;
+            int r = mdns_announce_multicast(socks[k], g_sendbuf, sizeof(g_sendbuf), s->record_ptr,
+                                            0, 0, additional, na);
+            if (r < 0) BSHIM_LOG("announce %s sock[%d] FAILED errno=%d", s->service, k, errno);
+        }
+    }
+    MUTEX_UNLOCK(g_mtx);
+}
+
+/* Send TTL-0 "goodbye" announcements for unregistered services so peers drop the
+ * cached name at once (instead of showing a stale entry until the record TTL runs
+ * out — e.g. in the iPhone's Screen Mirroring list). Frees the slot when done. */
+static void goodbye_flush(int *socks, int nsock) {
+    mdns_record_t additional[BSHIM_MAX_TXT + 4];
+    MUTEX_LOCK(g_mtx);
+    for (int i = 0; i < BSHIM_MAX_SERVICES; ++i) {
+        bshim_service *s = &g_services[i];
+        if (!s->used || s->goodbye <= 0) continue;
+        size_t na = build_additional(s, 1, additional, sizeof(additional) / sizeof(additional[0]));
         for (int k = 0; k < nsock; ++k)
-            mdns_announce_multicast(socks[k], g_sendbuf, sizeof(g_sendbuf), s->record_ptr, 0, 0,
-                                    additional, na);
+            mdns_goodbye_multicast(socks[k], g_sendbuf, sizeof(g_sendbuf), s->record_ptr, 0, 0,
+                                   additional, na);
+        if (--s->goodbye == 0) s->used = 0;
     }
     MUTEX_UNLOCK(g_mtx);
 }
@@ -374,9 +440,12 @@ static THREAD_RETVAL responder_thread(void *arg) {
         fprintf(stderr, "bonjour_shim: could not open mDNS sockets\n");
         return (THREAD_RETVAL)0;
     }
+    BSHIM_LOG("responder up: %d socket(s), mcast-if=%s", nsock,
+              g_addr4.sin_family == AF_INET ? inet_ntoa(g_addr4.sin_addr) : "ANY");
     static uint8_t rbuf[2048];
     while (!g_stop) {
         if (g_announce > 0) { announce_all(socks, nsock); g_announce--; }
+        goodbye_flush(socks, nsock);
         struct timeval tv;
         tv.tv_sec = 0;
         tv.tv_usec = 250000;
@@ -423,7 +492,20 @@ bshim_DNSServiceErrorType bshim_DNSServiceRegister(bshim_DNSServiceRef *sdRef,
     memset(s, 0, sizeof(*s));
     s->port = ntohs(port); /* dns_sd passes network order; SRV wants host order */
     snprintf(s->service, sizeof(s->service), "%s.local.", regtype);
-    snprintf(s->instance, sizeof(s->instance), "%s.%s.local.", name, regtype);
+    /* PLAIN form for matching inbound queries (extraction joins labels with dots)… */
+    snprintf(s->instance_plain, sizeof(s->instance_plain), "%s.%s.local.", name, regtype);
+    /* …and WIRE form for record fields: escape literal dots/backslashes in the
+     * instance so mdns_string_make emits it as ONE label (RFC 6763 §4.3 — instance
+     * names like "MobileLabKit.android" are a single label; unescaped, the name
+     * splits into a bogus subdomain and Apple's resolver silently drops it). */
+    char esc[288];
+    size_t eo = 0;
+    for (const char *p = name; *p && eo < sizeof(esc) - 2; ++p) {
+        if (*p == '.' || *p == '\\') esc[eo++] = '\\';
+        esc[eo++] = *p;
+    }
+    esc[eo] = 0;
+    snprintf(s->instance, sizeof(s->instance), "%s.%s.local.", esc, regtype);
 
     s->record_ptr.name.str = s->service;
     s->record_ptr.name.length = strlen(s->service);
@@ -487,13 +569,21 @@ void bshim_DNSServiceRefDeallocate(bshim_DNSServiceRef sdRef) {
     if (slot < 0 || slot >= BSHIM_MAX_SERVICES) return;
     MUTEX_LOCK(g_mtx);
     if (g_services[slot].used) {
-        g_services[slot].used = 0;
+        g_services[slot].goodbye = 2; /* responder thread sends TTL-0 goodbyes, then frees */
         if (g_count > 0) g_count--;
     }
     int remaining = g_count;
     MUTEX_UNLOCK(g_mtx);
-    /* When the last service goes away, stop the responder thread. */
+    /* When the last service goes away, give the thread a beat to flush the goodbye
+     * bursts (its loop ticks every 250 ms), then stop it. */
     if (remaining == 0 && g_thread) {
+        for (int i = 0; i < 12; ++i) {
+            MUTEX_LOCK(g_mtx);
+            int pending = g_services[slot].used;
+            MUTEX_UNLOCK(g_mtx);
+            if (!pending) break;
+            sleepms(60);
+        }
         g_stop = 1;
         THREAD_JOIN(g_thread);
         g_thread = 0;

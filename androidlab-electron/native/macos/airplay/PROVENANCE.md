@@ -49,7 +49,7 @@ handshake that AirPlay screen mirroring requires. The added `vendor/` libraries
 
 ## Local edits to the vendored tree
 
-The RPiPlay core is kept **pristine** for easy re-syncing, with two exceptions:
+The RPiPlay core is kept **pristine** for easy re-syncing, with three exceptions:
 
 1. `dnssd.c` — added a `USE_BUNDLED_MDNS` path that points its dns_sd function
    pointers at `bonjour_shim` (instead of the OS Bonjour/Avahi), so the receiver
@@ -59,6 +59,25 @@ The RPiPlay core is kept **pristine** for easy re-syncing, with two exceptions:
    `1920`/`1080`; those literals now read `ap_display_width`/`ap_display_height`
    (declared in `ap_config.h`, defined + set from a CLI arg in `airplayscreen.c`) so
    the app can pick the AirPlay stream resolution.
+3. `vendor/mdns.h` — `mdns_string_make` (the wire-name writer) now honours `\.`
+   escapes so a DNS-SD instance name may contain a literal dot as ONE label
+   (RFC 6763 §4.3 — e.g. "MobileLabKit.android"). Unescaped, the name split into a
+   bogus subdomain and Apple's resolver silently dropped the whole service.
+   Behaviour is unchanged for names without backslashes. (Both edit sites are
+   marked "AndroidLab edit".)
+
+`bonjour_shim.c` (our own file, not vendored) also gained: RFC 6762 §11 multicast
+TTL 255; Android-only `IP_MULTICAST_IF` pinning to the discovered LAN IPv4 (Android
+does not egress multicast on wlan0 for `INADDR_ANY`); an escaped/plain dual form of
+the instance name (wire vs query-matching); TTL-0 goodbye announcements on
+unregister (peers drop the name instantly instead of showing a stale entry); and,
+on Android, a host label derived from the device's IPv4 (`mlk-a-b-c-d.local.`)
+because `gethostname()` there is always "localhost".
+
+The receiver core is also consumed by the **Android receiver APK**
+(`android-airplay/` at the repo root) — its NDK build compiles these same sources
+into `libairplay.so`. Keep edits platform-gated (`__ANDROID__`) the way the
+existing ones are.
 
 The macOS build shims RPiPlay's Linux socket code needs (`SOL_TCP`→`IPPROTO_TCP`,
 `TCP_KEEPIDLE`→`TCP_KEEPALIVE`) are supplied as `-D` defines in `CMakeLists.txt`
