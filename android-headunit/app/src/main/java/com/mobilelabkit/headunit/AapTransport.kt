@@ -190,9 +190,11 @@ class AapTransport(
         // How long a single read blocks waiting for data before returning (USB bulk timeout /
         // socket SO_TIMEOUT). Short enough to re-check the stall clock a few times per stall window.
         private const val READ_TIMEOUT_MS = 2000
-        // No data at all for this long ⇒ the link is dead (peer left the network / crashed).
-        // AA sends control heartbeats about once a second, so this only trips on a real drop.
-        private const val STALL_TIMEOUT_MS = 7000
+        // No data at all for this long ⇒ treat the link as dead. Kept generous: Android Auto can
+        // legitimately go quiet for many seconds on a static screen, and the reference head units
+        // rely on TCP keep-alive (which we also enable) rather than a hair-trigger stall. A real
+        // dead peer is usually caught sooner by a write failure or EOF anyway; this is the backstop.
+        private const val STALL_TIMEOUT_MS = 30000
         fun u16be(v: Int) = byteArrayOf((v ushr 8).toByte(), v.toByte())
         fun u32be(v: Int) = byteArrayOf((v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte())
         fun readU16(b: ByteArray, o: Int) = ((b[o].toInt() and 0xff) shl 8) or (b[o + 1].toInt() and 0xff)

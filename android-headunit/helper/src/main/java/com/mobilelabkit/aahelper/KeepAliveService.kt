@@ -38,6 +38,9 @@ class KeepAliveService : Service() {
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private var resolving = false
     private var lastFireMs = 0L
+    // Auto-reconnect gate: only re-fire after the head unit actually disappeared (session started
+    // or it dropped) and came back — never while it stays advertising, which would churn a live session.
+    @Volatile private var sawLost = true
     private var host: String? = null
     private var port = 5288
 
@@ -66,7 +69,13 @@ class KeepAliveService : Service() {
 
     private fun fire(h: String, p: Int, why: String) {
         val now = SystemClock.elapsedRealtime()
+        // A re-fire (auto-reconnect) is only legitimate after the head unit actually went away and
+        // came back — a real drop. If it just keeps advertising (or its un-advertise is flaky), a
+        // re-fire would restart a LIVE session and cause the connect/disconnect churn. The initial
+        // fire is always allowed.
+        if (why == "nsd-idle" && !sawLost) return
         if (now - lastFireMs < RECONNECT_DEBOUNCE_MS) return  // don't spam
+        sawLost = false
         lastFireMs = now
         val how = AaTrigger.fire(this, h, p)
         Log.i(TAG, "trigger fired ($why) -> $h:$p [$how]")
@@ -84,7 +93,10 @@ class KeepAliveService : Service() {
                     resolve(info)
                 }
             }
-            override fun onServiceLost(info: NsdServiceInfo) {}   // head unit went busy (connected)
+            override fun onServiceLost(info: NsdServiceInfo) {
+                // Head unit went busy (a session started) or dropped off — arm the next re-fire.
+                if (info.serviceType.contains("mlkheadunit")) sawLost = true
+            }
             override fun onDiscoveryStopped(t: String) {}
             override fun onStartDiscoveryFailed(t: String, code: Int) {}
             override fun onStopDiscoveryFailed(t: String, code: Int) {}
@@ -195,7 +207,7 @@ class KeepAliveService : Service() {
         private const val CHANNEL = "keepalive"
         private const val NOTIF_ID = 42
         private const val SERVICE_TYPE = "_mlkheadunit._tcp."
-        private const val RECONNECT_DEBOUNCE_MS = 6000L
+        private const val RECONNECT_DEBOUNCE_MS = 20000L
         const val EXTRA_IP = "ip"
         const val EXTRA_PORT = "port"
         const val ACTION_STOP = "com.mobilelabkit.aahelper.STOP"

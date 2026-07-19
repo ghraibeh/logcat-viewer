@@ -119,7 +119,11 @@ class ControlChannel(
     }
 
     private fun respondPing(content: ByteArray) {
-        val resp = Control.PingResponse.newBuilder().setTimestamp(System.nanoTime()).build()
+        // ECHO the phone's ping timestamp — Android Auto matches the response to its outstanding
+        // request by this value to measure latency. Replying with our own clock makes AA log
+        // "Received out of order ping response" and treat the link as unhealthy.
+        val ts = runCatching { Control.PingRequest.parseFrom(content).timestamp }.getOrDefault(System.nanoTime())
+        val resp = Control.PingResponse.newBuilder().setTimestamp(ts).build()
         transport.sendMessage(AapProto.CH_CONTROL, MSG_PING_RESPONSE, resp.toByteArray(), encrypted = true)
     }
 
@@ -131,7 +135,9 @@ class ControlChannel(
         pinging = true
         pingThread = Thread({
             while (pinging) {
-                try { Thread.sleep(5000) } catch (e: InterruptedException) { break }
+                // ~1s cadence: Android Auto flags "Missing HU ping requests" at ~3s and drops an
+                // unresponsive head unit, so 5s was far too slow. Real head units ping ~1/s.
+                try { Thread.sleep(1000) } catch (e: InterruptedException) { break }
                 if (!pinging) break
                 runCatching {
                     val req = Control.PingRequest.newBuilder().setTimestamp(System.nanoTime()).build()
