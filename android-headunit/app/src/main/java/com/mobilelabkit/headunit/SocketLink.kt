@@ -17,6 +17,9 @@ class SocketLink(private val socket: Socket) : AapLink {
 
     init {
         runCatching { socket.tcpNoDelay = true }
+        // TCP keep-alive so a truly dead peer (phone left the network) is detected at the OS level
+        // in addition to our app-level stall watchdog. Matches headunit-revived's SocketAccessory.
+        runCatching { socket.keepAlive = true }
     }
 
     override fun read(buf: ByteArray, timeoutMs: Int): Int {

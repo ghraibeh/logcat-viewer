@@ -56,6 +56,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var link: AapLink? = null
     private var wirelessServer: WirelessServer? = null
     private var nsdAdvertiser: NsdAdvertiser? = null
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
     private var btBootstrap: BtBootstrap? = null
     private var wifiDirect: WifiDirectHost? = null
     private var transport: AapTransport? = null
@@ -99,6 +100,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         applyOrientation(orientation)
         videoConfig = HeadUnitConfig.detect(this, orientation)
 
+        // A head unit stays on and stationary: keep the screen awake so the panel never dozes
+        // (which would sleep Wi-Fi and drop the wireless session).
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         rootView = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         surfaceView = SurfaceView(this).apply { holder.addCallback(this@MainActivity) }
         @Suppress("ClickableViewAccessibility")
@@ -153,6 +157,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         super.onDestroy(); runCatching { unregisterReceiver(permReceiver) }
         wirelessServer?.stop(); wirelessServer = null
         nsdAdvertiser?.stop(); nsdAdvertiser = null
+        wifiLock?.let { runCatching { if (it.isHeld) it.release() } }; wifiLock = null
         btBootstrap?.stop(); btBootstrap = null; wifiDirect?.stop(); wifiDirect = null
         teardownProtocol(); link?.close(); link = null; decoder?.release(); decoder = null
     }
@@ -262,10 +267,19 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             nsdAdvertiser = NsdAdvertiser(this, 5288, "${Build.MANUFACTURER} ${Build.MODEL}".trim())
                 .also { it.start() }
         }
+        // Hold the Wi-Fi radio in high-perf mode so it doesn't power-save-sleep and drop frames.
+        if (wifiLock == null) {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+            wifiLock = wm.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "MobileLabKit:HeadUnit")
+                .also { runCatching { it.acquire() } }
+        }
     }
 
     // --- AA protocol (modern) --------------------------------------------------
     private fun startAaProtocol(l: AapLink) {
+        // Session starting: stop advertising as "available" so the helper's auto-reconnect
+        // doesn't re-fire the trigger at us mid-session. We re-advertise on disconnect.
+        nsdAdvertiser?.stop()
         try {
             val crypto = AapCrypto(assets.open("headunit_cert.pem").readBytes(), assets.open("headunit_key.pem").readBytes())
             val dec = VideoDecoder(videoConfig.width, videoConfig.height).also { it.start() }
@@ -314,6 +328,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                     runOnUiThread {
                         teardownProtocol(); link?.close(); link = null
                         busy = false; streaming = false
+                        // Idle again: re-advertise so the helper's auto-reconnect can find us.
+                        nsdAdvertiser?.start()
                         setStatus("Link ended: $m"); showWaiting()
                     }
                 }

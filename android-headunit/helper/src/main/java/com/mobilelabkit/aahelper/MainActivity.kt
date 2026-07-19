@@ -92,11 +92,18 @@ class MainActivity : Activity() {
         root.addView(portField)
 
         val connect = Button(this).apply {
-            text = "Connect"
+            text = "Connect & keep alive"
             setPadding(0, dp(8), 0, dp(8))
         }
         connect.setOnClickListener { onConnect() }
         root.addView(connect, lp(dp(16)))
+
+        val disconnect = Button(this).apply { text = "Stop keeping alive" }
+        disconnect.setOnClickListener {
+            KeepAliveService.stop(this)
+            status.text = "Stopped. Android Auto will disconnect on its own."
+        }
+        root.addView(disconnect, lp(dp(8)))
 
         status = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -114,11 +121,18 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        // Needed for a non-redacted WifiInfo extra on Android 10+.
+        // FINE_LOCATION: non-redacted WifiInfo extra (Android 10+). POST_NOTIFICATIONS (Android 13+):
+        // so the keep-alive foreground-service notification is visible.
+        val need = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
             checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION), 1)
+            need += android.Manifest.permission.ACCESS_FINE_LOCATION
         }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            need += android.Manifest.permission.POST_NOTIFICATIONS
+        }
+        if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1)
     }
 
     private fun label(text: String) = TextView(this).apply {
@@ -197,71 +211,21 @@ class MainActivity : Activity() {
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_IP, ip).putInt(KEY_PORT, port).apply()
 
-        // NB: don't use getLaunchIntentForPackage — modern Android Auto has no home-screen
-        // launcher activity (it runs in the car / background), so that returns null even when
-        // AA is installed. Check the package directly instead.
-        val aaInstalled = try {
-            packageManager.getPackageInfo(GEARHEAD, 0); true
-        } catch (e: PackageManager.NameNotFoundException) { false }
-        if (!aaInstalled) {
+        if (!AaTrigger.isAndroidAutoInstalled(this)) {
             status.text = "Android Auto isn't installed on this phone."
             return
         }
 
-        val how = triggerAndroidAuto(ip, port)
-        status.text = "Told Android Auto to connect to $ip:$port ($how).\n" +
-            "If nothing appears on the head unit, tap “battery settings” below and set Android Auto to Unrestricted, then retry."
-    }
-
-    /**
-     * Fire Google's wireless-startup trigger. Tries the Activity first (older AA), then falls
-     * back to the broadcast (AA 16.4+). We attach the phone's active Network + WifiInfo as
-     * extras exactly like headunit-revived, so AA binds the projection to the Wi-Fi link.
-     */
-    private fun triggerAndroidAuto(host: String, port: Int): String {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network: Parcelable? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) cm.activeNetwork else null
-
-        @Suppress("DEPRECATION")
-        val wifiInfo: Parcelable? = try {
-            (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager).connectionInfo
-        } catch (e: Exception) { null }
-
-        // 1) Activity path (may be non-exported on this AA build → SecurityException → fall back).
-        val activityIntent = Intent().apply {
-            setClassName(GEARHEAD, "$GEARHEAD_WIRELESS.setup.service.impl.WirelessStartupActivity")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            putExtra("PARAM_HOST_ADDRESS", host)
-            putExtra("PARAM_SERVICE_PORT", port)
-            network?.let { putExtra("PARAM_SERVICE_WIFI_NETWORK", it) }
-            wifiInfo?.let { putExtra("wifi_info", it) }
-        }
-        try {
-            startActivity(activityIntent)
-            return "startup activity"
-        } catch (e: Exception) {
-            // 2) Broadcast fallback — the path proven to work on modern AA.
-            val bcast = Intent().apply {
-                setClassName(GEARHEAD, "$GEARHEAD_WIRELESS.setup.receiver.WirelessStartupReceiver")
-                action = "$GEARHEAD_WIRELESS.setup.receiver.wirelessstartup.START"
-                putExtra("ip_address", host)
-                putExtra("projection_port", port)
-                network?.let { putExtra("PARAM_SERVICE_WIFI_NETWORK", it) }
-                wifiInfo?.let { putExtra("wifi_info", it) }
-                addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
-            }
-            return try {
-                sendBroadcast(bcast)
-                "startup broadcast"
-            } catch (e2: Exception) {
-                "failed: ${e2.message}"
-            }
-        }
+        // Hand off to the foreground keep-alive service: it fires the trigger now, holds Wi-Fi/CPU
+        // awake, and auto-reconnects (re-fires) whenever the head unit goes idle again after a drop.
+        KeepAliveService.start(this, ip, port)
+        status.text = "Connecting to $ip:$port and keeping it alive.\n" +
+            "If it still drops, tap “battery settings” below and set Android Auto to Unrestricted."
     }
 
     private fun openAaBatterySettings() {
         val i = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-            data = Uri.fromParts("package", GEARHEAD, null)
+            data = Uri.fromParts("package", AaTrigger.GEARHEAD, null)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         try { startActivity(i) } catch (e: Exception) {
@@ -274,8 +238,6 @@ class MainActivity : Activity() {
         private const val KEY_IP = "ip"
         private const val KEY_PORT = "port"
         private const val DEFAULT_PORT = 5288
-        private const val GEARHEAD = "com.google.android.projection.gearhead"
-        private const val GEARHEAD_WIRELESS = "com.google.android.apps.auto.wireless"
         private const val SERVICE_TYPE = "_mlkheadunit._tcp."
     }
 }
