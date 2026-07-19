@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 #
-# Build a patched go-ios that can mount the iOS 17+ Developer Disk Image.
+# Build the patched go-ios `ios` binary from the vendored source tree at
+# vendor/go-ios (upstream main@274bc43 + our patches, tracked in this repo —
+# see vendor/go-ios/PROVENANCE.md). No network clone: the vendored tree is the
+# authoritative source; patches/goios-androidlab.patch is a frozen snapshot of
+# the delta vs upstream from vendoring time.
+#
+# What the patches do (details in PROVENANCE.md):
 #
 # Upstream go-ios (v1.2.0) sends EPRO/ESEC=false in its TSS personalization
 # request because it never evaluates the BuildManifest's RestoreRequestRules,
@@ -25,30 +31,21 @@
 # works cable-free — verified on-device. Setting GOIOS_NETWORK_TUNNEL=1 (which the
 # app does) enables the attempt; unset preserves exact upstream behavior.
 #
-# This clones go-ios, applies the patch, and builds the `ios` binary. go-ios is
-# pure Go (CGO disabled), so by default this cross-compiles ALL supported
-# platforms and drops each into node_modules/go-ios/dist/<triple>/ — keeping the
-# whole app multiplatform (macOS/Linux/Windows hosts) from a single build host.
-# Set GOIOS_HOST_ONLY=1 to build just this host's binary. findGoIos() picks up
-# whichever matches the running host. Requires Go >= 1.26 (GOTOOLCHAIN=auto will
-# fetch it).
+# go-ios is pure Go (CGO disabled), so by default this cross-compiles ALL
+# supported platforms and drops each into node_modules/go-ios/dist/<triple>/ —
+# keeping the whole app multiplatform (macOS/Linux/Windows hosts) from a single
+# build host. Set GOIOS_HOST_ONLY=1 to build just this host's binary.
+# findGoIos() picks up whichever matches the running host. Requires Go >= 1.26
+# (GOTOOLCHAIN=auto will fetch it).
 #
 # Usage:  bash scripts/build-goios.sh            # all platforms
 #         GOIOS_HOST_ONLY=1 bash scripts/build-goios.sh   # this host only
 set -euo pipefail
 
-GOIOS_REF="${GOIOS_REF:-main}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-PATCH="$HERE/patches/goios-androidlab.patch"
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+SRC="$HERE/vendor/go-ios"
 
-echo "==> cloning go-ios ($GOIOS_REF)"
-git clone --depth 1 --branch "$GOIOS_REF" https://github.com/danielpaulus/go-ios "$WORK/src" 2>/dev/null \
-  || git clone --depth 1 https://github.com/danielpaulus/go-ios "$WORK/src"
-
-echo "==> applying patch"
-git -C "$WORK/src" apply "$PATCH"
+[ -f "$SRC/go.mod" ] || { echo "vendored go-ios source not found at $SRC"; exit 1; }
 
 # Build one GOOS/GOARCH -> its npm dist triple. Pure Go, so CGO is disabled and
 # cross-compilation needs no C toolchain.
@@ -60,7 +57,7 @@ build_one() {
   mkdir -p "$(dirname "$dest")"
   rm -f "$dest" # go build refuses to overwrite a non-object file (the npm binary)
   echo "==> building $goos/$goarch"
-  ( cd "$WORK/src" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -o "$dest" . )
+  ( cd "$SRC" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -o "$dest" . )
   chmod +x "$dest"
   echo "    installed -> $dest"
 }
