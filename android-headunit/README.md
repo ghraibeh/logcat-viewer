@@ -39,7 +39,15 @@ This is built from the spec in **[aasdk](https://github.com/f1xpl/aasdk)** / **O
   The 96 aasdk `.proto` are compiled to protobuf-lite. On success the screen lists the
   phone's offered channels. **Not yet verified against a real phone** — the TLS
   handshake-over-messages is the most likely thing to need tuning on the rig.
-- **Phase 3:** video channel → H.264 → `MediaCodec` → `SurfaceView` (car UI appears).
+- **Phase 3 ✓ (implemented, compile-verified; live stream needs the rig):** the video
+  channel. The head unit is the *responder* — it advertises a display (480p) in the
+  service-discovery response, then answers the phone's channel-open + AV-setup, grants
+  video focus, and feeds the incoming H.264 to `MediaCodec` → the full-screen `SurfaceView`
+  (inline SPS/PPS extracted for codec config), acking each frame.
+  ([VideoChannel.kt](app/src/main/java/com/mobilelabkit/headunit/VideoChannel.kt),
+  [VideoDecoder.kt](app/src/main/java/com/mobilelabkit/headunit/VideoDecoder.kt)).
+  Fixed a Phase-2 direction bug in the same pass: **the phone sends the service-discovery
+  request and the head unit answers** (not the other way around).
 - **Phase 4:** input channel → touch / back / home → the phone.
 - **Phase 5:** audio (media + guidance + speech) via `AudioTrack`.
 - **Phase 6:** wireless (Bluetooth RFCOMM bootstrap + Wi-Fi TCP).

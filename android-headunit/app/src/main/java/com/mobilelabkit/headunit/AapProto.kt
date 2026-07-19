@@ -51,6 +51,19 @@ object AapProto {
     const val AUDIO_FOCUS_REQUEST = 0x0012
     const val AUDIO_FOCUS_RESPONSE = 0x0013
 
+    // --- AV channel message ids (AVChannelMessageIdsEnum.proto) ---
+    const val AV_MEDIA_WITH_TIMESTAMP_INDICATION = 0x0000
+    const val AV_MEDIA_INDICATION = 0x0001
+    const val AV_SETUP_REQUEST = 0x8000
+    const val AV_START_INDICATION = 0x8001
+    const val AV_STOP_INDICATION = 0x8002
+    const val AV_SETUP_RESPONSE = 0x8003
+    const val AV_MEDIA_ACK_INDICATION = 0x8004
+    const val AV_INPUT_OPEN_REQUEST = 0x8005
+    const val AV_INPUT_OPEN_RESPONSE = 0x8006
+    const val AV_VIDEO_FOCUS_REQUEST = 0x8007
+    const val AV_VIDEO_FOCUS_INDICATION = 0x8008
+
     // Protocol version we advertise (aasdk Version.hpp: 1.1).
     const val VERSION_MAJOR = 1
     const val VERSION_MINOR = 1
