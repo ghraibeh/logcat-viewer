@@ -27,7 +27,11 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.WindowManager
+import android.widget.CheckBox
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
 import com.andrerinas.headunitrevived.aap.protocol.proto.Common
@@ -345,38 +349,57 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
     }
 
-    /** Letterbox the surface to the negotiated video aspect ratio, centered in the screen. */
+    /** Size the projection surface per the scaling setting:
+     *  FIT (default) keeps AA's aspect ratio, centered (may show black bars on odd-aspect panels);
+     *  FILL stretches to the whole panel (no bars, but distorts). Touch maps proportionally either way. */
     private fun layoutSurface() {
-        val rw = rootView.width; val rh = rootView.height
-        if (rw == 0 || rh == 0 || !::videoConfig.isInitialized) return
-        val vw = videoConfig.width.toFloat(); val vh = videoConfig.height.toFloat()
-        val scale = minOf(rw / vw, rh / vh)
-        val sw = (vw * scale).toInt().coerceAtLeast(1)
-        val sh = (vh * scale).toInt().coerceAtLeast(1)
-        surfaceView.layoutParams = FrameLayout.LayoutParams(sw, sh, Gravity.CENTER)
+        if (HeadUnitConfig.savedScaling(this) == HeadUnitConfig.Scaling.FILL) {
+            surfaceView.layoutParams = FrameLayout.LayoutParams(MATCH, MATCH, Gravity.CENTER)
+        } else {
+            val rw = rootView.width; val rh = rootView.height
+            if (rw == 0 || rh == 0 || !::videoConfig.isInitialized) return
+            val vw = videoConfig.width.toFloat(); val vh = videoConfig.height.toFloat()
+            val scale = minOf(rw / vw, rh / vh)
+            val sw = (vw * scale).toInt().coerceAtLeast(1)
+            val sh = (vh * scale).toInt().coerceAtLeast(1)
+            surfaceView.layoutParams = FrameLayout.LayoutParams(sw, sh, Gravity.CENTER)
+        }
         surfaceView.requestLayout()
     }
 
-    /** Portrait/Landscape chooser. Auto-detected resolution is shown for each. */
+    /** Display chooser: orientation (auto-detected resolution shown) + a stretch-to-fill toggle. */
     private fun showConfigDialog(firstRun: Boolean) {
         val current = if (::videoConfig.isInitialized) videoConfig.orientation else HeadUnitConfig.savedOrientation(this)
         val portrait = HeadUnitConfig.detect(this, HeadUnitConfig.Orientation.PORTRAIT)
         val landscape = HeadUnitConfig.detect(this, HeadUnitConfig.Orientation.LANDSCAPE)
-        val items = arrayOf(
-            "Portrait — ${portrait.width}×${portrait.height} @ ${portrait.densityDpi}dpi",
-            "Landscape — ${landscape.width}×${landscape.height} @ ${landscape.densityDpi}dpi"
-        )
-        val checked = if (current == HeadUnitConfig.Orientation.LANDSCAPE) 1 else 0
-        AlertDialog.Builder(this)
+
+        val group = RadioGroup(this).apply {
+            addView(RadioButton(this@MainActivity).apply { id = 1; text = "Portrait — ${portrait.width}×${portrait.height}" })
+            addView(RadioButton(this@MainActivity).apply { id = 2; text = "Landscape — ${landscape.width}×${landscape.height}" })
+            check(if (current == HeadUnitConfig.Orientation.LANDSCAPE) 2 else 1)
+        }
+        val stretch = CheckBox(this).apply {
+            text = "Stretch to fill screen (no black bars)"
+            isChecked = HeadUnitConfig.savedScaling(this@MainActivity) == HeadUnitConfig.Scaling.FILL
+            setPadding(0, dp(12), 0, 0)
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(group); addView(stretch)
+        }
+        val builder = AlertDialog.Builder(this)
             .setTitle(if (firstRun) "Choose head-unit display" else "Head-unit display")
-            .setSingleChoiceItems(items, checked) { dialog, which ->
-                val chosen = if (which == 1) HeadUnitConfig.Orientation.LANDSCAPE else HeadUnitConfig.Orientation.PORTRAIT
-                dialog.dismiss()
+            .setView(container)
+            .setPositiveButton("OK") { _, _ ->
+                val chosen = if (group.checkedRadioButtonId == 2) HeadUnitConfig.Orientation.LANDSCAPE else HeadUnitConfig.Orientation.PORTRAIT
+                HeadUnitConfig.saveScaling(this, if (stretch.isChecked) HeadUnitConfig.Scaling.FILL else HeadUnitConfig.Scaling.FIT)
                 applyConfig(chosen)
                 if (firstRun) startFromIntentOrScan()
             }
             .setCancelable(!firstRun)
-            .show()
+        if (!firstRun) builder.setNegativeButton("Cancel", null)
+        builder.show()
     }
 
     /** Persist + apply an orientation choice; detect its resolution and relayout. */

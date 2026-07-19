@@ -24,6 +24,9 @@ object HeadUnitConfig {
 
     enum class Orientation { PORTRAIT, LANDSCAPE }
 
+    /** How the projection fills the panel: FIT = keep aspect (letterbox), FILL = stretch to edges. */
+    enum class Scaling { FIT, FILL }
+
     data class VideoConfig(
         val resolution: ResType,
         val width: Int,
@@ -36,6 +39,7 @@ object HeadUnitConfig {
 
     private const val PREFS = "headunit_config"
     private const val KEY_ORIENTATION = "orientation"
+    private const val KEY_SCALING = "scaling"
     // Car-screen densities (dpi) — AA UI scale. Higher dpi ⇒ AA treats the panel as smaller ⇒
     // LARGER on-screen elements. The phone's real dpi (~480) is far too large; a car-screen 160
     // was too small on a hand-held panel. ~280 is the comfortable middle for touch use.
@@ -52,6 +56,16 @@ object HeadUnitConfig {
 
     fun saveOrientation(ctx: Context, o: Orientation) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_ORIENTATION, o.name).apply()
+    }
+
+    /** Default FIT (keep aspect ratio — no stretch). */
+    fun savedScaling(ctx: Context): Scaling {
+        val s = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_SCALING, null)
+        return if (s == Scaling.FILL.name) Scaling.FILL else Scaling.FIT
+    }
+
+    fun saveScaling(ctx: Context, s: Scaling) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_SCALING, s.name).apply()
     }
 
     /** Physical panel size in pixels (ignores current rotation): (longSide, shortSide-agnostic raw w,h). */
