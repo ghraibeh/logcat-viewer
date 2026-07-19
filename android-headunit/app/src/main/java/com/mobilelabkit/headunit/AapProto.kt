@@ -1,85 +1,61 @@
 package com.mobilelabkit.headunit
 
 /**
- * Android Auto wire constants (from aasdk's Messenger enums + ControlMessageIdsEnum).
+ * Wire constants for the (modern) Android Auto protocol.
  *
- * Frame on the bulk link:
+ * Framing on the bulk link is unchanged from before:
  *   [channelId:1][flags:1][frameSize:2 BE] (+[totalSize:4 BE] when flags has FIRST) [payload]
- * flags = frameType | encryptionType | messageType.
- * The decrypted payload starts with a 2-byte BE message id, then the message content.
+ * flags = frameType | encryptionType | messageType. The decrypted payload starts with a
+ * 2-byte BE message id, then the protobuf.
+ *
+ * Message ids + message shapes come from the vendored modern protos
+ * (com.andrerinas.headunitrevived.aap.protocol.proto.*) — see Control/Media/Sensors/Input.
+ * aasdk's 2018 message set is too old for Android Auto 1.7.
  */
 object AapProto {
-    // --- channel ids ---
+    // --- channel ids (headunit-revived Channel.kt; head unit assigns these) ---
     const val CH_CONTROL = 0
-    const val CH_INPUT = 1
-    const val CH_SENSOR = 2
-    const val CH_VIDEO = 3
-    const val CH_MEDIA_AUDIO = 4
-    const val CH_SPEECH_AUDIO = 5
-    const val CH_SYSTEM_AUDIO = 6
-    const val CH_AV_INPUT = 7
+    const val CH_SENSOR = 1
+    const val CH_VIDEO = 2
+    const val CH_INPUT = 3
+    const val CH_AUDIO_SPEECH = 4   // AU1
+    const val CH_AUDIO_SYSTEM = 5   // AU2
+    const val CH_AUDIO_MEDIA = 6    // AUD
+    const val CH_MIC = 7
     const val CH_BLUETOOTH = 8
+    const val CH_MEDIA_PLAYBACK = 9
+    const val CH_NAV = 10
+
+    fun isAudio(ch: Int) = ch == CH_AUDIO_SPEECH || ch == CH_AUDIO_SYSTEM || ch == CH_AUDIO_MEDIA
+    fun isMediaLike(ch: Int) = ch == CH_VIDEO || ch == CH_MIC || isAudio(ch)
 
     // --- flags byte components ---
     const val FRAME_MIDDLE = 0
-    const val FRAME_FIRST = 1        // 1 << 0
-    const val FRAME_LAST = 2         // 1 << 1
-    const val FRAME_BULK = 3         // FIRST | LAST (single-frame message)
+    const val FRAME_FIRST = 1
+    const val FRAME_LAST = 2
+    const val FRAME_BULK = 3
     const val FRAME_TYPE_MASK = 3
-
     const val ENC_PLAIN = 0
-    const val ENC_ENCRYPTED = 1 shl 3  // 0x08
-
+    const val ENC_ENCRYPTED = 1 shl 3 // 0x08
     const val MSG_SPECIFIC = 0
-    const val MSG_CONTROL = 1 shl 2    // 0x04 (aasdk sends control-channel msgs as SPECIFIC)
+    const val MSG_CONTROL = 1 shl 2   // 0x04
 
-    // --- control channel message ids (ControlMessageIdsEnum.proto) ---
-    const val VERSION_REQUEST = 0x0001
-    const val VERSION_RESPONSE = 0x0002
-    const val SSL_HANDSHAKE = 0x0003
-    const val AUTH_COMPLETE = 0x0004
-    const val SERVICE_DISCOVERY_REQUEST = 0x0005
-    const val SERVICE_DISCOVERY_RESPONSE = 0x0006
-    const val CHANNEL_OPEN_REQUEST = 0x0007
-    const val CHANNEL_OPEN_RESPONSE = 0x0008
-    const val PING_REQUEST = 0x000b
-    const val PING_RESPONSE = 0x000c
-    const val NAVIGATION_FOCUS_REQUEST = 0x000d
-    const val NAVIGATION_FOCUS_RESPONSE = 0x000e
-    const val SHUTDOWN_REQUEST = 0x000f
-    const val SHUTDOWN_RESPONSE = 0x0010
-    const val AUDIO_FOCUS_REQUEST = 0x0012
-    const val AUDIO_FOCUS_RESPONSE = 0x0013
-
-    // --- AV channel message ids (AVChannelMessageIdsEnum.proto) ---
-    const val AV_MEDIA_WITH_TIMESTAMP_INDICATION = 0x0000
-    const val AV_MEDIA_INDICATION = 0x0001
-    const val AV_SETUP_REQUEST = 0x8000
-    const val AV_START_INDICATION = 0x8001
-    const val AV_STOP_INDICATION = 0x8002
-    const val AV_SETUP_RESPONSE = 0x8003
-    const val AV_MEDIA_ACK_INDICATION = 0x8004
-    const val AV_INPUT_OPEN_REQUEST = 0x8005
-    const val AV_INPUT_OPEN_RESPONSE = 0x8006
-    const val AV_VIDEO_FOCUS_REQUEST = 0x8007
-    const val AV_VIDEO_FOCUS_INDICATION = 0x8008
-
-    // --- input channel message ids (InputChannelMessageIdsEnum.proto) ---
-    const val INPUT_EVENT_INDICATION = 0x8001
-    const val INPUT_BINDING_REQUEST = 0x8002
-    const val INPUT_BINDING_RESPONSE = 0x8003
-
-    // Protocol version we advertise (aasdk Version.hpp: 1.1).
+    // Protocol version we advertise (major.minor).
     const val VERSION_MAJOR = 1
     const val VERSION_MINOR = 1
 
-    // aasdk splits messages larger than this into FIRST/MIDDLE/LAST frames.
-    const val MAX_FRAME_PAYLOAD = 0x4000 // 16384
+    // Control message ids that aren't the SSL/version raw path (rest come from Control proto).
+    const val VERSION_REQUEST = 1
+    const val VERSION_RESPONSE = 2
+    const val SSL_HANDSHAKE = 3       // MESSAGE_ENCAPSULATED_SSL
+    const val AUTH_COMPLETE = 4
+
+    const val MAX_FRAME_PAYLOAD = 0x4000
 
     fun channelName(id: Int): String = when (id) {
-        CH_CONTROL -> "CONTROL"; CH_INPUT -> "INPUT"; CH_SENSOR -> "SENSOR"
-        CH_VIDEO -> "VIDEO"; CH_MEDIA_AUDIO -> "MEDIA_AUDIO"; CH_SPEECH_AUDIO -> "SPEECH_AUDIO"
-        CH_SYSTEM_AUDIO -> "SYSTEM_AUDIO"; CH_AV_INPUT -> "AV_INPUT"; CH_BLUETOOTH -> "BLUETOOTH"
+        CH_CONTROL -> "CONTROL"; CH_SENSOR -> "SENSOR"; CH_VIDEO -> "VIDEO"; CH_INPUT -> "INPUT"
+        CH_AUDIO_SPEECH -> "AUD_SPEECH"; CH_AUDIO_SYSTEM -> "AUD_SYSTEM"; CH_AUDIO_MEDIA -> "AUD_MEDIA"
+        CH_MIC -> "MIC"; CH_BLUETOOTH -> "BT"; CH_MEDIA_PLAYBACK -> "MEDIA_PB"; CH_NAV -> "NAV"
         else -> "CH$id"
     }
 }

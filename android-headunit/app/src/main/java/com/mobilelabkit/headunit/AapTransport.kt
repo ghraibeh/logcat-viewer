@@ -45,6 +45,7 @@ class AapTransport(
     /** Send a message on [channel]. [content] is the message body (without the id); we
      *  prepend the 2-byte message id, encrypt if requested, then frame + write. */
     fun sendMessage(channel: Int, messageId: Int, content: ByteArray, encrypted: Boolean) {
+        Log.i(TAG, "TX %-12s id=0x%04x enc=%b len=%d".format(AapProto.channelName(channel), messageId, encrypted, content.size))
         val plain = u16be(messageId) + content
         val body = if (encrypted) crypto.encrypt(plain) else plain
         val enc = if (encrypted) AapProto.ENC_ENCRYPTED else AapProto.ENC_PLAIN
@@ -85,6 +86,7 @@ class AapTransport(
                 if (running) fail("bulk read error: ${e.message}"); return
             }
             if (n <= 0) continue // timeout / empty; keep waiting
+            Log.i(TAG, "bulk read $n bytes")
             rx += buf.copyOf(n)
             drainFrames()
         }
@@ -139,6 +141,7 @@ class AapTransport(
         if (plain.size < 2) return
         val messageId = readU16(plain, 0)
         val content = plain.copyOfRange(2, plain.size)
+        Log.i(TAG, "RX %-12s id=0x%04x enc=%b len=%d".format(AapProto.channelName(channel), messageId, encrypted, content.size))
         try {
             handler(channel, encrypted, messageId, content)
         } catch (e: Exception) {

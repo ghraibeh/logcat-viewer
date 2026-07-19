@@ -1,9 +1,6 @@
-import com.google.protobuf.gradle.id
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("com.google.protobuf") version "0.9.4"
 }
 
 android {
@@ -15,7 +12,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "0.2"
+        versionName = "0.6"
     }
 
     buildTypes {
@@ -34,19 +31,11 @@ android {
     }
 }
 
-// The Android Auto message set — aasdk's .proto files in src/main/proto, generated as
-// protobuf-lite (small runtime, fine for Android). Mixed proto2/proto3; protoc handles both.
-protobuf {
-    protoc { artifact = "com.google.protobuf:protoc:3.25.3" }
-    generateProtoTasks {
-        all().forEach { task ->
-            task.builtins {
-                id("java") { option("lite") }
-            }
-        }
-    }
-}
-
 dependencies {
-    implementation("com.google.protobuf:protobuf-javalite:3.25.3")
+    // Modern Android Auto protocol messages: the pre-generated protobuf Java from
+    // headunit-revived (GPLv3) is vendored under aap/protocol/proto/, so we use full
+    // protobuf-java at runtime (not the gradle protoc plugin — the protos have duplicate
+    // top-level enum names across files that full protoc rejects but the committed code
+    // handles). This is the CURRENT AA protocol; aasdk's 2018 protos are too old.
+    implementation("com.google.protobuf:protobuf-java:3.25.3")
 }

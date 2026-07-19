@@ -21,16 +21,14 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
-import f1x.aasdk.proto.enums.TouchActionEnum.TouchAction
-import f1x.aasdk.proto.messages.ServiceDiscoveryResponseMessage.ServiceDiscoveryResponse
+import com.andrerinas.headunitrevived.aap.protocol.proto.Common
+import com.andrerinas.headunitrevived.aap.protocol.proto.Control
+import com.andrerinas.headunitrevived.aap.protocol.proto.Input
 
 /**
- * Android Auto head-unit receiver.
- *
- * As USB host we run the AOAP accessory-start (Phase 1), open the bulk link, then drive
- * the AA handshake (version → TLS → auth → the phone's service discovery, Phase 2). We
- * advertise a video display; when the phone opens + sets up the video channel we grant
- * focus and render its H.264 to a full-screen Surface (Phase 3).
+ * Android Auto head-unit receiver (modern protocol). USB/AOAP → the phone enters Android
+ * Auto → TLS → the modern service-discovery + channel setup → the phone projects its car UI
+ * (H.264 → MediaCodec → Surface), with touch forwarded back.
  */
 class MainActivity : Activity(), SurfaceHolder.Callback {
 
@@ -41,9 +39,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var link: UsbAoap.Link? = null
     private var transport: AapTransport? = null
     private var control: ControlChannel? = null
-    private var video: VideoChannel? = null
     private var input: InputChannel? = null
     private var decoder: VideoDecoder? = null
+    private var focusWatchdog: Thread? = null
     @Volatile private var busy = false
     @Volatile private var streaming = false
 
@@ -59,10 +57,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> deviceExtra(intent)?.let { ensureAndHandle(it) }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     Log.i(TAG, "detached: ${deviceExtra(intent)?.deviceName}")
-                    teardownProtocol()
-                    link?.close(); link = null
-                    busy = false; streaming = false
-                    showWaiting()
+                    teardownProtocol(); link?.close(); link = null
+                    busy = false; streaming = false; showWaiting()
                 }
             }
         }
@@ -80,16 +76,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.setOnTouchListener { v, e -> onSurfaceTouch(v, e) }
         root.addView(surfaceView, FrameLayout.LayoutParams(MATCH, MATCH))
         status = TextView(this).apply {
-            setTextColor(Color.WHITE); textSize = 18f; gravity = Gravity.CENTER
-            setPadding(64, 64, 64, 64)
+            setTextColor(Color.WHITE); textSize = 18f; gravity = Gravity.CENTER; setPadding(64, 64, 64, 64)
         }
         root.addView(status, FrameLayout.LayoutParams(MATCH, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
         setContentView(root)
 
         showWaiting()
         val filter = IntentFilter(ACTION_PERM).apply {
-            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
-            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED); addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
         }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(permReceiver, filter, Context.RECEIVER_EXPORTED)
         else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(permReceiver, filter)
@@ -98,28 +92,18 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent); setIntent(intent)
-        deviceExtra(intent)?.let { ensureAndHandle(it) }
+        super.onNewIntent(intent); setIntent(intent); deviceExtra(intent)?.let { ensureAndHandle(it) }
     }
 
-    override fun onResume() {
-        super.onResume(); goImmersive()
-        if (link == null && !busy) scan()
-    }
+    override fun onResume() { super.onResume(); goImmersive(); if (link == null && !busy) scan() }
 
     override fun onDestroy() {
-        super.onDestroy()
-        runCatching { unregisterReceiver(permReceiver) }
-        teardownProtocol()
-        link?.close(); link = null
-        decoder?.release(); decoder = null
+        super.onDestroy(); runCatching { unregisterReceiver(permReceiver) }
+        teardownProtocol(); link?.close(); link = null; decoder?.release(); decoder = null
     }
 
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus); if (hasFocus) goImmersive()
-    }
+    override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus) goImmersive() }
 
-    // --- SurfaceHolder ---------------------------------------------------------
     override fun surfaceCreated(holder: SurfaceHolder) { decoder?.setSurface(holder.surface) }
     override fun surfaceChanged(holder: SurfaceHolder, f: Int, w: Int, h: Int) { decoder?.setSurface(holder.surface) }
     override fun surfaceDestroyed(holder: SurfaceHolder) { decoder?.setSurface(null) }
@@ -139,8 +123,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         if (usb.hasPermission(dev)) handleDevice(dev)
         else {
             setStatus("Requesting USB permission…")
-            val flags = if (Build.VERSION.SDK_INT >= 31)
-                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             else PendingIntent.FLAG_UPDATE_CURRENT
             usb.requestPermission(dev, PendingIntent.getBroadcast(this, 0, Intent(ACTION_PERM).setPackage(packageName), flags))
         }
@@ -162,8 +145,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                     val ok = UsbAoap.startAccessoryMode(conn); conn.close(); busy = false
                     setStatus(
                         if (ok) "Android Auto starting…\nwaiting for the phone to reconnect."
-                        else "This device didn’t accept Android Auto over USB.\nCheck it's an Android phone with " +
-                            "Android Auto set up, and that this device is the USB host."
+                        else "This device didn’t accept Android Auto over USB. Make sure Android Auto is set up and this device is the USB host."
                     )
                 }
             } catch (e: Exception) {
@@ -172,32 +154,55 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }, "aoap").start()
     }
 
-    // --- AA protocol -----------------------------------------------------------
+    // --- AA protocol (modern) --------------------------------------------------
     private fun startAaProtocol(l: UsbAoap.Link) {
         try {
             val crypto = AapCrypto(assets.open("headunit_cert.pem").readBytes(), assets.open("headunit_key.pem").readBytes())
-            val dec = VideoDecoder(VideoChannel.WIDTH, VideoChannel.HEIGHT).also { it.start() }
+            val dec = VideoDecoder(VIDEO_W, VIDEO_H).also { it.start() }
             decoder = dec
             surfaceView.holder.surface?.let { if (it.isValid) dec.setSurface(it) }
 
-            lateinit var vid: VideoChannel
+            lateinit var tp: AapTransport
+            lateinit var sensor: SensorChannel
             lateinit var inp: InputChannel
-            val tp = AapTransport(l, crypto) { ch, _, id, content ->
-                when (ch) {
-                    AapProto.CH_CONTROL -> control?.onMessage(id, content)
-                    AapProto.CH_VIDEO -> vid.onMessage(id, content)
-                    AapProto.CH_INPUT -> inp.onMessage(id, content)
-                    else -> Log.d(TAG, "msg on ${AapProto.channelName(ch)} id=0x%04x (phase 5+)".format(id))
+            val media = HashMap<Int, MediaChannel>()
+
+            tp = AapTransport(l, crypto) { ch, _, id, content ->
+                // Channel-open (Control msg 7) can arrive on any channel — answer generically.
+                if (id == Control.ControlMsgType.MESSAGE_CHANNEL_OPEN_REQUEST_VALUE) {
+                    tp.sendMessage(
+                        ch, Control.ControlMsgType.MESSAGE_CHANNEL_OPEN_RESPONSE_VALUE,
+                        Control.ChannelOpenResponse.newBuilder().setStatus(Common.MessageStatus.STATUS_SUCCESS)
+                            .build().toByteArray(),
+                        encrypted = true
+                    )
+                    // Once the video channel is open, tell the phone we're displaying AA so it
+                    // sets up + streams video. headunit-revived re-sends this (unsolicited video
+                    // focus) every 1.5s until video arrives — so run a watchdog, not a one-shot.
+                    if (ch == AapProto.CH_VIDEO) media[AapProto.CH_VIDEO]?.let { startVideoFocusWatchdog(it) }
+                } else {
+                    when (ch) {
+                        AapProto.CH_CONTROL -> control?.onMessage(id, content)
+                        AapProto.CH_SENSOR -> sensor.onMessage(id, content)
+                        AapProto.CH_INPUT -> inp.onMessage(id, content)
+                        else -> media[ch]?.onMessage(id, content)
+                            ?: Log.d(TAG, "msg on ${AapProto.channelName(ch)} id=0x%04x".format(id))
+                    }
                 }
                 if (ch == AapProto.CH_VIDEO && !streaming &&
-                    (id == AapProto.AV_MEDIA_INDICATION || id == AapProto.AV_MEDIA_WITH_TIMESTAMP_INDICATION)
+                    (id == com.andrerinas.headunitrevived.aap.protocol.proto.Media.MsgType.MEDIA_MESSAGE_DATA_VALUE ||
+                        id == com.andrerinas.headunitrevived.aap.protocol.proto.Media.MsgType.MEDIA_MESSAGE_CODEC_CONFIG_VALUE)
                 ) { streaming = true; runOnUiThread { status.visibility = View.GONE } }
             }.apply { onError = AapTransport.OnError { m -> busy = false; setStatus("Link error: $m") } }
 
-            vid = VideoChannel(tp, dec) { setStatus(it) }
-            inp = InputChannel(tp, VideoChannel.WIDTH, VideoChannel.HEIGHT) { setStatus(it) }
-            val ctrl = ControlChannel(tp, crypto, onStatus = { setStatus(it) }, buildDiscoveryResponse = { buildDiscovery(vid, inp) })
-            transport = tp; control = ctrl; video = vid; input = inp
+            sensor = SensorChannel(tp) { setStatus(it) }
+            inp = InputChannel(tp, VIDEO_W, VIDEO_H) { setStatus(it) }
+            media[AapProto.CH_VIDEO] = MediaChannel(AapProto.CH_VIDEO, tp, dec) { setStatus(it) }
+            for (a in intArrayOf(AapProto.CH_AUDIO_MEDIA, AapProto.CH_AUDIO_SPEECH, AapProto.CH_AUDIO_SYSTEM, AapProto.CH_MIC)) {
+                media[a] = MediaChannel(a, tp, null) { setStatus(it) }
+            }
+            val ctrl = ControlChannel(tp, crypto, VIDEO_W, VIDEO_H) { setStatus(it) }
+            transport = tp; control = ctrl; input = inp
             tp.start(); ctrl.begin()
         } catch (e: Exception) {
             busy = false; Log.e(TAG, "AA protocol start failed", e)
@@ -205,49 +210,44 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun buildDiscovery(vid: VideoChannel, inp: InputChannel): ByteArray {
-        val b = ServiceDiscoveryResponse.newBuilder()
-            .setHeadUnitName("MobileLabKit")
-            .setCarModel("MobileLabKit")
-            .setCarYear("2026")
-            .setCarSerial("MLK0001")
-            .setLeftHandDriveVehicle(true)
-            .setHeadunitManufacturer("MobileLabKit")
-            .setHeadunitModel("MobileLabKit HeadUnit")
-            .setSwBuild("1")
-            .setSwVersion("0.4")
-            .setCanPlayNativeMediaDuringVr(false)
-            .setHideClock(false)
-        vid.fillFeatures(b)
-        inp.fillFeatures(b) // Phase 5+ adds audio here
-        return b.build().toByteArray()
-    }
-
-    /** Map a touch on the head-unit surface into display coordinates and forward it. */
-    private fun onSurfaceTouch(v: View, e: MotionEvent): Boolean {
-        val inp = input ?: return false
-        val action = when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> TouchAction.Enum.PRESS
-            MotionEvent.ACTION_MOVE -> TouchAction.Enum.DRAG
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> TouchAction.Enum.RELEASE
-            else -> return false
-        }
-        val x = (e.x / v.width.coerceAtLeast(1) * VideoChannel.WIDTH).toInt()
-        val y = (e.y / v.height.coerceAtLeast(1) * VideoChannel.HEIGHT).toInt()
-        inp.sendTouch(action, x, y)
-        return true
+    /** Re-send unsolicited video focus every 1.5s until the video starts (headunit-revived's
+     *  keyframe/focus watchdog). Exits once [streaming] flips or the receiver tears down. */
+    private fun startVideoFocusWatchdog(video: MediaChannel) {
+        focusWatchdog?.interrupt()
+        focusWatchdog = Thread({
+            var tries = 0
+            while (!streaming && tries < 60 && transport != null) {
+                runCatching { video.gainVideoFocus() }
+                try { Thread.sleep(1500) } catch (e: InterruptedException) { break }
+                tries++
+            }
+        }, "video-focus-wd").also { it.start() }
     }
 
     private fun teardownProtocol() {
-        transport?.stop(); transport = null
-        control = null; video = null
-        decoder?.release(); decoder = null
+        focusWatchdog?.interrupt(); focusWatchdog = null
+        control?.stop(); transport?.stop(); transport = null
+        control = null; input = null; decoder?.release(); decoder = null
     }
 
     // --- helpers ---------------------------------------------------------------
     private fun deviceExtra(intent: Intent): UsbDevice? =
         if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
         else @Suppress("DEPRECATION") intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+
+    private fun onSurfaceTouch(v: View, e: MotionEvent): Boolean {
+        val inp = input ?: return false
+        val action = when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> Input.TouchEvent.PointerAction.TOUCH_ACTION_DOWN
+            MotionEvent.ACTION_MOVE -> Input.TouchEvent.PointerAction.TOUCH_ACTION_MOVE
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> Input.TouchEvent.PointerAction.TOUCH_ACTION_UP
+            else -> return false
+        }
+        val x = (e.x / v.width.coerceAtLeast(1) * VIDEO_W).toInt()
+        val y = (e.y / v.height.coerceAtLeast(1) * VIDEO_H).toInt()
+        inp.sendTouch(action, x, y)
+        return true
+    }
 
     private fun showWaiting() = setStatus(
         "MobileLabKit — Android Auto head unit\n\n" +
@@ -272,5 +272,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         private const val TAG = "headunit"
         private const val ACTION_PERM = "com.mobilelabkit.headunit.USB_PERMISSION"
         private const val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
+        const val VIDEO_W = 800
+        const val VIDEO_H = 480
     }
 }
