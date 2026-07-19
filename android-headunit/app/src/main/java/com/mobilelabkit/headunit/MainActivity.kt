@@ -47,6 +47,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private lateinit var rootView: FrameLayout
     private lateinit var surfaceView: SurfaceView
+    private lateinit var cover: View
     private lateinit var status: TextView
     private lateinit var gear: TextView
     private lateinit var usb: UsbManager
@@ -103,6 +104,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         @Suppress("ClickableViewAccessibility")
         surfaceView.setOnTouchListener { v, e -> onSurfaceTouch(v, e) }
         rootView.addView(surfaceView, FrameLayout.LayoutParams(MATCH, MATCH, Gravity.CENTER))
+        // Opaque layer ON TOP of the SurfaceView: a bottom SurfaceView punches a transparent hole
+        // in the window, so the root's black background can't hide the last decoded frame — this
+        // can. Visible while waiting/disconnected, hidden once frames flow.
+        cover = View(this).apply { setBackgroundColor(Color.BLACK) }
+        rootView.addView(cover, FrameLayout.LayoutParams(MATCH, MATCH, Gravity.CENTER))
         status = TextView(this).apply {
             setTextColor(Color.WHITE); textSize = 18f; gravity = Gravity.CENTER; setPadding(64, 64, 64, 64)
         }
@@ -300,7 +306,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 if (ch == AapProto.CH_VIDEO && !streaming &&
                     (id == com.andrerinas.headunitrevived.aap.protocol.proto.Media.MsgType.MEDIA_MESSAGE_DATA_VALUE ||
                         id == com.andrerinas.headunitrevived.aap.protocol.proto.Media.MsgType.MEDIA_MESSAGE_CODEC_CONFIG_VALUE)
-                ) { streaming = true; runOnUiThread { status.visibility = View.GONE; gear.visibility = View.GONE } }
+                ) { streaming = true; runOnUiThread { cover.visibility = View.GONE; status.visibility = View.GONE; gear.visibility = View.GONE } }
             }.apply {
                 onError = AapTransport.OnError { m ->
                     // USB has a DETACHED broadcast; a wireless socket only signals via this error,
@@ -528,7 +534,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun setStatus(text: String) = runOnUiThread {
-        if (!streaming) { status.visibility = View.VISIBLE; status.text = text; gear.visibility = View.VISIBLE }
+        if (!streaming) {
+            cover.visibility = View.VISIBLE   // hide any frozen last frame behind the message
+            status.visibility = View.VISIBLE; status.text = text; gear.visibility = View.VISIBLE
+        }
         Log.i(TAG, text.replace("\n", " · "))
     }
 

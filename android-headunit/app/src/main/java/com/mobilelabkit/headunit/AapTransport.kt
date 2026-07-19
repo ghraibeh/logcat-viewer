@@ -86,15 +86,32 @@ class AapTransport(
     // --- receive ---------------------------------------------------------------
     private fun readLoop() {
         val buf = ByteArray(AapProto.MAX_FRAME_PAYLOAD + 16)
+        var lastRxMs = android.os.SystemClock.elapsedRealtime()
         while (running) {
             val n = try {
-                link.read(buf, 5000)
+                link.read(buf, READ_TIMEOUT_MS)
             } catch (e: Exception) {
                 if (running) fail("bulk read error: ${e.message}"); return
             }
-            if (n <= 0) continue // timeout / empty; keep waiting
-            rx += buf.copyOf(n)
-            drainFrames()
+            when {
+                // Real disconnect: the socket returned EOF (-1). USB maps its timeouts to 0, so a
+                // negative there is a genuine error too. Either way, tear down so we can recover.
+                n < 0 -> { if (running) fail("link disconnected"); return }
+                // No data this interval. When the phone drops ungracefully (leaves Wi-Fi, crashes,
+                // out of range) the socket just keeps timing out with NO EOF, so the old code
+                // looped forever and the receiver froze on the last frame. AA sends control
+                // heartbeats ~1/s, so treat a multi-second silence as a dead link.
+                n == 0 -> {
+                    if (android.os.SystemClock.elapsedRealtime() - lastRxMs > STALL_TIMEOUT_MS) {
+                        if (running) fail("link stalled (no data for ${STALL_TIMEOUT_MS}ms)"); return
+                    }
+                }
+                else -> {
+                    lastRxMs = android.os.SystemClock.elapsedRealtime()
+                    rx += buf.copyOf(n)
+                    drainFrames()
+                }
+            }
         }
     }
 
@@ -170,6 +187,12 @@ class AapTransport(
 
     companion object {
         private const val TAG = "headunit-aap"
+        // How long a single read blocks waiting for data before returning (USB bulk timeout /
+        // socket SO_TIMEOUT). Short enough to re-check the stall clock a few times per stall window.
+        private const val READ_TIMEOUT_MS = 2000
+        // No data at all for this long ⇒ the link is dead (peer left the network / crashed).
+        // AA sends control heartbeats about once a second, so this only trips on a real drop.
+        private const val STALL_TIMEOUT_MS = 7000
         fun u16be(v: Int) = byteArrayOf((v ushr 8).toByte(), v.toByte())
         fun u32be(v: Int) = byteArrayOf((v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte())
         fun readU16(b: ByteArray, o: Int) = ((b[o].toInt() and 0xff) shl 8) or (b[o + 1].toInt() and 0xff)

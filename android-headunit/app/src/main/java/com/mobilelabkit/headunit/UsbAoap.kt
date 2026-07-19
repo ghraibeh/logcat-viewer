@@ -60,8 +60,12 @@ object UsbAoap {
         override fun write(data: ByteArray): Int =
             conn.bulkTransfer(epOut, data, data.size, 3000)
 
+        // bulkTransfer returns -1 on timeout AND on error (indistinguishable), and a USB timeout
+        // with no data is normal polling — so map any negative to 0 ("no data"). Real USB
+        // disconnects come via the USB_DEVICE_DETACHED broadcast, plus the transport's stall
+        // watchdog. This keeps -1 reserved for the socket's genuine EOF.
         override fun read(buf: ByteArray, timeoutMs: Int): Int =
-            conn.bulkTransfer(epIn, buf, buf.size, timeoutMs)
+            conn.bulkTransfer(epIn, buf, buf.size, timeoutMs).let { if (it < 0) 0 else it }
 
         val maxPacketIn: Int get() = epIn.maxPacketSize
 
