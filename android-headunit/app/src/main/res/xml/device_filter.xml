@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Google AOAP accessory-mode IDs (decimal): 0x18D1 / 0x2D00, 0x2D01(+adb).
+         The phone re-enumerates as one of these after we send ACC_REQ_START. -->
+    <usb-device vendor-id="6353" product-id="11520" />
+    <usb-device vendor-id="6353" product-id="11521" />
+</resources>
