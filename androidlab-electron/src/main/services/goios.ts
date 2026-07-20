@@ -132,15 +132,36 @@ interface RunResult {
   code: number | null
 }
 
+// A writable working directory for every go-ios child. CRITICAL on macOS: the iOS-17
+// `tunnel start` creates a pair-record manager that writes `selfIdentity.plist`
+// RELATIVE TO THE PROCESS CWD. A LaunchServices-launched app (double-click) inherits
+// cwd = "/" (read-only), so the write failed with "open selfIdentity.plist: read-only
+// file system" and the tunnel died — while a terminal launch (cwd = a writable dir)
+// worked. THAT was the entire "works from terminal, not from double-click" split.
+// Pinning cwd to an app-support dir makes go-ios write its state somewhere writable
+// regardless of how the app was launched. (Also keeps pair records in one place.)
+let _goiosCwd: string | undefined
+function goiosCwd(): string {
+  if (_goiosCwd) return _goiosCwd
+  const dir = join(app.getPath('userData'), 'goios')
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch {
+    /* fall back to app-support root if the subdir can't be made */
+  }
+  return (_goiosCwd = dir)
+}
+
 /** Run go-ios; never throws (mirrors adb.run). go-ios prints its data document
  *  to stdout and structured log lines (incl. the "agent not running" warning) to
- *  stderr, so parsers only ever look at stdout. */
+ *  stderr, so parsers only ever look at stdout. Runs in a writable cwd (see
+ *  goiosCwd — the tunnel/pair-record path needs it). */
 function run(bin: string, args: string[], timeoutMs = 15000): Promise<RunResult> {
   return new Promise((resolve) => {
     execFile(
       bin,
       args,
-      { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' },
+      { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', cwd: goiosCwd() },
       (err, stdout, stderr) => {
         resolve({
           stdout: stdout ?? '',
@@ -516,6 +537,9 @@ function spawnAgent(bin: string): AppActionResult {
     // tier is routed over the RemotePairing RSD tunnel. See goios-androidlab.patch.
     const child = spawn(bin, tunnelStartArgs(), {
       stdio: ['ignore', 'ignore', 'pipe'],
+      // Writable cwd is REQUIRED: tunnel start writes selfIdentity.plist relative to
+      // cwd; a double-clicked app's cwd is "/" (read-only) → it failed there. See goiosCwd.
+      cwd: goiosCwd(),
       env: { ...process.env, GOIOS_NETWORK_TUNNEL: '1' }
     })
     agentProc = child
@@ -784,7 +808,7 @@ export async function setLocation(bin: string, udid: string, lat: number, lon: n
     }
     let proc: ChildProcess
     try {
-      proc = spawn(bin, setLocationArgs(udid, lat, lon), { stdio: ['ignore', 'ignore', 'pipe'] })
+      proc = spawn(bin, setLocationArgs(udid, lat, lon), { stdio: ['ignore', 'ignore', 'pipe'], cwd: goiosCwd() })
     } catch (e) {
       return done({ ok: false, message: `Set location failed: ${errMsg(e)}` })
     }
@@ -862,7 +886,7 @@ export async function monitorStart(
       .catch(() => {})
   }, 5000)
 
-  const proc = spawn(bin, ['sysmontap', '--udid', udid], { stdio: ['ignore', 'ignore', 'pipe'] })
+  const proc = spawn(bin, ['sysmontap', '--udid', udid], { stdio: ['ignore', 'ignore', 'pipe'], cwd: goiosCwd() })
   monitorProc = proc
   const throttle = Math.max(250, intervalMs)
   let buf = ''
@@ -929,7 +953,7 @@ export function syslogStart(
   onState: (state: string) => void
 ): boolean {
   syslogStop()
-  const proc = spawn(bin, syslogArgs(udid), { stdio: ['ignore', 'pipe', 'ignore'] })
+  const proc = spawn(bin, syslogArgs(udid), { stdio: ['ignore', 'pipe', 'ignore'], cwd: goiosCwd() })
   syslogProc = proc
   proc.on('spawn', () => onState('started'))
   let buf = ''
