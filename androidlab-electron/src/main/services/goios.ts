@@ -676,21 +676,54 @@ function freeTunnelPortSync(): void {
   }
 }
 
-/** Report whether a healthy developer tunnel is currently active for `udid`. */
+/** Report whether developer-tier access is ready for `udid`, VERSION-AWARE:
+ *  iOS 17+ = the RSD tunnel is healthy; iOS ≤16 = the Developer Disk Image is mounted
+ *  (there is no tunnel on iOS ≤16, so checking one there always reads "off"). */
 export async function getTunnelStatus(bin: string, udid: string): Promise<TunnelStatus> {
+  const major = await deviceMajorVersion(bin, udid)
+  if (major !== null && major < 17) return { ready: await imageMounted(bin, udid) }
   return { ready: await tunnelHealthy(bin, udid) }
 }
 
-/** Explicitly bring the tunnel up (the UI's "Enable process control" + the mirror).
- *  DVT services (process list, screenshot, the MJPEG mirror) only need this tunnel
- *  — NOT a mounted Developer Image — on iOS 17+. */
-export async function startTunnel(bin: string, udid: string): Promise<AppActionResult> {
+// iOS major version, cached per udid (a device's OS version doesn't change mid-run).
+const iosMajorCache = new Map<string, number>()
+
+/** The device's iOS major version (16, 17, 26, …) or null if it can't be read. */
+async function deviceMajorVersion(bin: string, udid: string): Promise<number | null> {
+  const cached = iosMajorCache.get(udid)
+  if (cached !== undefined) return cached
+  const info = parseInfo((await run(bin, infoArgs(udid), 10000)).stdout)
+  const major = info?.version ? parseInt(info.version.split('.')[0], 10) : NaN
+  if (!Number.isFinite(major)) return null
+  iosMajorCache.set(udid, major)
+  return major
+}
+
+/** Ensure the right developer-tier transport for this device, VERSION-AWARE.
+ *
+ *  iOS 17+ dev services (process list, launch/kill, screenshot, the MJPEG mirror)
+ *  run over the RSD userspace **tunnel** (`com.apple.instruments.dtservicehub`).
+ *  iOS 16 and BELOW have NO RSD tunnel at all — those same services run over the
+ *  classic `DVTSecureSocketProxy`, which just needs the **Developer Disk Image
+ *  mounted** (no tunnel). Forcing the tunnel on an iOS-16 device (e.g. an iPhone 8)
+ *  made ensureTunnel time out and report "Developer tunnel did not come up" on a
+ *  perfectly healthy device. So: <17 → mount the DDI; 17+ (or unknown) → tunnel. */
+async function ensureDevTier(bin: string, udid: string): Promise<AppActionResult> {
+  const major = await deviceMajorVersion(bin, udid)
+  if (major !== null && major < 17) return ensureImageMounted(bin, udid)
   return ensureTunnel(bin, udid)
+}
+
+/** Explicitly bring developer-tier access up (the UI's "Enable process control" +
+ *  the mirror). iOS 17+ = the RSD tunnel; iOS ≤16 = mount the Developer Disk Image.
+ *  DVT services (process list, screenshot, MJPEG mirror) need only that. */
+export async function startTunnel(bin: string, udid: string): Promise<AppActionResult> {
+  return ensureDevTier(bin, udid)
 }
 
 /** Running processes via `ios ps` (auto-starts the tunnel if needed). */
 export async function processes(bin: string, udid: string, appsOnly: boolean): Promise<IosProcessListResult> {
-  const ens = await ensureTunnel(bin, udid)
+  const ens = await ensureDevTier(bin, udid)
   if (!ens.ok) return { ok: false, processes: [], error: ens.message }
   const r = await run(bin, psArgs(udid, appsOnly), 20000)
   const list = parseProcesses(r.stdout)
@@ -702,7 +735,7 @@ export async function processes(bin: string, udid: string, appsOnly: boolean): P
 
 /** Launch an app by bundle id (`ios launch`; auto-starts the tunnel). */
 export async function launch(bin: string, udid: string, bundleId: string): Promise<AppActionResult> {
-  const ens = await ensureTunnel(bin, udid)
+  const ens = await ensureDevTier(bin, udid)
   if (!ens.ok) return { ok: false, message: ens.message }
   const r = await run(bin, launchArgs(udid, bundleId), 30000)
   if (r.code === 0) {
@@ -715,7 +748,7 @@ export async function launch(bin: string, udid: string, bundleId: string): Promi
 
 /** Kill/force-quit an app by bundle id (`ios kill`; auto-starts the tunnel). */
 export async function kill(bin: string, udid: string, bundleId: string): Promise<AppActionResult> {
-  const ens = await ensureTunnel(bin, udid)
+  const ens = await ensureDevTier(bin, udid)
   if (!ens.ok) return { ok: false, message: ens.message }
   const r = await run(bin, killArgs(udid, bundleId), 20000)
   if (r.code === 0) return { ok: true, message: `Force-quit ${bundleId}` }
@@ -781,7 +814,7 @@ async function ensureImageMounted(bin: string, udid: string): Promise<AppActionR
 /** Mock-location "setup": bring the tunnel up + mount the DDI (the iOS analogue
  *  of installing the Android helper APK). */
 export async function mockSetup(bin: string, udid: string): Promise<MockResult> {
-  const ens = await ensureTunnel(bin, udid)
+  const ens = await ensureDevTier(bin, udid)
   if (!ens.ok) return ens
   return ensureImageMounted(bin, udid)
 }
@@ -792,7 +825,7 @@ export async function mockSetup(bin: string, udid: string): Promise<MockResult> 
  *  the process is up (it blocks by design), or with the error if it exits early
  *  (e.g. tunnel/RSD not reachable). */
 export async function setLocation(bin: string, udid: string, lat: number, lon: number): Promise<MockResult> {
-  const ens = await ensureTunnel(bin, udid)
+  const ens = await ensureDevTier(bin, udid)
   if (!ens.ok) return ens
   const mount = await ensureImageMounted(bin, udid)
   if (!mount.ok) return mount
@@ -871,7 +904,7 @@ export async function monitorStart(
   onFailed: (message: string) => void
 ): Promise<boolean> {
   monitorStop()
-  const ens = await ensureTunnel(bin, udid)
+  const ens = await ensureDevTier(bin, udid)
   if (!ens.ok) {
     onFailed(ens.message)
     return false

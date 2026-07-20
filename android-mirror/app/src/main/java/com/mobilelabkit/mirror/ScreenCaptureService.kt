@@ -43,9 +43,12 @@ class ScreenCaptureService : Service() {
     private var muteWhileCasting = true
     private var savedVolume = -1
 
-    // Bounded queue with drop-oldest-frame backpressure so a slow link never stalls the
-    // encoder. Config units are never dropped.
-    private val queue = LinkedBlockingDeque<MirrorProtocol.Frame>(90)
+    // Small bounded queue keeps latency low (≈ depth ÷ fps). On video overflow we don't drop
+    // mid-GOP P-frames (that corrupts H.264 until the next keyframe) — instead we flush the
+    // backlog and ask the encoder for a fresh IDR, dropping until it arrives. Config never
+    // dropped; audio may drop (no inter-frame deps).
+    private val queue = LinkedBlockingDeque<MirrorProtocol.Frame>(6)
+    @Volatile private var droppingUntilKeyframe = false
     private val main = Handler(Looper.getMainLooper())
 
     private val projectionCallback = object : MediaProjection.Callback() {
@@ -103,6 +106,10 @@ class ScreenCaptureService : Service() {
         try {
             val s = Socket()
             s.tcpNoDelay = true
+            // Bound the OS send buffer so a slow link backpressures our app queue quickly
+            // (the queue then resyncs via keyframe) instead of hiding seconds of frames in the
+            // kernel. Plenty for LAN throughput (bandwidth-delay product is tiny on Wi-Fi).
+            runCatching { s.sendBufferSize = 128 * 1024 }
             s.connect(InetSocketAddress(host, port), 8000)
             socket = s
             val dout = DataOutputStream(BufferedOutputStream(s.getOutputStream(), 1 shl 16))
@@ -113,10 +120,9 @@ class ScreenCaptureService : Service() {
 
             encoder = ScreenEncoder(
                 projection = proj, width = width, height = height, dpi = dpi, bitRate = bitRate,
-                onUnit = { data, isConfig ->
-                    enqueue(MirrorProtocol.Frame(
-                        data, if (isConfig) MirrorProtocol.KIND_CONFIG else MirrorProtocol.KIND_VIDEO
-                    ))
+                onUnit = { data, isConfig, isKeyFrame ->
+                    val kind = if (isConfig) MirrorProtocol.KIND_CONFIG else MirrorProtocol.KIND_VIDEO
+                    enqueue(MirrorProtocol.Frame(data, kind), isKeyFrame)
                 },
                 onError = { msg -> teardown(msg) },
             ).also { it.start() }
@@ -137,15 +143,24 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun enqueue(frame: MirrorProtocol.Frame) {
+    private fun enqueue(frame: MirrorProtocol.Frame, isKeyFrame: Boolean = false) {
         if (!running) return
-        if (frame.isConfig) {
-            // Never drop SPS/PPS — block briefly if needed.
-            runCatching { queue.putFirst(frame) }
-            return
-        }
-        if (!queue.offerLast(frame)) {
-            queue.pollFirst()       // drop oldest frame, stay live
+        // Config (SPS/PPS): must never be dropped.
+        if (frame.isConfig) { runCatching { queue.putFirst(frame) }; return }
+        // While recovering from an overflow, skip video until the fresh keyframe arrives.
+        if (droppingUntilKeyframe && frame.kind == MirrorProtocol.KIND_VIDEO && !isKeyFrame) return
+        if (isKeyFrame) droppingUntilKeyframe = false
+        if (queue.offerLast(frame)) return
+        // Queue full — the link can't keep up.
+        if (frame.kind == MirrorProtocol.KIND_VIDEO && !isKeyFrame) {
+            // Don't corrupt the GOP by dropping a P-frame: flush the backlog, ask the encoder
+            // for a new IDR, and skip video until it lands (clean resync instead of artifacts).
+            queue.clear()
+            encoder?.requestKeyFrame()
+            droppingUntilKeyframe = true
+        } else {
+            // Keyframe or audio (no inter-frame deps): drop the oldest to make room.
+            queue.pollFirst()
             queue.offerLast(frame)
         }
     }

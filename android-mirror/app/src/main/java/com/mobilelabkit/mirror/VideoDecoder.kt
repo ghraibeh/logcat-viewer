@@ -24,7 +24,9 @@ class VideoDecoder(private val width: Int, private val height: Int) {
 
     private data class Unit(val data: ByteArray, val isConfig: Boolean)
 
-    private val queue = LinkedBlockingQueue<Unit>(120)
+    // Small queue keeps latency low; the hardware decoder is fast enough that it rarely fills.
+    // (A rare drop self-heals at the next keyframe — now every 1 s.)
+    private val queue = LinkedBlockingQueue<Unit>(6)
     @Volatile private var surface: Surface? = null
     @Volatile private var running = false
     private var thread: Thread? = null
@@ -48,12 +50,18 @@ class VideoDecoder(private val width: Int, private val height: Int) {
         if (s == null) resetRequested = true
     }
 
-    /** Feed one Annex-B unit from the sender. Non-blocking (drops when full). */
+    /** Feed one Annex-B unit from the sender. Blocks rather than dropping: dropping a
+     *  mid-stream P-frame corrupts the picture (broken macroblocks) until the next keyframe.
+     *  Blocking backpressures TCP so the SENDER makes the drop decision cleanly (via keyframe
+     *  resync). The hardware decoder is real-time, so this rarely waits. */
     fun submit(data: ByteArray, isConfig: Boolean) {
         if (!running) return
-        if (!queue.offer(Unit(data, isConfig))) {
-            queue.poll()               // drop oldest, keep newest (stay live)
-            queue.offer(Unit(data, isConfig))
+        try {
+            if (!queue.offer(Unit(data, isConfig), 2, TimeUnit.SECONDS)) {
+                queue.poll(); queue.offer(Unit(data, isConfig)) // last resort if decode wedged
+            }
+        } catch (e: InterruptedException) {
+            // shutting down
         }
     }
 

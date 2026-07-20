@@ -236,7 +236,7 @@ class SenderActivity : Activity() {
             h = (h * scale).toInt()
         }
         w = even(w); h = even(h)
-        val bitRate = (w.toLong() * h * FPS * BPP).toInt().coerceIn(2_000_000, 12_000_000)
+        val bitRate = (w.toLong() * h * FPS * BPP).toInt().coerceIn(1_500_000, 4_000_000)
         return Cap(w, h, dpi, bitRate)
     }
 
@@ -269,8 +269,8 @@ class SenderActivity : Activity() {
     companion object {
         private const val REQ_PROJECTION = 1001
         private const val REQ_PERMS = 1002
-        private const val MAX_EDGE = 1280
+        private const val MAX_EDGE = 960   // lower long-edge → less bandwidth → lower latency
         private const val FPS = 30
-        private const val BPP = 0.2
+        private const val BPP = 0.15
     }
 }

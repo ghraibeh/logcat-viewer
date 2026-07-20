@@ -7,6 +7,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.projection.MediaProjection
 import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import android.view.Surface
 
@@ -26,7 +27,7 @@ class ScreenEncoder(
     private val dpi: Int,
     private val bitRate: Int,
     private val frameRate: Int = 30,
-    private val onUnit: (data: ByteArray, isConfig: Boolean) -> Unit,
+    private val onUnit: (data: ByteArray, isConfig: Boolean, isKeyFrame: Boolean) -> Unit,
     private val onError: (String) -> Unit,
 ) {
     private var codec: MediaCodec? = null
@@ -41,10 +42,12 @@ class ScreenEncoder(
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
                 setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+                // 1 s keyframe interval → fast recovery after a dropped/keyframe-resync gap.
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                     setInteger(MediaFormat.KEY_BITRATE_MODE,
                         MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                    setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = realtime (low-latency hint)
                 }
                 // Ask for low-latency encoding where supported (API 30+); ignored elsewhere.
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setInteger(MediaFormat.KEY_LATENCY, 1)
@@ -90,7 +93,8 @@ class ScreenEncoder(
                         val out = ByteArray(info.size)
                         buf.get(out)
                         val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
-                        onUnit(out, isConfig)
+                        val isKeyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
+                        onUnit(out, isConfig, isKeyFrame)
                     }
                     runCatching { mc.releaseOutputBuffer(idx, false) }
                 }
@@ -98,6 +102,15 @@ class ScreenEncoder(
                     Log.i(TAG, "encoder format: ${mc.outputFormat}")
                 else -> { /* INFO_TRY_AGAIN_LATER — keep polling */ }
             }
+        }
+    }
+
+    /** Force the next output frame to be an IDR keyframe — used to resync cleanly after the
+     *  send buffer overflows (dropping mid-GOP P-frames would corrupt the stream). */
+    fun requestKeyFrame() {
+        runCatching {
+            val b = Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }
+            codec?.setParameters(b)
         }
     }
 
