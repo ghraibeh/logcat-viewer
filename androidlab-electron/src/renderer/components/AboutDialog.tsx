@@ -1,6 +1,6 @@
 /**
  * About dialog — port of logcat_viewer/about.py (identity, version, feature
- * summary, author credit) with the same self-drawn `>_` logo mark.
+ * summary, author credit) with the app icon drawn inline.
  */
 const VERSION = '0.1.0'
 const TAGLINE = 'Live Android logcat, powerful filtering, and a full device toolkit.'
@@ -17,14 +17,17 @@ const FEATURES: Array<[string, string, string]> = [
 ]
 
 /** The MobileLabKit app icon (matches build/icon.png), drawn inline as SVG so it
- *  stays crisp at any size and needs no bundled asset. */
+ *  stays crisp at any size and needs no bundled asset. The split mascot: Android
+ *  green on the left (antenna), iOS silver on the right (leaf + bite). The bite
+ *  is a disc filled with the same background gradient (userSpaceOnUse, so it
+ *  lines up pixel-perfect with the tile behind it). */
 function Logo() {
   return (
     <svg viewBox="0 0 1024 1024" aria-hidden>
       <defs>
         <linearGradient id="al-bg" x1="0" y1="100" x2="0" y2="924" gradientUnits="userSpaceOnUse">
-          <stop offset="0" stopColor="#262a34" />
-          <stop offset="1" stopColor="#12131a" />
+          <stop offset="0" stopColor="#24272d" />
+          <stop offset="1" stopColor="#141519" />
         </linearGradient>
         <linearGradient id="al-hl" x1="0" y1="100" x2="0" y2="512" gradientUnits="userSpaceOnUse">
           <stop offset="0" stopColor="#ffffff" stopOpacity="0.1" />
@@ -36,18 +39,20 @@ function Logo() {
       </defs>
       <rect x="100" y="100" width="824" height="824" rx="184" ry="184" fill="url(#al-bg)" />
       <rect x="100" y="100" width="824" height="824" fill="url(#al-hl)" clipPath="url(#al-clip)" />
-      <rect x="362" y="600" width="300" height="34" rx="17" fill="#5a9cff" />
-      <rect x="387" y="664" width="250" height="34" rx="17" fill="#f5c451" />
-      <rect x="412" y="728" width="200" height="34" rx="17" fill="#ff6b6b" />
-      <path d="M302 470 A210 210 0 0 1 722 470 Z" fill="#3DDC84" />
-      <g stroke="#3DDC84" strokeWidth="30" strokeLinecap="round">
-        <line x1="420" y1="289.4" x2="362" y2="211.4" />
-        <line x1="604" y1="289.4" x2="662" y2="211.4" />
+      <g transform="translate(-9 0)">
+        <line x1="380" y1="310" x2="322" y2="218" stroke="#3DDC84" strokeWidth="28" strokeLinecap="round" />
+        <path d="M 512 310 C 462 255 362 258 320 320 C 278 382 285 500 340 580 C 378 635 436 648 512 622 Z" fill="#3DDC84" />
+        <circle cx="438" cy="415" r="24" fill="#101215" />
       </g>
-      <g fill="#12131a">
-        <circle cx="434" cy="392" r="22" />
-        <circle cx="590" cy="392" r="22" />
+      <g transform="translate(9 0)">
+        <path d="M 512 310 C 562 255 662 258 704 320 C 746 382 739 500 684 580 C 646 635 588 648 512 622 Z" fill="#E4E7EB" />
+        <circle cx="722" cy="516" r="64" fill="url(#al-bg)" />
+        <ellipse cx="585" cy="248" rx="44" ry="18" transform="rotate(-32 585 248)" fill="#3DDC84" />
+        <circle cx="586" cy="415" r="24" fill="#101215" />
       </g>
+      <rect x="352" y="676" width="320" height="34" rx="17" fill="#4C8BF5" />
+      <rect x="382" y="738" width="260" height="34" rx="17" fill="#F0B429" />
+      <rect x="412" y="800" width="200" height="34" rx="17" fill="#F56565" />
     </svg>
   )
 }

@@ -9,7 +9,7 @@
  *
  * All device work happens in the main process; the renderer only sees JSON.
  */
-import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -334,6 +334,14 @@ export async function deviceIp(bin: string, udid: string): Promise<IosNetworkInf
 // first's tunnel; ensureTunnel(udid) just waits for that device's entry to appear
 // in `tunnel ls`. (Our patch also lets the agent tunnel Wi-Fi devices.)
 let agentProc: ChildProcess | null = null
+// In-flight agent-start promise. autoTunnel fires ensureAgentRunning fire-and-forget
+// on EVERY device-list rebuild, and enabling Wi-Fi makes usbmux flap (the device
+// hops between its USB and Network entries) → many rebuilds in a burst. Without
+// coalescing, each overlapping ensureAgent() would stopTunnel() (SIGKILL) the agent
+// a previous call just spawned and they'd fight over the fixed port — the tunnel
+// came up then died, surfacing as "fixed port busy". This holds a single start so
+// concurrent callers share it instead of tearing each other down.
+let agentStarting: Promise<AppActionResult> | null = null
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -435,9 +443,17 @@ function listGoIosTunnelPids(bin: string): Promise<number[]> {
  *  for the fixed tunnel port to be released so a fresh spawn can bind it. */
 async function sweepStaleTunnels(bin: string): Promise<number> {
   const own = agentProc?.pid
-  const stale = (await listGoIosTunnelPids(bin)).filter((p) => p !== own && p !== process.pid)
+  const exclude = (p: number): boolean => p !== own && p !== process.pid
+  // Kill BOTH: go-ios processes whose command line is `tunnel start` (matched by name),
+  // AND — the robust part — whatever actually holds the fixed tunnel port right now. Name
+  // matching alone misses a holder from a crashed run, a differently-named binary, or a
+  // stale socket owned by an unrelated pid; those are exactly what triggers "fixed port
+  // busy" on the next spawn. The port lookup catches them regardless.
+  const byName = (await listGoIosTunnelPids(bin)).filter(exclude)
+  const byPort = (await pidsOnPort(TUNNEL_INFO_PORT)).filter(exclude)
+  const stale = [...new Set([...byName, ...byPort])]
   if (stale.length === 0) return 0
-  console.error(`[go-ios] clearing ${stale.length} orphaned tunnel process(es): ${stale.join(', ')}`)
+  console.error(`[go-ios] clearing ${stale.length} process(es) holding the tunnel port: ${stale.join(', ')}`)
   for (const pid of stale) {
     try {
       process.kill(pid, 'SIGKILL')
@@ -451,6 +467,33 @@ async function sweepStaleTunnels(bin: string): Promise<number> {
     await delay(150)
   }
   return stale.length
+}
+
+/** PIDs holding a local TCP port (macOS/Linux via lsof, Windows via netstat). Best-effort. */
+function pidsOnPort(port: number): Promise<number[]> {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      execFile('netstat', ['-ano', '-p', 'tcp'], { timeout: 6000 }, (_e, out) => {
+        const pids = new Set<number>()
+        for (const line of (out ?? '').split(/\r?\n/)) {
+          if (new RegExp(`[:.]${port}\\b`).test(line) && /LISTENING/i.test(line)) {
+            const m = /(\d+)\s*$/.exec(line.trim())
+            if (m) pids.add(parseInt(m[1], 10))
+          }
+        }
+        resolve([...pids])
+      })
+      return
+    }
+    execFile('lsof', ['-ti', `tcp:${port}`], { timeout: 6000 }, (_e, out) => {
+      resolve(
+        (out ?? '')
+          .split(/\s+/)
+          .map((s) => parseInt(s.trim(), 10))
+          .filter((n) => Number.isFinite(n) && n > 0)
+      )
+    })
+  })
 }
 
 /** Spawn the shared tunnel agent and adopt it as `agentProc`. stderr is piped so
@@ -497,14 +540,28 @@ function spawnAgent(bin: string): AppActionResult {
 }
 
 /** Ensure the shared tunnel agent is running with its info server accepting
- *  connections. Idempotent: reuses a live agent, else sweeps orphans (a prior
- *  session's, which would squat the fixed port) and spawns a fresh one. */
+ *  connections. Idempotent AND coalesced: reuses a live agent; if a start is already
+ *  in flight, joins it (so a burst of device-rebuild triggers can't tear down the
+ *  agent one of them just spawned); else sweeps orphans and spawns a fresh one. */
 async function ensureAgent(bin: string): Promise<AppActionResult> {
   if (agentProc && (await portOpen(TUNNEL_INFO_PORT, 800))) return { ok: true, message: 'agent active' }
-  // Our handle is gone or the info server isn't answering — start clean. Two
-  // attempts, each preceded by a sweep of orphaned agents that would otherwise
-  // hold the fixed port; the second only fires if the spawn died early (a port
-  // race), so a genuine failure still returns after one bounded wait.
+  // A start is already running — join it instead of launching a competing one that
+  // would SIGKILL the in-flight agent and fight over the fixed port.
+  if (agentStarting) return agentStarting
+  const p = startAgent(bin)
+  agentStarting = p
+  // Clear the latch once this start settles (only if it's still the current one).
+  void p.finally(() => {
+    if (agentStarting === p) agentStarting = null
+  })
+  return p
+}
+
+/** The actual (serialized) agent cold-start. Only ever invoked via ensureAgent's
+ *  single-flight latch. Two attempts, each preceded by a sweep of orphaned agents
+ *  that would otherwise hold the fixed port; the second only fires if the spawn died
+ *  early (a port race), so a genuine failure still returns after one bounded wait. */
+async function startAgent(bin: string): Promise<AppActionResult> {
   stopTunnel()
   for (let attempt = 0; attempt < 2; attempt++) {
     await sweepStaleTunnels(bin)
@@ -555,15 +612,43 @@ export async function ensureAgentRunning(bin: string): Promise<AppActionResult> 
 }
 
 /** Kill the shared tunnel agent, stopping every device's tunnel (called on the
- *  explicit "stop tunnel" action and on window close). */
+ *  explicit "stop tunnel" action and on window close / app quit). Uses SIGKILL — the
+ *  go-ios userspace tunnel does NOT exit promptly on SIGTERM, so a plain .kill() left it
+ *  running: it orphaned when the app quit and kept holding the fixed port, which is why
+ *  reopening the app hit "fixed port busy". We also force-free the port synchronously in
+ *  case our handle was already lost (a prior agent we no longer track) — synchronous so it
+ *  completes before the process exits on quit. */
 export function stopTunnel(): void {
-  if (agentProc) {
+  const pid = agentProc?.pid
+  agentProc = null
+  if (pid) {
     try {
-      agentProc.kill()
+      process.kill(pid, 'SIGKILL')
     } catch {
       /* already gone */
     }
-    agentProc = null
+  }
+  freeTunnelPortSync()
+}
+
+/** Synchronously SIGKILL whatever is still holding the fixed tunnel port. Best-effort;
+ *  swallows everything (nothing on the port, or lsof/ps unavailable). */
+function freeTunnelPortSync(): void {
+  try {
+    if (process.platform === 'win32') return // best-effort; skip on Windows
+    const out = execFileSync('lsof', ['-ti', `tcp:${TUNNEL_INFO_PORT}`], { timeout: 3000 }).toString()
+    for (const s of out.split(/\s+/)) {
+      const p = parseInt(s.trim(), 10)
+      if (Number.isFinite(p) && p > 0 && p !== process.pid) {
+        try {
+          process.kill(p, 'SIGKILL')
+        } catch {
+          /* gone */
+        }
+      }
+    }
+  } catch {
+    /* nothing listening / lsof unavailable */
   }
 }
 

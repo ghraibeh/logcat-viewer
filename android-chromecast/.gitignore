@@ -1,0 +1,16 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+
+# Cross-compiled native deps (regenerate with deps/build-android-deps.sh) + its scratch
+deps/prebuilt/
+deps/.work/
+deps/*.log
+
+# Native build tree
+.cxx/
+app/.cxx/

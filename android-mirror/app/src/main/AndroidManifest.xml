@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Android→Android mirror is a private LAN pipe between two copies of this app:
+         our own mDNS service (_mlkmirror._tcp) for discovery + a plain TCP stream of
+         H.264 over Wi-Fi. No native cast picker, so none of the Chromecast/Miracast
+         gatekeeping applies. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- mDNS is multicast; Android drops inbound multicast without this + a MulticastLock. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- Bind the process to Wi-Fi so mDNS multicast egresses wlan0. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Sender: screen capture runs in a foreground service (required for MediaProjection
+         on Android 10+, and typed as mediaProjection on Android 14). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Forward the sender's playback audio: AudioPlaybackCapture uses AudioRecord, so it
+         needs RECORD_AUDIO + the microphone FGS type (even though no mic is read). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Show the mandatory FGS notification on Android 13+. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:hardwareAccelerated="true"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+
+        <!-- Role picker: "Cast this screen" (sender) / "Receive a screen" (receiver). -->
+        <activity
+            android:name=".HomeActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|screenLayout">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Sender: browse receivers, request capture consent, then hand off to the service. -->
+        <activity
+            android:name=".SenderActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|screenLayout" />
+
+        <!-- Receiver: full-screen, advertises + decodes the incoming stream. -->
+        <activity
+            android:name=".ReceiverActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="fullUser"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|screenLayout" />
+
+        <service
+            android:name=".ScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection|microphone" />
+    </application>
+</manifest>

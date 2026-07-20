@@ -4,6 +4,9 @@ copyright: Copyright © 2026 Mahmoud Alghraibeh
 directories:
   output: dist
   buildResources: build
+# Deep ad-hoc sign the packed .app so the (unsigned) bundle isn't reported as
+# "damaged" on Apple Silicon. See scripts/afterPackSign.cjs.
+afterPack: ./scripts/afterPackSign.cjs
 files:
   - out/**/*
   - package.json
@@ -12,12 +15,18 @@ files:
   - node_modules/node-pty/**/*
 asarUnpack:
   - node_modules/node-pty/**/*
-# Bundled into the packaged .app's resources root (process.resourcesPath).
-# The mock-location helper APK ships here (auto-installed on first Location use),
-# mirroring the PyInstaller spec's `datas` bundling of assets/mocklocation.apk.
-# Phase 4 will stage platform-tools/adb here the same way so the packaged .app is
-# self-contained (no external adb needed).
+# Bundled into the packaged .app's resources root (process.resourcesPath). Everything
+# the app shells out to ships here so the packaged .app is FULLY self-contained — no
+# adb / go-ios / scrcpy / OpenSSL install required on the host.
 extraResources:
+  # Android Debug Bridge — the core Android transport. Universal (x86_64+arm64) binary,
+  # standalone. findAdb() resolves resources/platform-tools/adb first when packaged.
+  - from: resources/platform-tools/adb
+    to: platform-tools/adb
+  # Patched go-ios `ios` binary (built from vendor/go-ios via scripts/build-goios.sh).
+  # Pure Go / CGO-disabled, so no external dylibs. findGoIos() resolves resources/go-ios/ios.
+  - from: resources/go-ios/ios
+    to: go-ios/ios
   - from: resources/mocklocation.apk
     to: mocklocation.apk
   # scrcpy's device server (Apache-2.0). It runs ON the device via app_process, so
@@ -30,18 +39,22 @@ extraResources:
   # build:airplayhelper`); advertises itself over mDNS with no OS Bonjour/Avahi. The
   # glob picks up whichever the current build produced: `airplayscreen` (mac/linux) or
   # `airplayscreen.exe` (Windows). Drives the Wi-Fi iOS mirror path on every platform.
-  # NOTE: still links OpenSSL/libplist/fdk-aac dynamically — bundling/static-linking
-  # those for redistribution is a tracked follow-up.
+  # Its OpenSSL/libplist/fdk-aac dylibs are bundled alongside it and the binary's load
+  # paths rewritten to @loader_path (see scripts/bundle-mac-dylibs.sh), so the AirPlay
+  # Wi-Fi mirror needs no Homebrew install. All ad-hoc signed.
   - from: resources
     to: .
     filter:
       - airplayscreen
       - airplayscreen.exe
+      - libcrypto.3.dylib
+      - libplist-2.0.4.dylib
+      - libfdk-aac.2.dylib
 mac:
   category: public.app-category.developer-tools
   target:
-    - dmg
-    - zip
+    - target: dmg
+      arch: arm64
   darkModeSupport: true
   minimumSystemVersion: "12.0"
   identity: null

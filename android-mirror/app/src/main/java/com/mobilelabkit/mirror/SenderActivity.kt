@@ -1,0 +1,276 @@
+package com.mobilelabkit.mirror
+
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Bundle
+import android.util.DisplayMetrics
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+
+/**
+ * Sender role: browse for `_mlkmirror._tcp` receivers on the Wi-Fi, let the user pick one,
+ * ask for screen-capture consent, then hand the capture token + target to
+ * [ScreenCaptureService] which does the actual encode/stream. The UI is built in code (no
+ * XML) to stay dependency-light, matching the sibling apps.
+ */
+class SenderActivity : Activity() {
+
+    private val browser by lazy { MirrorDiscovery.Browser(applicationContext) }
+    private var receivers: List<MirrorDiscovery.Receiver> = emptyList()
+    private var selected: MirrorDiscovery.Receiver? = null
+    private var casting = false
+    private var muteWhileCasting = true
+
+    private lateinit var listContainer: LinearLayout
+    private lateinit var emptyLabel: TextView
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Ask up-front for notifications (FGS notice) and mic (playback-audio capture). Both
+        // are optional — casting still works video-only if either is denied.
+        val wanted = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) add(Manifest.permission.POST_NOTIFICATIONS)
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+                add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (wanted.isNotEmpty()) requestPermissions(wanted.toTypedArray(), REQ_PERMS)
+        showListUi()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!casting) startBrowsing()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        browser.stop()
+    }
+
+    // --- list screen -------------------------------------------------------------------
+    private fun showListUi() {
+        casting = false
+        val root = column().apply { setPadding(dp(24), dp(48), dp(24), dp(24)) }
+        root.addView(title("Cast this screen"))
+        root.addView(subtitle(
+            "Pick a receiver on your Wi-Fi.\n" +
+                "On the other phone, open MobileLabKit Mirror ▸ Receive a screen."
+        ))
+
+        val muteToggle = CheckBox(this).apply {
+            text = "Mute this phone while casting (audio only on receiver)"
+            isAllCaps = false
+            setTextColor(Color.parseColor("#C7D3DE"))
+            textSize = 14f
+            isChecked = muteWhileCasting
+            buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E88E5"))
+            setPadding(dp(4), dp(20), dp(4), dp(8))
+            setOnCheckedChangeListener { _, checked -> muteWhileCasting = checked }
+        }
+        root.addView(muteToggle)
+
+        emptyLabel = subtitle("Searching for receivers…").apply { setPadding(0, dp(16), 0, 0) }
+        listContainer = column()
+        val scroll = ScrollView(this).apply {
+            addView(listContainer)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+            )
+        }
+        root.addView(emptyLabel)
+        root.addView(scroll)
+        setContentView(root)
+        renderReceivers()
+    }
+
+    private fun startBrowsing() {
+        browser.start { list ->
+            runOnUiThread {
+                receivers = list
+                if (!casting) renderReceivers()
+            }
+        }
+    }
+
+    private fun renderReceivers() {
+        if (!::listContainer.isInitialized) return
+        listContainer.removeAllViews()
+        emptyLabel.visibility = if (receivers.isEmpty()) View.VISIBLE else View.GONE
+        for (r in receivers) {
+            val b = Button(this).apply {
+                text = r.name
+                isAllCaps = false
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#1B2733"))
+                textSize = 17f
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                setPadding(dp(20), dp(18), dp(20), dp(18))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(10) }
+                setOnClickListener { pick(r) }
+            }
+            listContainer.addView(b)
+        }
+    }
+
+    private fun pick(r: MirrorDiscovery.Receiver) {
+        selected = r
+        val mpm = getSystemService(MediaProjectionManager::class.java)
+        startActivityForResult(mpm.createScreenCaptureIntent(), REQ_PROJECTION)
+    }
+
+    @Deprecated("startActivityForResult is fine for this single, simple consent flow")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_PROJECTION) return
+        val target = selected
+        if (resultCode == RESULT_OK && data != null && target != null) {
+            startCasting(resultCode, data, target)
+        } else {
+            toast("Screen capture cancelled")
+        }
+    }
+
+    // --- casting screen ----------------------------------------------------------------
+    private fun startCasting(resultCode: Int, data: Intent, target: MirrorDiscovery.Receiver) {
+        val cap = computeCapture()
+        val withAudio = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        ScreenCaptureService.onStopped = { err ->
+            runOnUiThread {
+                if (err != null) toast(err)
+                showListUi()
+                if (!casting) startBrowsing()
+            }
+        }
+        val svc = Intent(this, ScreenCaptureService::class.java).apply {
+            action = ScreenCaptureService.ACTION_START
+            putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+            putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, data)
+            putExtra(ScreenCaptureService.EXTRA_HOST, target.host)
+            putExtra(ScreenCaptureService.EXTRA_PORT, target.port)
+            putExtra(ScreenCaptureService.EXTRA_WIDTH, cap.w)
+            putExtra(ScreenCaptureService.EXTRA_HEIGHT, cap.h)
+            putExtra(ScreenCaptureService.EXTRA_DPI, cap.dpi)
+            putExtra(ScreenCaptureService.EXTRA_BITRATE, cap.bitRate)
+            putExtra(ScreenCaptureService.EXTRA_TARGET_NAME, target.name)
+            putExtra(ScreenCaptureService.EXTRA_WITH_AUDIO, withAudio)
+            putExtra(ScreenCaptureService.EXTRA_MUTE, muteWhileCasting)
+        }
+        startForegroundService(svc)
+        browser.stop()
+        showCastingUi(target.name)
+    }
+
+    private fun showCastingUi(name: String) {
+        casting = true
+        val root = column().apply {
+            setPadding(dp(24), dp(48), dp(24), dp(24))
+            gravity = Gravity.CENTER
+        }
+        root.addView(title("Casting…"))
+        root.addView(subtitle("Mirroring your screen to\n$name"))
+        val stop = Button(this).apply {
+            text = "Stop casting"
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#7A1F1F"))
+            textSize = 18f
+            setPadding(dp(24), dp(18), dp(24), dp(18))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(40) }
+            setOnClickListener {
+                ScreenCaptureService.stop(this@SenderActivity)
+                showListUi()
+                startBrowsing()
+            }
+        }
+        root.addView(stop)
+        setContentView(root)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        browser.stop()
+        ScreenCaptureService.onStopped = null
+    }
+
+    // --- capture sizing ----------------------------------------------------------------
+    private data class Cap(val w: Int, val h: Int, val dpi: Int, val bitRate: Int)
+
+    /** Real screen size, scaled so the long edge ≤ MAX_EDGE, dimensions rounded even. */
+    private fun computeCapture(): Cap {
+        var w: Int
+        var h: Int
+        val dpi: Int
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = windowManager.currentWindowMetrics.bounds
+            w = b.width(); h = b.height()
+            dpi = resources.configuration.densityDpi
+        } else {
+            val dm = DisplayMetrics()
+            @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(dm)
+            w = dm.widthPixels; h = dm.heightPixels; dpi = dm.densityDpi
+        }
+        val longEdge = maxOf(w, h)
+        if (longEdge > MAX_EDGE) {
+            val scale = MAX_EDGE.toFloat() / longEdge
+            w = (w * scale).toInt()
+            h = (h * scale).toInt()
+        }
+        w = even(w); h = even(h)
+        val bitRate = (w.toLong() * h * FPS * BPP).toInt().coerceIn(2_000_000, 12_000_000)
+        return Cap(w, h, dpi, bitRate)
+    }
+
+    private fun even(v: Int) = (v / 2 * 2).coerceAtLeast(2)
+
+    // --- tiny view builders ------------------------------------------------------------
+    private fun column() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setBackgroundColor(Color.BLACK)
+        layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        )
+    }
+
+    private fun title(t: String) = TextView(this).apply {
+        text = t; setTextColor(Color.WHITE); textSize = 26f
+        setPadding(0, 0, 0, dp(12))
+    }
+
+    private fun subtitle(t: String) = TextView(this).apply {
+        text = t; setTextColor(Color.parseColor("#9FB0C0")); textSize = 15f
+    }
+
+    private fun dp(v: Int) = TypedValue.applyDimension(
+        TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics
+    ).toInt()
+
+    private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_LONG).show()
+
+    companion object {
+        private const val REQ_PROJECTION = 1001
+        private const val REQ_PERMS = 1002
+        private const val MAX_EDGE = 1280
+        private const val FPS = 30
+        private const val BPP = 0.2
+    }
+}

@@ -3,7 +3,7 @@
  * This is the single boundary between the privileged main process (subprocess +
  * fs + dialogs) and the sandboxed renderer.
  */
-import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
+import { ipcMain, dialog, shell, BrowserWindow, app } from 'electron'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { IPC } from '@shared/ipc'
@@ -13,6 +13,7 @@ import { findAdb, listDevices, listApps, resolvePids, forceCrash } from './servi
 import { DeviceWatcher } from './services/devicewatch'
 import { readDeviceInfo } from './services/deviceinfo'
 import * as goios from './services/goios'
+import * as devicekit from './services/devicekit'
 import * as iosfiles from './services/iosfiles'
 import { LogcatReader } from './services/logcat'
 import { ShellSession } from './services/shell'
@@ -193,6 +194,20 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     onChange: () => void rebuildDevices()
   })
   deviceWatcher.start()
+
+  // Self-heal loop. `ios listen` only signals on attach/detach, so a device that is
+  // ALREADY connected when we launch may never produce an event — and the single
+  // initial poll can miss it (a slow/racing usbmux right after launch), or the first
+  // autoTunnel attempt can lose a race with the Wi-Fi auto-enable. Either way the
+  // device would be absent from the list and the tunnel would never come up (observed
+  // on `open`/double-click launches: `ios listen` runs but no tunnel). Periodically
+  // re-running the full rebuild re-detects the device (updating the UI list too),
+  // re-fires autoTunnel, and retries a missing tunnel. rebuildDevices is serialized,
+  // autoEnableWifi fires once per device, and ensureAgent is coalesced + early-returns
+  // when healthy — so this only fills gaps, it never churns a working tunnel.
+  const tunnelHeal = setInterval(() => {
+    void rebuildDevices()
+  }, 5000)
 
   ipcMain.handle(IPC.adbListApps, async (_e, serial: string) => {
     const adb = findAdb()
@@ -1411,9 +1426,24 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     if (p) await shell.openPath(p)
   })
 
-  // Stop background workers when the window goes away (mirrors closeEvent).
-  const win = getWindow()
-  win?.on('closed', () => {
+  // Stop background workers + kill every spawned device child (adb/go-ios tunnel, listen,
+  // forward, …) when the window goes away AND on app quit. Registering on both matters:
+  // window 'closed' covers closing the window while the app stays in the dock (macOS), and
+  // 'before-quit' covers Cmd-Q — and, critically, fires even for a window opened AFTER this
+  // ran (the 'closed' handler is bound to one window). Without the quit path, the go-ios
+  // tunnel orphaned and kept the fixed port, so reopening hit "fixed port busy". Idempotent.
+  let cleanedUp = false
+  const cleanup = (): void => {
+    if (cleanedUp) return
+    cleanedUp = true
+    // Release the single-instance lock as we start quitting (best-effort). Harmless
+    // and tidy on the real-quit path.
+    try {
+      app.releaseSingleInstanceLock()
+    } catch {
+      /* not held / already released */
+    }
+    clearInterval(tunnelHeal)
     mirrorWin.destroy()
     deviceWatcher.stop()
     reader?.stop()
@@ -1436,5 +1466,14 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     goios.monitorStop()
     goios.syslogStop()
     goios.stopTunnel()
-  })
+    devicekit.stop()
+  }
+  // Tear down ONLY on real app quit (Cmd-Q → before-quit), NOT on window close.
+  // On macOS the app stays alive in the dock when its window closes (see index.ts
+  // window-all-closed / activate / second-instance), keeping the go-ios tunnel and
+  // device watchers up so reopening the window is instant and the tunnel is already
+  // there. Tearing down on window 'closed' would leave the backend half-dead while
+  // the process lingers, and registerIpc only runs once — the reopened window would
+  // then have no working backend. So cleanup is bound to before-quit alone.
+  app.on('before-quit', cleanup)
 }

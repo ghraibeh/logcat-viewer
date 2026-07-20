@@ -1,0 +1,11 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+
+# Native build tree (none today — pure Kotlin — kept for parity)
+.cxx/
+app/.cxx/

@@ -3,6 +3,7 @@
  * Equivalent of logcat_viewer/__main__.py + the QMainWindow shell in ui.py.
  */
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { app, BrowserWindow, nativeImage, shell } from 'electron'
 import { registerIpc } from './ipc'
 import { buildAppMenu } from './menu'
@@ -25,6 +26,36 @@ const iconPath = join(app.getAppPath(), 'build', 'icon.png')
 
 let mainWindow: BrowserWindow | null = null
 const getWindow = (): BrowserWindow | null => mainWindow
+
+/**
+ * macOS: strip `com.apple.quarantine` from our own app bundle at startup.
+ *
+ * When the app is delivered to another Mac (DMG / download / AirDrop), macOS
+ * stamps `com.apple.quarantine` on EVERY nested file. Right-click→Open (or
+ * clearing quarantine on the .app) only un-quarantines the app's MAIN executable —
+ * the bundled helper binaries (go-ios, adb, scrcpy-server, iosscreen, airplayscreen
+ * and their dylibs) stay quarantined. macOS AMFI then SIGKILLs any of them the
+ * instant we spawn it (the child dies with exit 137), even though its ad-hoc code
+ * signature is valid. That is exactly why the developer tunnel "can't start" on a
+ * machine other than the one that built it: `go-ios tunnel start` is killed before
+ * it can bind the fixed port.
+ *
+ * We are already running (the user approved the app), so we can clear quarantine
+ * from our own bundle. Recursive, best-effort, synchronous (must finish before the
+ * first device poll spawns a helper). Absolute `xattr` path so it works under the
+ * minimal PATH a Finder-launched app inherits. Notarization is the "proper" fix,
+ * but this makes an un-notarized ad-hoc build fully self-healing on any Mac.
+ */
+function clearBundledQuarantine(): void {
+  if (process.platform !== 'darwin' || !app.isPackaged) return
+  // process.resourcesPath = <App>.app/Contents/Resources → the .app bundle is two up.
+  const appBundle = join(process.resourcesPath, '..', '..')
+  try {
+    execFileSync('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', appBundle], { timeout: 10000 })
+  } catch {
+    /* xattr missing, or nothing quarantined — spawns still work if already clean */
+  }
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -382,23 +413,64 @@ function runSmoke(win: BrowserWindow): void {
   })
 }
 
-app.whenReady().then(() => {
-  // In dev the process is Electron.app, so the dock shows Electron's icon —
-  // override it. A packaged .app already carries build/icon.icns in its bundle.
-  if (process.platform === 'darwin' && !app.isPackaged) {
-    const img = nativeImage.createFromPath(iconPath)
-    if (!img.isEmpty()) app.dock?.setIcon(img)
-  }
-
-  registerIpc(getWindow)
-  buildAppMenu(getWindow)
-  createWindow()
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+// Single-instance lock. A second copy of the app (classically: the dev build
+// launched while the installed .app is already open) would spawn its OWN go-ios
+// tunnel agent and fight the first over the fixed tunnel port (60105) — the
+// "fixed port busy" failure when opening iOS apps. Refuse to start a second
+// instance and just focus the existing window instead.
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    // A relaunch (double-click / dock) while we're already running. Focus the
+    // existing window, or re-create it if the user had closed it (macOS keeps us
+    // alive with no window) — this is the reopen path, and it reuses the live
+    // backend + tunnel rather than starting a second process.
+    const win = getWindow()
+    if (win) {
+      if (win.isMinimized()) win.restore()
+      win.focus()
+    } else {
+      createWindow()
+    }
   })
-})
 
+  app.whenReady().then(() => {
+    // FIRST: un-quarantine our bundled helper binaries so spawning go-ios/adb/etc.
+    // isn't SIGKILLed by macOS on a machine other than the one that built the app.
+    // Must run before registerIpc/createWindow — the renderer's first device poll
+    // spawns go-ios. See clearBundledQuarantine().
+    clearBundledQuarantine()
+
+    // In dev the process is Electron.app, so the dock shows Electron's icon —
+    // override it. A packaged .app already carries build/icon.icns in its bundle.
+    if (process.platform === 'darwin' && !app.isPackaged) {
+      const img = nativeImage.createFromPath(iconPath)
+      if (!img.isEmpty()) app.dock?.setIcon(img)
+    }
+
+    registerIpc(getWindow)
+    buildAppMenu(getWindow)
+    createWindow()
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
+  })
+}
+
+// Standard macOS lifecycle: closing the window does NOT quit the app — it stays
+// alive in the dock and reopening just re-shows the window (see 'activate' and
+// 'second-instance', which createWindow when none is open). This is deliberate for
+// THIS app: it owns a long-lived go-ios developer tunnel (fixed port 60105) plus
+// device watchers/proxies. Quitting on close and re-launching a fresh process ran
+// into a single-instance-lock race — reopening while the old instance was still
+// shutting down hit !requestSingleInstanceLock() and quit silently ("close then
+// reopen stopped working"). Staying alive means there's only ever ONE process and
+// the tunnel stays up across a window close, so reopening is instant and the tunnel
+// is already there. Everything is torn down on real quit (Cmd-Q → before-quit →
+// cleanup), NOT on window close — so the backend is never left half-alive. On
+// Windows/Linux, keep the convention of quitting when the last window closes.
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
