@@ -4,6 +4,7 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.util.Log
 import android.view.Surface
+import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -12,12 +13,18 @@ import java.util.concurrent.TimeUnit
  * MediaCodec -> the SurfaceView's Surface. Runs a single decode thread that both feeds
  * input and drains output-to-Surface, so frames render as soon as they decode.
  *
- * The receiver delivers SPS/PPS separately (isConfig=true) ahead of the IDR — we hold
- * frames until we have both a config buffer AND a Surface, then configure MediaCodec and
- * feed the config as a CODEC_CONFIG buffer. Real-time: if the input queue backs up we
- * drop the oldest, and if no input buffer is free we drop the frame.
+ * The receiver delivers SPS/PPS separately (isConfig=true) ahead of the IDR. We DON'T
+ * configure the codec to the advertised display size (the iPhone streams at its own,
+ * usually-smaller resolution). Instead we parse the real coded size out of the SPS and
+ * configure to exactly that, handing the SPS/PPS in as `csd-0`. Configuring an oversized
+ * input port (e.g. 4K when the stream is 1080p) makes some vendors' Codec2/V4L2 decoders
+ * fail `start()` outright ("failed to set format on port:IN") — a black screen with
+ * working audio. A stream-resolution change (rotation) rebuilds the codec.
+ *
+ * Real-time: if the input queue backs up we drop the oldest, and if no input buffer is
+ * free we drop the frame.
  */
-class VideoDecoder(private val width: Int, private val height: Int) {
+class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
 
     private data class Unit(val data: ByteArray, val isConfig: Boolean)
 
@@ -27,9 +34,14 @@ class VideoDecoder(private val width: Int, private val height: Int) {
     private var thread: Thread? = null
 
     private var codec: MediaCodec? = null
-    private var configured = false
     private var ptsIndex = 0L
     @Volatile private var resetRequested = false
+
+    // The SPS/PPS (Annex-B) most recently seen. Kept so we can (re)build the codec after a
+    // surface loss without waiting for the iPhone to resend its config.
+    @Volatile private var lastConfig: ByteArray? = null
+    private var curW = 0
+    private var curH = 0
 
     fun start() {
         if (running) return
@@ -41,7 +53,7 @@ class VideoDecoder(private val width: Int, private val height: Int) {
     fun setSurface(s: Surface?) {
         surface = s
         // Surface gone: tear the codec down (on the decode thread) and reconfigure on the
-        // next config. Flagged rather than reset here so codec ops stay on one thread.
+        // next config/frame. Flagged rather than reset here so codec ops stay on one thread.
         if (s == null) resetRequested = true
     }
 
@@ -91,24 +103,39 @@ class VideoDecoder(private val width: Int, private val height: Int) {
     }
 
     private fun feed(u: Unit) {
-        val c = codec
-        if (c == null) {
-            // Need a config buffer AND a surface before we can configure.
-            if (!u.isConfig) return
-            val s = surface ?: return
-            if (!configure(s)) return
+        if (u.isConfig) {
+            lastConfig = u.data
+            val (w, h) = dimsFor(u.data)
+            val c = codec
+            if (c == null) {
+                val s = surface ?: return
+                configure(s, u.data, w, h)
+            } else if (w != curW || h != curH) {
+                // Stream resolution changed (e.g. rotation) → rebuild for the new size.
+                resetCodec()
+                val s = surface ?: return
+                configure(s, u.data, w, h)
+            }
+            // csd-0 already carries the SPS/PPS — no need to also queue it as a buffer.
+            return
         }
-        val mc = codec ?: return
+
+        var mc = codec
+        if (mc == null) {
+            // No codec yet (first frame after a surface (re)create). Rebuild from the last
+            // SPS/PPS we saw — a P-frame alone can't configure a decoder.
+            val cfg = lastConfig ?: return
+            val s = surface ?: return
+            val (w, h) = dimsFor(cfg)
+            if (!configure(s, cfg, w, h)) return
+            mc = codec ?: return
+        }
         val idx = mc.dequeueInputBuffer(8_000)
         if (idx < 0) return // no free input buffer → drop (real-time)
         val buf = mc.getInputBuffer(idx) ?: return
         buf.clear()
         buf.put(u.data)
-        if (u.isConfig) {
-            mc.queueInputBuffer(idx, 0, u.data.size, 0, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
-        } else {
-            mc.queueInputBuffer(idx, 0, u.data.size, ptsIndex++ * 16_666L, 0)
-        }
+        mc.queueInputBuffer(idx, 0, u.data.size, ptsIndex++ * 16_666L, 0)
     }
 
     private fun drain(info: MediaCodec.BufferInfo) {
@@ -124,34 +151,182 @@ class VideoDecoder(private val width: Int, private val height: Int) {
         }
     }
 
-    private fun configure(s: Surface): Boolean {
+    /** Real coded size from the SPS, or the advertised size clamped to 1080p as a safe
+     *  fallback (an oversized input port is exactly what breaks start() on some decoders). */
+    private fun dimsFor(config: ByteArray): Pair<Int, Int> =
+        parseSpsDimensions(config) ?: (fallbackW.coerceAtMost(1920) to fallbackH.coerceAtMost(1088))
+
+    private fun configure(s: Surface, csd: ByteArray, w: Int, h: Int): Boolean {
         return try {
-            val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
+            val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h)
+            // Hand the SPS/PPS in up front so the codec is fully specified before start().
+            fmt.setByteBuffer("csd-0", ByteBuffer.wrap(csd))
             // Hint low-latency decoding where supported (API 30+); harmless elsewhere.
             fmt.setInteger("low-latency", 1)
             val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             c.configure(fmt, s, null, 0)
             c.start()
             codec = c
-            configured = true
+            curW = w; curH = h
             ptsIndex = 0
-            Log.i(TAG, "MediaCodec configured ${width}x${height} (${c.name})")
+            Log.i(TAG, "MediaCodec configured ${w}x${h} (${c.name})")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "MediaCodec configure failed", e)
+            Log.e(TAG, "MediaCodec configure failed (${w}x${h})", e)
             resetCodec()
             false
         }
     }
 
     private fun resetCodec() {
-        configured = false
         codec?.let {
             try { it.stop() } catch (_: Exception) {}
             try { it.release() } catch (_: Exception) {}
         }
         codec = null
+        curW = 0; curH = 0
     }
 
-    companion object { private const val TAG = "airplay-video" }
+    // --- H.264 SPS resolution parsing ------------------------------------------
+    // Enough of the SPS to recover the coded (cropped) frame size. Standard bit-reader
+    // over the emulation-stripped RBSP; profiles that carry chroma/scaling extensions are
+    // skipped over correctly so the width/height fields land at the right offset.
+
+    private fun parseSpsDimensions(annexb: ByteArray): Pair<Int, Int>? {
+        val sps = findNalPayload(annexb, 7) ?: return null
+        return try { decodeSpsDims(sps) } catch (_: Exception) { null }
+    }
+
+    /** First NAL of [type]'s payload (bytes after the 1-byte NAL header), emulation-stripped. */
+    private fun findNalPayload(data: ByteArray, type: Int): ByteArray? {
+        val n = data.size
+        var i = 0
+        while (i + 2 < n) {
+            val sc = when {
+                data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte() -> 3
+                i + 3 < n && data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                    data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte() -> 4
+                else -> 0
+            }
+            if (sc == 0) { i++; continue }
+            val nalStart = i + sc
+            if (nalStart >= n) break
+            val nalType = data[nalStart].toInt() and 0x1F
+            // Next start code (00 00 01) ends this NAL.
+            var j = nalStart + 1
+            while (j + 2 < n && !(data[j] == 0.toByte() && data[j + 1] == 0.toByte() && data[j + 2] == 1.toByte())) j++
+            val nalEnd = if (j + 2 < n) j else n
+            if (nalType == type) return stripEmulation(data, nalStart + 1, nalEnd)
+            i = nalEnd
+        }
+        return null
+    }
+
+    private fun stripEmulation(data: ByteArray, from: Int, to: Int): ByteArray {
+        val out = ByteArray(to - from)
+        var k = 0
+        var zeros = 0
+        var i = from
+        while (i < to) {
+            val b = data[i]
+            if (zeros >= 2 && b == 3.toByte() && i + 1 < to) {
+                zeros = 0            // drop the emulation-prevention 0x03
+                i++
+                continue
+            }
+            out[k++] = b
+            zeros = if (b == 0.toByte()) zeros + 1 else 0
+            i++
+        }
+        return out.copyOf(k)
+    }
+
+    private class BitReader(private val d: ByteArray) {
+        private var bytePos = 0
+        private var bitPos = 0
+        fun bit(): Int {
+            val v = (d[bytePos].toInt() and 0xFF ushr (7 - bitPos)) and 1
+            if (++bitPos == 8) { bitPos = 0; bytePos++ }
+            return v
+        }
+        fun bits(n: Int): Int { var v = 0; repeat(n) { v = (v shl 1) or bit() }; return v }
+        fun ue(): Int {
+            var zeros = 0
+            while (bit() == 0) zeros++
+            var v = 1
+            repeat(zeros) { v = (v shl 1) or bit() }
+            return v - 1
+        }
+        fun se(): Int { val k = ue(); return if (k and 1 == 1) (k + 1) / 2 else -(k / 2) }
+    }
+
+    private fun decodeSpsDims(rbsp: ByteArray): Pair<Int, Int> {
+        val r = BitReader(rbsp)
+        val profileIdc = r.bits(8)
+        r.bits(8)              // constraint_set flags + reserved
+        r.bits(8)              // level_idc
+        r.ue()                 // seq_parameter_set_id
+        var chromaFormatIdc = 1
+        if (profileIdc in HIGH_PROFILES) {
+            chromaFormatIdc = r.ue()
+            if (chromaFormatIdc == 3) r.bit()   // separate_colour_plane_flag
+            r.ue()             // bit_depth_luma_minus8
+            r.ue()             // bit_depth_chroma_minus8
+            r.bit()            // qpprime_y_zero_transform_bypass_flag
+            if (r.bit() == 1) {                 // seq_scaling_matrix_present_flag
+                val lists = if (chromaFormatIdc != 3) 8 else 12
+                for (idx in 0 until lists) {
+                    if (r.bit() == 1) {         // scaling_list_present_flag
+                        val size = if (idx < 6) 16 else 64
+                        var lastScale = 8; var nextScale = 8
+                        for (j in 0 until size) {
+                            if (nextScale != 0) {
+                                val delta = r.se()
+                                nextScale = (lastScale + delta + 256) % 256
+                            }
+                            if (nextScale != 0) lastScale = nextScale
+                        }
+                    }
+                }
+            }
+        }
+        r.ue()                 // log2_max_frame_num_minus4
+        val picOrderCntType = r.ue()
+        when (picOrderCntType) {
+            0 -> r.ue()        // log2_max_pic_order_cnt_lsb_minus4
+            1 -> {
+                r.bit()        // delta_pic_order_always_zero_flag
+                r.se()         // offset_for_non_ref_pic
+                r.se()         // offset_for_top_to_bottom_field
+                repeat(r.ue()) { r.se() } // offset_for_ref_frame[]
+            }
+        }
+        r.ue()                 // max_num_ref_frames
+        r.bit()                // gaps_in_frame_num_value_allowed_flag
+        val picWidthInMbs = r.ue() + 1
+        val picHeightInMapUnits = r.ue() + 1
+        val frameMbsOnly = r.bit()
+        if (frameMbsOnly == 0) r.bit() // mb_adaptive_frame_field_flag
+        r.bit()                // direct_8x8_inference_flag
+        var cropL = 0; var cropR = 0; var cropT = 0; var cropB = 0
+        if (r.bit() == 1) {    // frame_cropping_flag
+            cropL = r.ue(); cropR = r.ue(); cropT = r.ue(); cropB = r.ue()
+        }
+        var width = picWidthInMbs * 16
+        var height = (2 - frameMbsOnly) * picHeightInMapUnits * 16
+        val subW = if (chromaFormatIdc == 1 || chromaFormatIdc == 2) 2 else 1
+        val subH = if (chromaFormatIdc == 1) 2 else 1
+        val cropUnitX = if (chromaFormatIdc == 0) 1 else subW
+        val cropUnitY = (if (chromaFormatIdc == 0) 1 else subH) * (2 - frameMbsOnly)
+        width -= cropUnitX * (cropL + cropR)
+        height -= cropUnitY * (cropT + cropB)
+        require(width in 16..8192 && height in 16..8192) { "implausible SPS size ${width}x$height" }
+        return width to height
+    }
+
+    companion object {
+        private const val TAG = "airplay-video"
+        private val HIGH_PROFILES =
+            intArrayOf(100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135)
+    }
 }
