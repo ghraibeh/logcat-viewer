@@ -28,6 +28,7 @@ import type {
   IntentResult,
   IosAppListResult,
   IosMirrorState,
+  MlkMirrorState,
   IosProcessListResult,
   LeakDone,
   LogcatState,
@@ -376,6 +377,22 @@ export interface AndroidLabApi {
     getMuted(): Promise<boolean>
     onH264(cb: (chunk: Uint8Array) => void): Unsubscribe
     onState(cb: (state: IosMirrorState) => void): Unsubscribe
+    onFailed(cb: (message: string) => void): Unsubscribe
+  }
+  /** Android→Mac screen mirror RECEIVER. The Mac advertises `_mlkmirror._tcp` over mDNS
+   *  and listens on TCP; the MobileLabKit Mirror Android app casts its screen (+ audio)
+   *  to it. View-only (screen + audio), phone-initiated — same model as the AirPlay
+   *  receiver but for Android → this Mac. */
+  mlkMirror: {
+    /** Start advertising + listening. Resolves with the receiver name the phone will
+     *  see in its Cast list (e.g. "Penguin's MacBook Pro (Mirror)"), or null on failure. */
+    start(): Promise<string | null>
+    /** Stop advertising + close any active stream. */
+    stop(): Promise<boolean>
+    onH264(cb: (chunk: Uint8Array) => void): Unsubscribe
+    /** Raw 48kHz stereo 16-bit interleaved PCM audio from the casting phone. */
+    onPcm(cb: (chunk: Uint8Array) => void): Unsubscribe
+    onState(cb: (state: MlkMirrorState) => void): Unsubscribe
     onFailed(cb: (message: string) => void): Unsubscribe
   }
   /** iOS touch/keyboard forwarding (macOS, go-ios). View-only until the user supplies

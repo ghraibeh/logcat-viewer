@@ -11,6 +11,7 @@ import type {
   Device,
   FlowBatch,
   IosMirrorState,
+  MlkMirrorState,
   LeakDone,
   LogcatState,
   MenuAction,
@@ -230,6 +231,14 @@ const api: AndroidLabApi = {
     onH264: (cb) => subscribe<[Uint8Array]>(IPC.iosMirrorH264, cb),
     onState: (cb) => subscribe<[IosMirrorState]>(IPC.iosMirrorState, cb),
     onFailed: (cb) => subscribe<[string]>(IPC.iosMirrorFailed, cb)
+  },
+  mlkMirror: {
+    start: () => ipcRenderer.invoke(IPC.mlkMirrorStart),
+    stop: () => ipcRenderer.invoke(IPC.mlkMirrorStop),
+    onH264: (cb) => subscribe<[Uint8Array]>(IPC.mlkMirrorH264, cb),
+    onPcm: (cb) => subscribe<[Uint8Array]>(IPC.mlkMirrorPcm, cb),
+    onState: (cb) => subscribe<[MlkMirrorState]>(IPC.mlkMirrorState, cb),
+    onFailed: (cb) => subscribe<[string]>(IPC.mlkMirrorFailed, cb)
   },
   iosInput: {
     getConfig: () => ipcRenderer.invoke(IPC.iosInputGetConfig),

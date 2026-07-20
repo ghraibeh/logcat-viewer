@@ -70,6 +70,15 @@ export const ICON_PATHS = {
       <path d="M12 14l4 5H8z" fill="currentColor" stroke="none" />
     </>
   ),
+  // Receive a screen onto this Mac: a display with a down-arrow entering it (mirror IN),
+  // distinct from AirPlay's up-triangle. Used for the Android-mirror receiver toolbar button.
+  receiveScreen: (
+    <>
+      <rect x="3" y="9" width="18" height="11" rx="1.5" />
+      <path d="M12 2v6" />
+      <path d="M9 5l3 3 3-3" />
+    </>
+  ),
   // Mirror-audio playback on the host (speaker with sound waves / crossed out).
   sound: (
     <>

@@ -109,6 +109,16 @@ export interface IosMirrorState {
   waiting?: boolean
 }
 
+/** State for the Android→Mac mirror receiver (the private _mlkmirror._tcp service).
+ *  `name` is the mDNS name this Mac advertises (e.g. "Penguin's MacBook Pro (Mirror)")
+ *  — shown so the user knows what to pick in the phone's Cast list. `waiting` is true
+ *  until a phone connects and frames arrive. */
+export interface MlkMirrorState {
+  name: string
+  message: string
+  waiting?: boolean
+}
+
 /** Which device the detached mirror window should mirror. The main window pushes
  *  this to the popout on open and whenever the selected device changes, so the
  *  standalone window (Android Studio-style) always tracks the active device. */

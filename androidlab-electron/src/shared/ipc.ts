@@ -191,6 +191,16 @@ export const IPC = {
   iosMirrorState: 'ios-mirror:state', // event: status message
   iosMirrorFailed: 'ios-mirror:failed', // event: feed could not produce frames
 
+  // Android→Mac screen mirror RECEIVER (our private _mlkmirror._tcp service). The Mac
+  // advertises over mDNS + runs a TCP server; the MobileLabKit Mirror Android app casts
+  // to it. Screen (Annex-B H.264) + audio (48kHz stereo 16-bit PCM) stream in over TCP.
+  mlkMirrorStart: 'mlk-mirror:start', // begin advertising + listening; returns the receiver name
+  mlkMirrorStop: 'mlk-mirror:stop', // stop the receiver
+  mlkMirrorH264: 'mlk-mirror:h264', // event: raw Annex-B H.264 bytes (main -> renderer)
+  mlkMirrorPcm: 'mlk-mirror:pcm', // event: raw 48kHz stereo 16-bit PCM audio bytes
+  mlkMirrorState: 'mlk-mirror:state', // event: status (advertising name / connected / ended)
+  mlkMirrorFailed: 'mlk-mirror:failed', // event: could not advertise / listen
+
   // iOS touch/keyboard forwarding (WebDriverAgent/DeviceKit via go-ios)
   iosInputGetConfig: 'iosinput:get-config', // read persisted signing config
   iosInputSetConfig: 'iosinput:set-config', // save signing config (paths + ids, no key material)

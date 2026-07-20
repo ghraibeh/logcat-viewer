@@ -27,6 +27,7 @@ import { NetworkView } from './components/NetworkView'
 import { tabSupported } from '@shared/capabilities'
 import { MirrorDock } from './components/MirrorDock'
 import { IosMirrorDock } from './components/IosMirrorDock'
+import { MlkMirrorDock } from './components/MlkMirrorDock'
 import { NoDeviceView } from './components/NoDeviceView'
 import { StatusBar } from './components/StatusBar'
 import { AboutDialog } from './components/AboutDialog'
@@ -81,6 +82,11 @@ export default function App() {
   const [airplayReceiver, setAirplayReceiver] = useState(false)
   const airplayReceiverRef = useRef(airplayReceiver)
   airplayReceiverRef.current = airplayReceiver
+  // Standalone Android→Mac mirror receiver (our _mlkmirror._tcp service): when on, the
+  // docked mirror shows a phone casting to this Mac. Mutually exclusive with AirPlay.
+  const [mlkReceiver, setMlkReceiver] = useState(false)
+  const mlkReceiverRef = useRef(mlkReceiver)
+  mlkReceiverRef.current = mlkReceiver
   const [mirrorWidth, setMirrorWidth] = useState(360)
   const [secondaryReq, setSecondaryReq] = useState(0)
   const [leakReq, setLeakReq] = useState<{ serial: string; pkg: string } | null>(null)
@@ -389,7 +395,24 @@ export default function App() {
     } else {
       // Taking over the dock from a device mirror popout: close that window first.
       if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
+      setMlkReceiver(false) // mutually exclusive with the Android mirror receiver
       setAirplayReceiver(true)
+      setMirrorMode('docked')
+    }
+  }, [])
+
+  // Toggle the Android→Mac mirror receiver: advertise this Mac over _mlkmirror._tcp so
+  // the MobileLabKit Mirror Android app can cast to it. Takes over the dock (mutually
+  // exclusive with a device mirror / the AirPlay receiver).
+  const toggleMlkReceiver = useCallback(() => {
+    if (mlkReceiverRef.current) {
+      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
+      setMlkReceiver(false)
+      setMirrorMode('closed')
+    } else {
+      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
+      setAirplayReceiver(false)
+      setMlkReceiver(true)
       setMirrorMode('docked')
     }
   }, [])
@@ -456,9 +479,11 @@ export default function App() {
         onAbout={() => setAbout(true)}
         onMirror={toggleMirror}
         onAirplayReceiver={toggleAirplayReceiver}
+        onMlkReceiver={toggleMlkReceiver}
         onIosInput={() => setIosInputOpen(true)}
         mirrorOpen={mirrorMode !== 'closed'}
         airplayReceiverOn={airplayReceiver}
+        mlkReceiverOn={mlkReceiver}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -566,7 +591,14 @@ export default function App() {
         <>
           <div className="mirror-splitter" onMouseDown={onMirrorSplitterDown} />
           <div className="mirror-dock-holder" style={{ width: mirrorWidth, display: 'flex' }}>
-            {airplayReceiver ? (
+            {mlkReceiver ? (
+              <MlkMirrorDock
+                onClose={() => {
+                  setMlkReceiver(false)
+                  setMirrorMode('closed')
+                }}
+              />
+            ) : airplayReceiver ? (
               <IosMirrorDock
                 receiver
                 serial={null}

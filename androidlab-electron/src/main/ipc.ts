@@ -23,6 +23,7 @@ import { captureInspect } from './services/inspector'
 import { MirrorService } from './services/mirror'
 import { IosMirrorService } from './services/iosmirror'
 import { IosAirplayService } from './services/iosairplay'
+import { MlkMirrorService } from './services/mlkmirror'
 import * as iosinput from './services/iosinput'
 import type { IosInputConfig } from '@core/iosinput'
 import { readControlsState, applyControls } from './services/controls'
@@ -64,6 +65,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   let mirrorSvc: MirrorService | null = null
   let iosMirrorSvc: IosMirrorService | null = null
   let iosAirplaySvc: IosAirplayService | null = null
+  let mlkMirrorSvc: MlkMirrorService | null = null
   // One PTY-backed session per renderer shell tab, keyed by the tab's id.
   const shellSessions = new Map<string, ShellSession>()
   let intercept: InterceptService | null = null
@@ -1230,6 +1232,27 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return true
   })
 
+  // Android→Mac screen-mirror receiver (our private _mlkmirror._tcp service). Phone-
+  // initiated like AirPlay, but on its own channels — plus a PCM audio channel that has
+  // no equivalent in the iOS/AirPlay paths (those play audio natively in their helpers).
+  const ensureMlkMirror = (): MlkMirrorService => {
+    if (!mlkMirrorSvc) {
+      mlkMirrorSvc = new MlkMirrorService({
+        onH264: (chunk) => broadcast(IPC.mlkMirrorH264, chunk),
+        onPcm: (chunk) => broadcast(IPC.mlkMirrorPcm, chunk),
+        onState: (state) => broadcast(IPC.mlkMirrorState, state),
+        onFailed: (message) => broadcast(IPC.mlkMirrorFailed, message)
+      })
+    }
+    return mlkMirrorSvc
+  }
+
+  ipcMain.handle(IPC.mlkMirrorStart, () => ensureMlkMirror().start())
+  ipcMain.handle(IPC.mlkMirrorStop, () => {
+    mlkMirrorSvc?.stop()
+    return true
+  })
+
   // One mute preference, applied to whichever feed is live (USB plays the device
   // audio on this Mac; AirPlay plays the decoded AAC). Setting both keeps them in
   // lockstep so toggling the feed path doesn't surprise the user with sound state.
@@ -1458,6 +1481,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     mirrorSvc?.shutdown()
     iosMirrorSvc?.shutdown()
     iosAirplaySvc?.shutdown()
+    mlkMirrorSvc?.shutdown()
     iosinput.shutdown()
     intercept?.shutdown()
     iosDb?.shutdown()
