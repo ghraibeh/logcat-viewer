@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Touch-injection ONLY: canPerformGestures lets dispatchGesture() work. We consume NO
+     accessibility events, so request none — a typeAllMask service makes the whole system
+     generate + dispatch every UI event to us, which steals CPU from the capture/encode
+     pipeline and adds mirror latency. eventTypes is also zeroed programmatically on connect. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canPerformGestures="true"
+    android:notificationTimeout="1000"
+    android:description="@string/a11y_desc" />

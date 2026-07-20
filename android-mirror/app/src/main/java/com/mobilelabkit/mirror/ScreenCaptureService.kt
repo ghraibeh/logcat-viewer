@@ -16,6 +16,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import java.io.BufferedOutputStream
+import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -38,6 +39,7 @@ class ScreenCaptureService : Service() {
     private var socket: Socket? = null
     private var out: DataOutputStream? = null
     private var writer: Thread? = null
+    private var controlReader: Thread? = null
     @Volatile private var running = false
     private var withAudio = false
     private var muteWhileCasting = true
@@ -74,6 +76,8 @@ class ScreenCaptureService : Service() {
         val port = intent?.getIntExtra(EXTRA_PORT, 0) ?: 0
         val width = intent?.getIntExtra(EXTRA_WIDTH, 0) ?: 0
         val height = intent?.getIntExtra(EXTRA_HEIGHT, 0) ?: 0
+        val realW = intent?.getIntExtra(EXTRA_REAL_WIDTH, width) ?: width
+        val realH = intent?.getIntExtra(EXTRA_REAL_HEIGHT, height) ?: height
         val dpi = intent?.getIntExtra(EXTRA_DPI, 320) ?: 320
         val bitRate = intent?.getIntExtra(EXTRA_BITRATE, 6_000_000) ?: 6_000_000
         val target = intent?.getStringExtra(EXTRA_TARGET_NAME) ?: host ?: "receiver"
@@ -95,13 +99,13 @@ class ScreenCaptureService : Service() {
         running = true
 
         // Socket + encoder off the main thread (connect() blocks).
-        Thread({ setupStream(proj, host, port, width, height, dpi, bitRate) }, "mirror-setup").start()
+        Thread({ setupStream(proj, host, port, width, height, realW, realH, dpi, bitRate) }, "mirror-setup").start()
         return START_NOT_STICKY
     }
 
     private fun setupStream(
         proj: MediaProjection, host: String, port: Int,
-        width: Int, height: Int, dpi: Int, bitRate: Int,
+        width: Int, height: Int, realW: Int, realH: Int, dpi: Int, bitRate: Int,
     ) {
         try {
             val s = Socket()
@@ -114,9 +118,11 @@ class ScreenCaptureService : Service() {
             socket = s
             val dout = DataOutputStream(BufferedOutputStream(s.getOutputStream(), 1 shl 16))
             out = dout
-            MirrorProtocol.writeHeader(dout, width, height)
+            MirrorProtocol.writeHeader(dout, width, height, realW, realH)
 
             writer = Thread({ writeLoop(dout) }, "mirror-write").also { it.start() }
+            // Reverse channel: live touches from the receiver → inject on this device.
+            controlReader = Thread({ controlReadLoop(s) }, "mirror-control-rx").also { it.start() }
 
             encoder = ScreenEncoder(
                 projection = proj, width = width, height = height, dpi = dpi, bitRate = bitRate,
@@ -140,6 +146,20 @@ class ScreenCaptureService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "stream setup failed", e)
             teardown("Couldn't connect to $host:$port — ${e.message}")
+        }
+    }
+
+    /** Reads live touch events from the receiver and injects them via the accessibility
+     *  service (null if the user hasn't enabled it → touches ignored). */
+    private fun controlReadLoop(s: Socket) {
+        try {
+            val cin = DataInputStream(s.getInputStream())
+            while (running && !s.isClosed) {
+                val t = MirrorProtocol.readTouch(cin)
+                MirrorAccessibilityService.instance?.onTouch(t)
+            }
+        } catch (e: Exception) {
+            Log.i(TAG, "control reader ended: ${e.message}")
         }
     }
 
@@ -232,6 +252,7 @@ class ScreenCaptureService : Service() {
         running = false
         errorOrNull?.let { Log.w(TAG, "teardown: $it") }
         writer?.interrupt(); writer = null
+        controlReader?.interrupt(); controlReader = null
         audioCapturer?.stop(); audioCapturer = null
         restoreVolume()
         encoder?.stop(); encoder = null
@@ -273,6 +294,8 @@ class ScreenCaptureService : Service() {
         const val EXTRA_PORT = "port"
         const val EXTRA_WIDTH = "width"
         const val EXTRA_HEIGHT = "height"
+        const val EXTRA_REAL_WIDTH = "realWidth"
+        const val EXTRA_REAL_HEIGHT = "realHeight"
         const val EXTRA_DPI = "dpi"
         const val EXTRA_BITRATE = "bitrate"
         const val EXTRA_TARGET_NAME = "target"

@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">MobileLabKit Mirror</string>
+    <string name="a11y_desc">Lets a phone that is mirroring this screen send taps and swipes back to control this device. Only active while you are casting.</string>
 </resources>

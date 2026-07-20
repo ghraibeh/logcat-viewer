@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.TypedValue
 import android.view.Gravity
@@ -36,6 +37,8 @@ class SenderActivity : Activity() {
 
     private lateinit var listContainer: LinearLayout
     private lateinit var emptyLabel: TextView
+    private var a11yCheck: CheckBox? = null
+    private var suppressA11yListener = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,6 +58,27 @@ class SenderActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (!casting) startBrowsing()
+        syncA11yCheck() // reflect real state after returning from accessibility settings
+    }
+
+    // --- touch-control (accessibility) option ------------------------------------------
+    private fun accessibilityComponent() = "$packageName/$packageName.MirrorAccessibilityService"
+
+    private fun isAccessibilityEnabled(): Boolean {
+        val enabled = Settings.Secure.getString(
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ).orEmpty()
+        val target = accessibilityComponent()
+        return enabled.split(':').any { it.equals(target, ignoreCase = true) }
+    }
+
+    /** Push the checkbox to the REAL OS state without firing the user listener. Android won't
+     *  let an app flip an accessibility service itself, so the box mirrors Settings. */
+    private fun syncA11yCheck() {
+        val c = a11yCheck ?: return
+        suppressA11yListener = true
+        c.isChecked = isAccessibilityEnabled()
+        suppressA11yListener = false
     }
 
     override fun onPause() {
@@ -83,6 +107,27 @@ class SenderActivity : Activity() {
             setOnCheckedChangeListener { _, checked -> muteWhileCasting = checked }
         }
         root.addView(muteToggle)
+
+        a11yCheck = CheckBox(this).apply {
+            text = "Enable touch control (let the receiver tap this phone)"
+            isAllCaps = false
+            setTextColor(Color.parseColor("#C7D3DE"))
+            textSize = 14f
+            buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E88E5"))
+            setPadding(dp(4), dp(8), dp(4), dp(8))
+            setOnCheckedChangeListener { _, wantOn ->
+                if (suppressA11yListener) return@setOnCheckedChangeListener
+                // We can't flip the OS accessibility toggle ourselves — send the user to the
+                // one switch in Settings. onResume re-syncs the box to the real state.
+                if (wantOn != isAccessibilityEnabled()) {
+                    toast(if (wantOn) "Turn ON “MobileLabKit Mirror” to allow remote taps"
+                          else "Turn OFF “MobileLabKit Mirror” to stop remote taps")
+                    runCatching { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                }
+            }
+        }
+        root.addView(a11yCheck)
+        syncA11yCheck()
 
         emptyLabel = subtitle("Searching for receivers…").apply { setPadding(0, dp(16), 0, 0) }
         listContainer = column()
@@ -167,6 +212,8 @@ class SenderActivity : Activity() {
             putExtra(ScreenCaptureService.EXTRA_PORT, target.port)
             putExtra(ScreenCaptureService.EXTRA_WIDTH, cap.w)
             putExtra(ScreenCaptureService.EXTRA_HEIGHT, cap.h)
+            putExtra(ScreenCaptureService.EXTRA_REAL_WIDTH, cap.realW)
+            putExtra(ScreenCaptureService.EXTRA_REAL_HEIGHT, cap.realH)
             putExtra(ScreenCaptureService.EXTRA_DPI, cap.dpi)
             putExtra(ScreenCaptureService.EXTRA_BITRATE, cap.bitRate)
             putExtra(ScreenCaptureService.EXTRA_TARGET_NAME, target.name)
@@ -213,22 +260,23 @@ class SenderActivity : Activity() {
     }
 
     // --- capture sizing ----------------------------------------------------------------
-    private data class Cap(val w: Int, val h: Int, val dpi: Int, val bitRate: Int)
+    private data class Cap(
+        val w: Int, val h: Int, val dpi: Int, val bitRate: Int,
+        val realW: Int, val realH: Int,   // true display pixels — the dispatchGesture space
+    )
 
-    /** Real screen size, scaled so the long edge ≤ MAX_EDGE, dimensions rounded even. */
+    /** Real screen size, scaled so the long edge ≤ MAX_EDGE, dimensions rounded even. Uses the
+     *  REAL display metrics (full physical resolution incl. system-bar areas) — that is exactly
+     *  the coordinate space MediaProjection captures and AccessibilityService.dispatchGesture
+     *  injects into, so touch mapping lands accurately. */
     private fun computeCapture(): Cap {
-        var w: Int
-        var h: Int
-        val dpi: Int
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val b = windowManager.currentWindowMetrics.bounds
-            w = b.width(); h = b.height()
-            dpi = resources.configuration.densityDpi
-        } else {
-            val dm = DisplayMetrics()
-            @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(dm)
-            w = dm.widthPixels; h = dm.heightPixels; dpi = dm.densityDpi
-        }
+        val dm = DisplayMetrics()
+        @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(dm)
+        val realW = dm.widthPixels
+        val realH = dm.heightPixels
+        val dpi = dm.densityDpi
+        var w = realW
+        var h = realH
         val longEdge = maxOf(w, h)
         if (longEdge > MAX_EDGE) {
             val scale = MAX_EDGE.toFloat() / longEdge
@@ -237,7 +285,7 @@ class SenderActivity : Activity() {
         }
         w = even(w); h = even(h)
         val bitRate = (w.toLong() * h * FPS * BPP).toInt().coerceIn(1_500_000, 4_000_000)
-        return Cap(w, h, dpi, bitRate)
+        return Cap(w, h, dpi, bitRate, realW, realH)
     }
 
     private fun even(v: Int) = (v / 2 * 2).coerceAtLeast(2)

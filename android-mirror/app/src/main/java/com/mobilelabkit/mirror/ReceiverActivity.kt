@@ -17,12 +17,16 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
 import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.SocketException
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
 /**
  * Receiver role: advertise `_mlkmirror._tcp`, accept one sender at a time, and decode the
@@ -45,6 +49,14 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var running = false
     private var serverSocket: ServerSocket? = null
     private var serverThread: Thread? = null
+
+    // Reverse control channel: live touches captured here → sender's real screen coords → socket.
+    @Volatile private var senderRealW = 0
+    @Volatile private var senderRealH = 0
+    @Volatile private var controlConnected = false
+    private val controlQueue = LinkedBlockingQueue<MirrorProtocol.Touch>(256)
+    private var controlWriter: Thread? = null
+    private var lastTouchMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,6 +83,10 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             )
         )
         setContentView(root)
+
+        // Capture touches on the mirror and stream them live to the sender (if it has touch
+        // control enabled). Consume events (return true) so we track the whole gesture.
+        surfaceView.setOnTouchListener { v, e -> handleTouch(v, e); true }
 
         decoder = VideoDecoder(1280, 720).also { it.start() }
         acquireWifi()
@@ -129,7 +145,10 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
                 socket.tcpNoDelay = true
                 val din = DataInputStream(BufferedInputStream(socket.inputStream, 1 shl 16))
                 val header = MirrorProtocol.readHeader(din)
-                Log.i(TAG, "stream header ${header.width}x${header.height}")
+                Log.i(TAG, "stream header ${header.width}x${header.height} (real ${header.realWidth}x${header.realHeight})")
+                senderRealW = header.realWidth
+                senderRealH = header.realHeight
+                startControlWriter(socket)
                 while (running && !socket.isClosed) {
                     val frame = MirrorProtocol.readUnit(din)
                     if (frame.isAudio) audio.write(frame.data)
@@ -140,6 +159,8 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             } catch (e: Exception) {
                 Log.w(TAG, "stream error: ${e.message}")
             } finally {
+                stopControlWriter()
+                senderRealW = 0; senderRealH = 0
                 runCatching { socket.close() }
                 decoder?.onDisconnected()
                 audio.stop()
@@ -147,6 +168,65 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             }
         }
         runCatching { ss.close() }
+    }
+
+    // --- reverse control channel (live touch → sender) ---------------------------------
+    private fun startControlWriter(socket: java.net.Socket) {
+        controlQueue.clear()
+        controlConnected = true
+        controlWriter = Thread({
+            try {
+                val cout = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
+                while (controlConnected && !socket.isClosed) {
+                    val t = controlQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                    MirrorProtocol.writeTouch(cout, t)
+                }
+            } catch (e: Exception) {
+                Log.i(TAG, "control writer ended: ${e.message}")
+            }
+        }, "mirror-control-tx").also { it.start() }
+    }
+
+    private fun stopControlWriter() {
+        controlConnected = false
+        controlWriter?.interrupt()
+        controlWriter = null
+        controlQueue.clear()
+    }
+
+    /** Map a touch on the mirror to the sender's real screen pixels and stream it live.
+     *  Moves are lightly throttled; each event carries dt (ms since last) so the sender can
+     *  pace the injected stroke to match the real finger. Single finger. */
+    private fun handleTouch(v: View, e: android.view.MotionEvent) {
+        if (!controlConnected || senderRealW == 0 || senderRealH == 0) return
+        val vw = v.width.coerceAtLeast(1)
+        val vh = v.height.coerceAtLeast(1)
+        val sx = (e.x / vw * senderRealW).toInt().coerceIn(0, senderRealW - 1)
+        val sy = (e.y / vh * senderRealH).toInt().coerceIn(0, senderRealH - 1)
+        val now = e.eventTime
+        when (e.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> {
+                lastTouchMs = now
+                send(MirrorProtocol.Touch(MirrorProtocol.TOUCH_DOWN, sx, sy, 0))
+            }
+            android.view.MotionEvent.ACTION_MOVE -> {
+                val dt = (now - lastTouchMs).toInt()
+                if (dt < 12) return          // ~80 Hz cap — plenty for smooth following
+                lastTouchMs = now
+                send(MirrorProtocol.Touch(MirrorProtocol.TOUCH_MOVE, sx, sy, dt))
+            }
+            android.view.MotionEvent.ACTION_UP -> {
+                val dt = (now - lastTouchMs).toInt().coerceAtLeast(1)
+                lastTouchMs = now
+                send(MirrorProtocol.Touch(MirrorProtocol.TOUCH_UP, sx, sy, dt))
+            }
+            android.view.MotionEvent.ACTION_CANCEL ->
+                send(MirrorProtocol.Touch(MirrorProtocol.TOUCH_CANCEL, sx, sy, 1))
+        }
+    }
+
+    private fun send(t: MirrorProtocol.Touch) {
+        if (!controlQueue.offer(t)) { controlQueue.poll(); controlQueue.offer(t) }
     }
 
     // --- SurfaceHolder.Callback --------------------------------------------------------
@@ -160,6 +240,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     override fun onDestroy() {
         super.onDestroy()
         running = false
+        stopControlWriter()
         advertiser.stop()
         runCatching { serverSocket?.close() }
         serverSocket = null
