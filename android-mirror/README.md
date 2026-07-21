@@ -91,7 +91,18 @@ sockets, AccessibilityService), zero third-party libraries, same ethos as the si
 
 ### 1. Screen mirroring (video)
 Hardware H.264 both ends. Long edge is capped at **960 px** and bitrate at **1.5–4 Mbps**
-(`w·h·30·0.15`, clamped) — deliberately modest to keep latency low on a busy Wi-Fi link.
+(`w·h·30·0.15`, clamped) — deliberately modest to keep latency low on a busy Wi-Fi link. Shared
+sizing rules live in [CaptureSpec.kt](app/src/main/java/com/mobilelabkit/mirror/CaptureSpec.kt).
+
+**Aspect ratio** — the receiver sizes the video to the decoded frame, not a fixed stretch. Three
+modes: **Fit** (letterbox, respects ratio — default) / **Stretch** (fill) / **Zoom** (crop). Cycle
+with the remote's OK button (or a key on a phone); the choice is persisted.
+
+**Auto-rotation** — when the sender's screen flips portrait↔landscape the sender rebuilds its
+encoder + VirtualDisplay at the swapped dimensions (orientation read from `Display.rotation`, which
+— unlike `getRealMetrics()` — reliably reflects the flip). The receiver's decoder is SPS-driven, so
+it reconfigures to the new size and the on-screen container re-fits; a `KIND_META` message keeps
+touch mapping correct. No fixed-orientation-per-session limitation anymore.
 
 ### 2. Audio forwarding
 System playback mix only (no mic). **Audio plays on BOTH devices by default** — `AudioPlaybackCapture`
@@ -104,6 +115,13 @@ The receiver can drive the sender: touches on the receiver's SurfaceView stream 
 replayed on the sender via `AccessibilityService.dispatchGesture`. Enabled with the **"Enable touch
 control"** checkbox on the sender, which deep-links to Settings (an app can't flip its own
 accessibility switch). View-only if left off — same model as the AirPlay receiver.
+
+### 4. Android TV (receiver on the big screen)
+Cast a phone onto a TV. The app is a proper **leanback** app (`LEANBACK_LAUNCHER` + banner + touch
+declared optional), so it shows a tile on the Android TV home screen. The whole UI is **D-pad
+navigable**: code-built buttons/checkboxes get a visible focus ring + lift ([TvUi.kt](app/src/main/java/com/mobilelabkit/mirror/TvUi.kt)),
+default focus is deterministic (`isFocusedByDefault` — Receive on a TV, Cast on a phone), and the
+remote's **OK** button cycles the aspect mode. Connect over network adb: `adb connect <tv-ip>:5555`.
 
 ## The latency & correctness engineering (hard-won — don't regress)
 
@@ -202,14 +220,17 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk   # on BOTH phones
 4. The source screen + audio appear on the target. If touch control is on, tap/swipe on the target
    to drive the source. Tap **Stop casting** on the source to end.
 
+**On an Android TV** (cast a phone → TV): enable network adb on the TV (Developer options ▸ USB/network
+debugging), `adb connect <tv-ip>:5555`, `adb install -r app-debug.apk`. Open the app from the TV home
+tile, pick **Receive a screen** with the remote, then cast from a phone. Press **OK** on the remote to
+change the aspect mode (Fit / Stretch / Zoom).
+
 ## Known limitations / notes
 
-- **Scaled to fill.** The receiver's SurfaceView stretches to the screen; a portrait source on a
-  differently-shaped target can look stretched. Aspect-fit / letterbox is a follow-up.
 - **Long edge capped at 960 px** (drop-oldest + keyframe-resync backpressure) to stay live and
   low-latency — a quality/latency trade, not a hard limit.
-- **Fixed orientation per session.** The VirtualDisplay is sized once at cast start; rotating the
-  source mid-cast isn't re-negotiated yet.
+- **Rotation shows a brief black blip.** Following a portrait↔landscape flip rebuilds the encoder,
+  so there's a short reconfigure gap — expected, not a stall.
 - **Some apps' audio can't be captured.** Apps that set `allowAudioPlaybackCapture=false` or use
   `FLAG_SECURE` (many DRM/streaming apps) produce silence on the audio path; video still mirrors.
   Audio also needs the mic permission granted (playback capture uses `AudioRecord`); denied → video-only.
@@ -224,4 +245,6 @@ casting to a **Huawei NAM-LX9 (Android 12)** over Wi-Fi — hardware H.264 encod
 (`c2.exynos.h264.encoder`) → decode (`c2.qti.avc.decoder`), screen live, playback audio on both
 ends (`AudioPlaybackCapture` → `AudioTrack`), and remote touch control driving the caster (swipe
 opened the app drawer, tap opened Settings). Latency confirmed good after the queue/keyframe/backpressure
-tuning above.
+tuning above. Also installed + running as a leanback receiver on a **Changhong AI PONT Android TV
+(Android 11)** over network adb — home-screen tile, D-pad navigation, aspect modes, and rotation
+follow-through.
