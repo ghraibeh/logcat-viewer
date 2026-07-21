@@ -2,6 +2,7 @@ package com.mobilelabkit.mirror
 
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -46,16 +47,27 @@ class VideoDecoder(
     private var curW = 0
     private var curH = 0
 
+    // Stall watchdog: if we keep feeding the codec input but it stops rendering output, the
+    // decoder has wedged (lost sync on a dropped frame, or is bound to a surface that got swapped
+    // out by an aspect/rotation resize). Rebuild it — it re-syncs at the sender's next keyframe
+    // (≤1 s). Only fires while input is still arriving, so it never trips on a paused sender.
+    private var lastInputMs = 0L
+    private var lastRenderMs = 0L
+
     fun start() {
         if (running) return
         running = true
         thread = Thread({ loop() }, "mirror-decode").also { it.start() }
     }
 
-    /** The SurfaceView's surface just became available (or was destroyed → null). */
+    /** The SurfaceView's surface became available/destroyed/resized. Any change of surface
+     *  instance (incl. an aspect/rotation resize that recreates it) forces a rebuild so the codec
+     *  never renders into a surface it's no longer bound to. */
     fun setSurface(s: Surface?) {
-        surface = s
-        if (s == null) resetRequested = true
+        if (s !== surface) {
+            surface = s
+            resetRequested = true
+        }
     }
 
     /** Feed one Annex-B unit from the sender. Blocks rather than dropping (see class doc). */
@@ -96,6 +108,14 @@ class VideoDecoder(
                 val u = queue.poll(10, TimeUnit.MILLISECONDS)
                 if (u != null) feed(u)
                 drain(info)
+                // Watchdog: input still flowing but no output for a while → wedged decoder.
+                val now = SystemClock.elapsedRealtime()
+                if (codec != null && lastInputMs != 0L &&
+                    now - lastRenderMs > STALL_MS && now - lastInputMs < STALL_MS
+                ) {
+                    Log.w(TAG, "decoder stalled (${now - lastRenderMs}ms no output, input live) — rebuilding")
+                    resetCodec() // next frame reconfigures from lastConfig; re-syncs at next keyframe
+                }
             } catch (ie: InterruptedException) {
                 break
             } catch (e: Exception) {
@@ -137,6 +157,7 @@ class VideoDecoder(
         buf.clear()
         buf.put(u.data)
         mc.queueInputBuffer(idx, 0, u.data.size, ptsIndex++ * 16_666L, 0)
+        lastInputMs = SystemClock.elapsedRealtime()
     }
 
     private fun drain(info: MediaCodec.BufferInfo) {
@@ -144,7 +165,10 @@ class VideoDecoder(
         while (true) {
             val idx = mc.dequeueOutputBuffer(info, 0)
             when {
-                idx >= 0 -> mc.releaseOutputBuffer(idx, true) // render to the Surface
+                idx >= 0 -> {
+                    mc.releaseOutputBuffer(idx, true) // render to the Surface
+                    lastRenderMs = SystemClock.elapsedRealtime()
+                }
                 idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
                     Log.i(TAG, "output format: ${mc.outputFormat}")
                 else -> break
@@ -166,6 +190,9 @@ class VideoDecoder(
             codec = c
             curW = w; curH = h
             ptsIndex = 0
+            // Fresh codec — arm the watchdog from now so it isn't tripped by startup latency.
+            val now = SystemClock.elapsedRealtime()
+            lastRenderMs = now; lastInputMs = 0L
             Log.i(TAG, "MediaCodec configured ${w}x${h} (${c.name})")
             onVideoSize?.invoke(w, h)
             true
@@ -183,6 +210,7 @@ class VideoDecoder(
         }
         codec = null
         curW = 0; curH = 0
+        lastInputMs = 0L // don't let the watchdog re-fire before the rebuilt codec renders
     }
 
     // --- H.264 SPS resolution parsing -------------------------------------------------------
@@ -300,6 +328,7 @@ class VideoDecoder(
 
     companion object {
         private const val TAG = "mirror-video"
+        private const val STALL_MS = 1500L // input flowing but no render this long ⇒ rebuild
         private val HIGH_PROFILES =
             intArrayOf(100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135)
     }
