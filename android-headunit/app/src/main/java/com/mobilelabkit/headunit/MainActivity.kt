@@ -203,6 +203,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun showDisconnectDialog() {
         val dialog = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
         val view = layoutInflater.inflate(R.layout.dialog_disconnect, null)
+        view.findViewById<View>(R.id.scrim).setOnClickListener { dialog.dismiss() }
         view.findViewById<View>(R.id.btnCancel).setOnClickListener { dialog.dismiss() }
         view.findViewById<View>(R.id.btnDisconnect).setOnClickListener { dialog.dismiss(); disconnect() }
         dialog.setContentView(view)
@@ -582,6 +583,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
 
         val dialog = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
+        // Full-screen window (the sheet itself is bottom-anchored via the XML's layout_gravity)
+        // so there's real "outside" area above the sheet to tap-to-dismiss on — a WRAP_CONTENT
+        // window would only cover the sheet's own rect, leaving nothing there to catch the tap.
+        view.findViewById<View>(R.id.scrim).setOnClickListener { if (!firstRun) dialog.dismiss() }
         view.findViewById<View>(R.id.btnCancel).apply {
             visibility = if (firstRun) View.GONE else View.VISIBLE
             setOnClickListener { dialog.dismiss() }
@@ -602,12 +607,28 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.6f)
-            setGravity(Gravity.BOTTOM)
             attributes.windowAnimations = R.style.BottomSheetAnimation
-            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
         }
         dialog.setCancelable(!firstRun)
-        dialog.setCanceledOnTouchOutside(!firstRun)
+        // Cap the sheet to a share of the display height once its natural (wrap_content) size is
+        // known, and shrink just the fields' ScrollView by the overflow — a short/landscape panel
+        // otherwise lets the sheet grow taller than the screen and pushes Cancel/OK off it.
+        val sheet = view.findViewById<View>(R.id.sheet)
+        val scrollFields = view.findViewById<View>(R.id.scrollFields)
+        view.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                view.viewTreeObserver.removeOnPreDrawListener(this)
+                val maxSheetHeight = (resources.displayMetrics.heightPixels * 0.82f).toInt()
+                val overflow = sheet.height - maxSheetHeight
+                if (overflow > 0) {
+                    scrollFields.layoutParams = scrollFields.layoutParams.apply {
+                        height = (scrollFields.height - overflow).coerceAtLeast(0)
+                    }
+                }
+                return true
+            }
+        })
         dialog.show()
     }
 

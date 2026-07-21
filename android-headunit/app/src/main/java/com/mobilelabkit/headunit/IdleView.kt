@@ -1,10 +1,16 @@
 package com.mobilelabkit.headunit
 
+import android.animation.Animator
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.AttributeSet
 import android.view.LayoutInflater
 import android.view.View
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.LinearInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -13,23 +19,26 @@ import android.widget.TextView
 
 /**
  * The head unit's idle / connecting screen — a designed, product-quality surface. Deliberately
- * MINIMAL: brand top-bar, a "you can connect by" hint with two method chips (info only), and a
- * scan-to-connect QR sitting on the background (SoftAP or shared-network — see [setSoftAp]/
- * [setShareIp]). A live status line surfaces only while connecting / on error. Hidden while video
- * streams.
+ * MINIMAL: brand top-bar, a "you can connect by" method list (USB / Wireless / AP WIFI — tap one
+ * to preview it), and a connect area that shows whichever method is selected: the scan-to-connect
+ * QR (AP WIFI — SoftAP or shared-network, see [setSoftAp]/[setShareIp]), an animated USB cable
+ * (USB), or an animated broadcasting router (Wireless). A live status line surfaces only while
+ * connecting / on error. Hidden while video streams.
  *
  * Structure lives in [R.layout.view_idle_portrait] / [R.layout.view_idle_landscape] — inflated
  * (not built programmatically) so the visual design is real XML/drawable resources. This class
  * only holds the runtime behavior an XML layout can't express: which of the two variants is
  * showing (decided from the ACTUAL measured pixel size in [onSizeChanged], since the panel's real
  * density is far higher than the AA "car" density we advertise — a configuration-qualifier-based
- * layout-land/ split would pick the wrong one), the QR bitmap/size, and state-driven visibility.
+ * layout-land/ split would pick the wrong one), the QR bitmap/size, the selected method tab +
+ * its animations, and state-driven visibility.
  */
 class IdleView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
 ) : FrameLayout(context, attrs, defStyleAttr) {
 
     enum class Phase { WAITING, CONNECTING, CONNECTED, ERROR }
+    enum class Method { USB, WIRELESS, AP_WIFI }
 
     var onSettings: (() -> Unit)? = null
 
@@ -39,12 +48,21 @@ class IdleView @JvmOverloads constructor(
     private lateinit var stateCheck: ImageView
     private lateinit var chipUsb: View
     private lateinit var chipWireless: View
+    private lateinit var chipApWifi: View
     private lateinit var connectPanel: View
     private lateinit var wirelessHint: View
     private lateinit var hintText: TextView
     private lateinit var qrImage: ImageView
+    private lateinit var usbAnimArea: View
+    private lateinit var cableTrack: View
+    private lateinit var usbDot: View
+    private lateinit var wirelessAnimArea: View
+    private lateinit var ring1: View
+    private lateinit var ring2: View
+    private lateinit var ring3: View
 
     private var stPhase = Phase.WAITING
+    private var stMethod = Method.AP_WIFI
     private var stDetail: String? = ""
     private var stSoftAp: SoftApHost.Info? = null
     private var stShareIp: String? = null
@@ -56,6 +74,9 @@ class IdleView @JvmOverloads constructor(
     private var qrPx = 0
     private var built = false
     private var builtLandscape: Boolean? = null
+
+    private var usbAnimator: Animator? = null
+    private var ringAnimators: List<Animator> = emptyList()
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
@@ -74,8 +95,14 @@ class IdleView @JvmOverloads constructor(
         }
     }
 
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        stopUsbAnimation(); stopWirelessAnimation()
+    }
+
     // --- construction ------------------------------------------------------------
     private fun build(landscape: Boolean) {
+        if (built) { stopUsbAnimation(); stopWirelessAnimation() }
         removeAllViews()
         val res = if (landscape) R.layout.view_idle_landscape else R.layout.view_idle_portrait
         LayoutInflater.from(context).inflate(res, this, true)
@@ -83,6 +110,10 @@ class IdleView @JvmOverloads constructor(
         findViewById<View>(R.id.btnSettings).setOnClickListener { onSettings?.invoke() }
         chipUsb = findViewById(R.id.chipUsb)
         chipWireless = findViewById(R.id.chipWireless)
+        chipApWifi = findViewById(R.id.chipApWifi)
+        chipUsb.setOnClickListener { selectMethod(Method.USB) }
+        chipWireless.setOnClickListener { selectMethod(Method.WIRELESS) }
+        chipApWifi.setOnClickListener { selectMethod(Method.AP_WIFI) }
         stateRow = findViewById(R.id.stateRow)
         stateProgress = findViewById(R.id.stateProgress)
         stateCheck = findViewById(R.id.stateCheck)
@@ -91,6 +122,13 @@ class IdleView @JvmOverloads constructor(
         wirelessHint = findViewById(R.id.wirelessHint)
         hintText = findViewById(R.id.hintText)
         qrImage = findViewById(R.id.qrImage)
+        usbAnimArea = findViewById(R.id.usbAnimArea)
+        cableTrack = findViewById(R.id.cableTrack)
+        usbDot = findViewById(R.id.usbDot)
+        wirelessAnimArea = findViewById(R.id.wirelessAnimArea)
+        ring1 = findViewById(R.id.ring1)
+        ring2 = findViewById(R.id.ring2)
+        ring3 = findViewById(R.id.ring3)
         qrImage.layoutParams = qrImage.layoutParams.apply {
             width = if (qrPx > 0) qrPx else width; height = if (qrPx > 0) qrPx else height
         }
@@ -107,7 +145,7 @@ class IdleView @JvmOverloads constructor(
 
     fun setSoftAp(info: SoftApHost.Info?) { stSoftAp = info; if (built) applyConnect() }
 
-    /** This device's LAN IP when reachable on a shared Wi-Fi (no SoftAP) — lets the idle screen
+    /** This device's LAN IP when reachable on a shared Wi-Fi (no SoftAP) — lets the AP WIFI tab
      *  show a scan-to-connect QR even outside Host-Wi-Fi mode. Null while not yet known/reachable. */
     fun setShareIp(ip: String?) { stShareIp = ip; if (built) applyConnect() }
 
@@ -117,28 +155,60 @@ class IdleView @JvmOverloads constructor(
     }
 
     private fun applyAll() {
-        applyState(); applyConnect()
+        applyState(); updateChipSelection(); applyConnect()
         chipUsb.visibility = vis(stUsb); chipWireless.visibility = vis(stWireless)
     }
 
-    /** The default idle state is the QR — scan-to-connect, no waiting. The generic "Waiting for a
-     *  phone" card only takes over once a phone has actually triggered a connection attempt
-     *  (CONNECTING), or as a fallback while we have no join info to encode yet (e.g. IP not resolved). */
+    /** Tapping a method chip previews it in the connect area — USB/Wireless/AP WIFI are mutually
+     *  exclusive tabs, not simultaneous info chips. */
+    private fun selectMethod(m: Method) {
+        if (stMethod == m) return
+        stMethod = m
+        updateChipSelection()
+        applyConnect()
+    }
+
+    private fun updateChipSelection() {
+        chipUsb.setBackgroundResource(if (stMethod == Method.USB) R.drawable.bg_method_chip_selected else R.drawable.bg_method_chip)
+        chipWireless.setBackgroundResource(if (stMethod == Method.WIRELESS) R.drawable.bg_method_chip_selected else R.drawable.bg_method_chip)
+        chipApWifi.setBackgroundResource(if (stMethod == Method.AP_WIFI) R.drawable.bg_method_chip_selected else R.drawable.bg_method_chip)
+    }
+
+    /** The connect area shows exactly one of: the QR (AP WIFI), the USB cable animation, the
+     *  Wireless router animation — or, once a phone has actually triggered a connection attempt
+     *  (CONNECTING), the generic "Connecting…" card, overriding whichever tab is selected. */
     private fun applyConnect() {
-        val soft = stSoftAp
-        val ip = soft?.ip ?: stShareIp
-        val showQr = ip != null && stPhase != Phase.CONNECTING
+        if (stPhase == Phase.CONNECTING) {
+            connectPanel.visibility = View.GONE
+            usbAnimArea.visibility = View.GONE
+            wirelessAnimArea.visibility = View.GONE
+            wirelessHint.visibility = View.VISIBLE
+            stopUsbAnimation(); stopWirelessAnimation()
+            hintText.text = "Connecting…"
+            return
+        }
+
+        val ip = stSoftAp?.ip ?: stShareIp
+        val showQr = stMethod == Method.AP_WIFI && ip != null
+        val showFallbackHint = stMethod == Method.AP_WIFI && ip == null
+
         connectPanel.visibility = vis(showQr)
-        wirelessHint.visibility = vis(!showQr)
+        usbAnimArea.visibility = vis(stMethod == Method.USB)
+        wirelessAnimArea.visibility = vis(stMethod == Method.WIRELESS)
+        wirelessHint.visibility = vis(showFallbackHint)
+
+        if (stMethod == Method.USB) startUsbAnimation() else stopUsbAnimation()
+        if (stMethod == Method.WIRELESS) startWirelessAnimation() else stopWirelessAnimation()
+
         if (showQr) {
-            val uri = QrGen.joinUri(soft?.ssid, soft?.passphrase, ip!!, 5288)
+            val uri = QrGen.joinUri(stSoftAp?.ssid, stSoftAp?.passphrase, ip!!, 5288)
             if (uri != qrShownFor && qrPx > 0) {
                 QrGen.bitmap(uri, qrPx)?.let { bmp: Bitmap -> qrImage.setImageBitmap(bmp); qrShownFor = uri }
             }
         } else {
             qrShownFor = null
-            hintText.text = if (ip != null) "Connecting…" else "Waiting for a phone"
         }
+        if (showFallbackHint) hintText.text = "Waiting for a phone"
     }
 
     private fun applyState() {
@@ -150,6 +220,65 @@ class IdleView @JvmOverloads constructor(
         stateRow.visibility = vis(detail != null)
         stateProgress.visibility = vis(stPhase == Phase.CONNECTING)
         stateCheck.visibility = vis(stPhase == Phase.CONNECTED)
+    }
+
+    // --- tab animations ----------------------------------------------------------
+    /** A dot slides back and forth along the cable track between the two device boxes, suggesting
+     *  a live USB connection. Waits for the track to be measured (post) since its width isn't
+     *  known until the first layout pass. */
+    private fun startUsbAnimation() {
+        if (usbAnimator != null) return
+        val track = cableTrack; val dot = usbDot
+        fun launch() {
+            val range = (track.width - dot.width).coerceAtLeast(0).toFloat()
+            if (range <= 0f) { track.post { if (usbAnimArea.visibility == View.VISIBLE) launch() }; return }
+            usbAnimator = ObjectAnimator.ofFloat(dot, View.TRANSLATION_X, 0f, range).apply {
+                duration = 900
+                repeatMode = ValueAnimator.REVERSE
+                repeatCount = ValueAnimator.INFINITE
+                interpolator = AccelerateDecelerateInterpolator()
+                start()
+            }
+        }
+        if (track.width > 0) launch() else track.post { launch() }
+    }
+
+    private fun stopUsbAnimation() {
+        usbAnimator?.cancel(); usbAnimator = null
+        usbDot.translationX = 0f
+    }
+
+    /** Three concentric rings pulse outward from the router badge in a staggered loop, like a
+     *  broadcasting Wi-Fi signal. */
+    private fun startWirelessAnimation() {
+        if (ringAnimators.isNotEmpty()) return
+        ringAnimators = listOf(ring1 to 0L, ring2 to 600L, ring3 to 1200L).map { (ring, delay) ->
+            ring.scaleX = 1f; ring.scaleY = 1f; ring.alpha = 0.9f
+            val sx = ObjectAnimator.ofFloat(ring, View.SCALE_X, 1f, 2.2f).apply {
+                repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.RESTART
+            }
+            val sy = ObjectAnimator.ofFloat(ring, View.SCALE_Y, 1f, 2.2f).apply {
+                repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.RESTART
+            }
+            val a = ObjectAnimator.ofFloat(ring, View.ALPHA, 0.9f, 0f).apply {
+                repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.RESTART
+            }
+            AnimatorSet().apply {
+                playTogether(sx, sy, a)
+                duration = 1800
+                startDelay = delay
+                interpolator = LinearInterpolator()
+                start()
+            }
+        }
+    }
+
+    private fun stopWirelessAnimation() {
+        ringAnimators.forEach { it.cancel() }
+        ringAnimators = emptyList()
+        for (ring in listOf(ring1, ring2, ring3)) if (::ring1.isInitialized) {
+            ring.scaleX = 1f; ring.scaleY = 1f; ring.alpha = 0.9f
+        }
     }
 
     private fun vis(on: Boolean) = if (on) View.VISIBLE else View.GONE

@@ -30,4 +30,6 @@
     <color name="hu_btn_outline_ripple">#1AFFFFFF</color>
     <color name="hu_btn_filled_ripple">#33000000</color>
     <color name="hu_handle">#40FFFFFF</color>
+    <color name="hu_green_28">#2834D399</color>
+    <color name="hu_green_3a">#3A34D399</color>
 </resources>

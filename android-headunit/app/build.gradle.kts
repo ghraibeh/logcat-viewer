@@ -40,4 +40,7 @@ dependencies {
     implementation("com.google.protobuf:protobuf-java:3.25.3")
     // QR generation only (no camera) for the SoftAP "Host Wi-Fi" join code shown on screen.
     implementation("com.google.zxing:core:3.5.3")
+    // ConstraintLayout for the idle screen's root layouts (view_idle_portrait/landscape.xml) —
+    // the one androidx dependency in this otherwise-platform-only app, added on request.
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
 }
