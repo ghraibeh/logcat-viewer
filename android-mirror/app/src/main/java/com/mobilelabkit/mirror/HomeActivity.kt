@@ -30,6 +30,7 @@ class HomeActivity : Activity() {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
             )
+            allowFocusOverflow() // let the D-pad focus ring draw past the buttons' edges
         }
 
         root.addView(TextView(this).apply {
@@ -45,26 +46,36 @@ class HomeActivity : Activity() {
             setPadding(0, 0, 0, dp(40))
         })
 
-        root.addView(bigButton("Cast this screen", "#1E88E5") {
+        val castBtn = bigButton("Cast this screen", "#1E88E5") {
             startActivity(Intent(this, SenderActivity::class.java))
-        })
-        root.addView(bigButton("Receive a screen", "#2E7D32") {
+        }
+        val receiveBtn = bigButton("Receive a screen", "#2E7D32") {
             startActivity(Intent(this, ReceiverActivity::class.java))
-        })
+        }
+        root.addView(castBtn)
+        root.addView(receiveBtn)
 
         setContentView(root)
+
+        // Give the remote a deterministic starting point. On a TV the common role is receiver
+        // (cast a phone *to* the TV), so land focus there; on a phone, on "Cast".
+        // `focusedByDefault` (API 26+) is resolved by the framework when the window gains focus —
+        // unlike a posted requestFocus(), it doesn't race the framework's own initial-focus pick.
+        val initialFocus = if (TvUi.isTelevision(this)) receiveBtn else castBtn
+        initialFocus.isFocusedByDefault = true
+        initialFocus.post { initialFocus.requestFocus() } // belt-and-suspenders after layout
     }
 
     private fun bigButton(label: String, color: String, onClick: () -> Unit) = Button(this).apply {
         text = label
         isAllCaps = false
         setTextColor(Color.WHITE)
-        setBackgroundColor(Color.parseColor(color))
         textSize = 19f
         setPadding(dp(24), dp(22), dp(24), dp(22))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(14) }
+        tvFocusable(Color.parseColor(color)) // flat fill + a visible D-pad focus ring
         setOnClickListener { onClick() }
     }
 

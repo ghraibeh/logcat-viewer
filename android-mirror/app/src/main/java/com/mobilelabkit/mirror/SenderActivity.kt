@@ -103,7 +103,8 @@ class SenderActivity : Activity() {
             textSize = 14f
             isChecked = muteWhileCasting
             buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E88E5"))
-            setPadding(dp(4), dp(20), dp(4), dp(8))
+            setPadding(dp(12), dp(16), dp(12), dp(12))
+            tvFocusable(Color.TRANSPARENT) // focus ring only — no solid fill behind the checkbox
             setOnCheckedChangeListener { _, checked -> muteWhileCasting = checked }
         }
         root.addView(muteToggle)
@@ -114,7 +115,8 @@ class SenderActivity : Activity() {
             setTextColor(Color.parseColor("#C7D3DE"))
             textSize = 14f
             buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E88E5"))
-            setPadding(dp(4), dp(8), dp(4), dp(8))
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            tvFocusable(Color.TRANSPARENT)
             setOnCheckedChangeListener { _, wantOn ->
                 if (suppressA11yListener) return@setOnCheckedChangeListener
                 // We can't flip the OS accessibility toggle ourselves — send the user to the
@@ -161,16 +163,27 @@ class SenderActivity : Activity() {
                 text = r.name
                 isAllCaps = false
                 setTextColor(Color.WHITE)
-                setBackgroundColor(Color.parseColor("#1B2733"))
                 textSize = 17f
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
                 setPadding(dp(20), dp(18), dp(20), dp(18))
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { topMargin = dp(10) }
+                tvFocusable(Color.parseColor("#1B2733")) // D-pad focus ring for the remote
                 setOnClickListener { pick(r) }
             }
             listContainer.addView(b)
+        }
+        // Land the remote on the first receiver as soon as one appears, unless the user is already
+        // navigating the options above.
+        if (receivers.isNotEmpty() && listContainer.childCount > 0) {
+            val focusInList = (0 until listContainer.childCount)
+                .any { listContainer.getChildAt(it).hasFocus() }
+            val optionsFocused = a11yCheck?.hasFocus() == true
+            if (!focusInList && !optionsFocused) {
+                val first = listContainer.getChildAt(0)
+                first.post { first.requestFocus() } // after layout — see HomeActivity
+            }
         }
     }
 
@@ -237,20 +250,22 @@ class SenderActivity : Activity() {
             text = "Stop casting"
             isAllCaps = false
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#7A1F1F"))
             textSize = 18f
             setPadding(dp(24), dp(18), dp(24), dp(18))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(40) }
+            tvFocusable(Color.parseColor("#7A1F1F"))
             setOnClickListener {
                 ScreenCaptureService.stop(this@SenderActivity)
                 showListUi()
                 startBrowsing()
             }
         }
+        stop.isFocusedByDefault = true // deterministic: remote lands on Stop while casting
         root.addView(stop)
         setContentView(root)
+        stop.post { stop.requestFocus() }
     }
 
     override fun onDestroy() {
@@ -274,21 +289,9 @@ class SenderActivity : Activity() {
         @Suppress("DEPRECATION") windowManager.defaultDisplay.getRealMetrics(dm)
         val realW = dm.widthPixels
         val realH = dm.heightPixels
-        val dpi = dm.densityDpi
-        var w = realW
-        var h = realH
-        val longEdge = maxOf(w, h)
-        if (longEdge > MAX_EDGE) {
-            val scale = MAX_EDGE.toFloat() / longEdge
-            w = (w * scale).toInt()
-            h = (h * scale).toInt()
-        }
-        w = even(w); h = even(h)
-        val bitRate = (w.toLong() * h * FPS * BPP).toInt().coerceIn(1_500_000, 4_000_000)
-        return Cap(w, h, dpi, bitRate, realW, realH)
+        val s = CaptureSpec.compute(realW, realH)
+        return Cap(s.w, s.h, dm.densityDpi, s.bitRate, realW, realH)
     }
-
-    private fun even(v: Int) = (v / 2 * 2).coerceAtLeast(2)
 
     // --- tiny view builders ------------------------------------------------------------
     private fun column() = LinearLayout(this).apply {
@@ -297,6 +300,7 @@ class SenderActivity : Activity() {
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         )
+        allowFocusOverflow() // D-pad focus rings can draw past child edges
     }
 
     private fun title(t: String) = TextView(this).apply {
@@ -317,8 +321,5 @@ class SenderActivity : Activity() {
     companion object {
         private const val REQ_PROJECTION = 1001
         private const val REQ_PERMS = 1002
-        private const val MAX_EDGE = 960   // lower long-edge → less bandwidth → lower latency
-        private const val FPS = 30
-        private const val BPP = 0.15
     }
 }

@@ -26,10 +26,15 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
+    <!-- Android TV support: TVs have no touchscreen and aren't required to; declaring these
+         false lets the app install + run on both TVs and phones and marks it leanback-capable. -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.software.leanback" android:required="false" />
 
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
+        android:banner="@drawable/tv_banner"
         android:label="@string/app_name"
         android:hardwareAccelerated="true"
         android:supportsRtl="true"
@@ -44,6 +49,8 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <!-- Shows a tile on the Android TV home screen (leanback launcher). -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
 

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android TV home-screen banner (320x180). Icon-only: a big screen + a phone casting to it,
+     with cast waves — evokes "mirror a phone onto the TV". -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <!-- background -->
+    <path android:fillColor="#0E1723" android:pathData="M0,0 h320 v180 h-320 z" />
+
+    <!-- TV / monitor body -->
+    <path android:fillColor="#1E88E5"
+        android:pathData="M74,42 h130 a10,10 0 0 1 10,10 v64 a10,10 0 0 1 -10,10 h-130 a10,10 0 0 1 -10,-10 v-64 a10,10 0 0 1 10,-10 z" />
+    <!-- TV screen (dark inset) -->
+    <path android:fillColor="#0A1119"
+        android:pathData="M78,50 h122 a6,6 0 0 1 6,6 v56 a6,6 0 0 1 -6,6 h-122 a6,6 0 0 1 -6,-6 v-56 a6,6 0 0 1 6,-6 z" />
+    <!-- TV stand -->
+    <path android:fillColor="#1E88E5" android:pathData="M129,126 h20 v8 h-20 z" />
+    <path android:fillColor="#1E88E5" android:pathData="M119,138 h40 v5 h-40 z" />
+
+    <!-- cast waves on the screen (bottom-left) -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M84,110 m-3,0 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0 z" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="2" android:fillColor="#00000000"
+        android:pathData="M84,104 a6,6 0 0 1 6,6" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="2" android:fillColor="#00000000"
+        android:pathData="M84,98 a12,12 0 0 1 12,12" />
+
+    <!-- phone casting to the TV (overlaps the right edge) -->
+    <path android:fillColor="#2E7D32"
+        android:pathData="M198,64 h26 a10,10 0 0 1 10,10 v66 a10,10 0 0 1 -10,10 h-26 a10,10 0 0 1 -10,-10 v-66 a10,10 0 0 1 10,-10 z" />
+    <path android:fillColor="#0A1119"
+        android:pathData="M200,72 h22 a6,6 0 0 1 6,6 v58 a6,6 0 0 1 -6,6 h-22 a6,6 0 0 1 -6,-6 v-58 a6,6 0 0 1 6,-6 z" />
+</vector>

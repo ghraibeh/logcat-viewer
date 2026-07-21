@@ -35,6 +35,9 @@ object MirrorProtocol {
     const val KIND_VIDEO: Int = 0
     const val KIND_CONFIG: Int = 1
     const val KIND_AUDIO: Int = 2
+    // Geometry update sent mid-stream when the sender's screen rotates (the header's dims are
+    // only the initial ones). Payload = capW capH realW realH (4 big-endian int32 = 16 bytes).
+    const val KIND_META: Int = 3
     const val MAX_UNIT = 8 shl 20 // 8 MB — a single access unit is far smaller
 
     // Fixed audio format both ends agree on (raw PCM, no codec).
@@ -52,6 +55,7 @@ object MirrorProtocol {
     data class Frame(val data: ByteArray, val kind: Int) {
         val isConfig get() = kind == KIND_CONFIG
         val isAudio get() = kind == KIND_AUDIO
+        val isMeta get() = kind == KIND_META
     }
 
     data class Touch(val action: Int, val x: Int, val y: Int, val dtMs: Int)
@@ -95,6 +99,20 @@ object MirrorProtocol {
         val y = din.readInt()
         val dt = din.readInt()
         return Touch(action, x, y, dt)
+    }
+
+    /** Build a KIND_META unit's 16-byte payload (sender screen rotated → new geometry). Sent
+     *  through the same send queue as video/audio (a direct socket write would race the writer). */
+    fun metaPayload(capW: Int, capH: Int, realW: Int, realH: Int): ByteArray {
+        val bb = java.nio.ByteBuffer.allocate(16)
+        bb.putInt(capW); bb.putInt(capH); bb.putInt(realW); bb.putInt(realH)
+        return bb.array()
+    }
+
+    /** Parse a KIND_META unit's payload back into a [Header]. */
+    fun parseMeta(data: ByteArray): Header {
+        val bb = java.nio.ByteBuffer.wrap(data)
+        return Header(bb.int, bb.int, bb.int, bb.int)
     }
 
     fun writeUnit(out: DataOutputStream, data: ByteArray, offset: Int, length: Int, kind: Int) {

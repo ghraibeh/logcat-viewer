@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.display.DisplayManager
 import android.media.AudioManager
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -14,7 +15,10 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.DisplayMetrics
 import android.util.Log
+import android.view.Display
+import android.view.Surface
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -44,6 +48,23 @@ class ScreenCaptureService : Service() {
     private var withAudio = false
     private var muteWhileCasting = true
     private var savedVolume = -1
+
+    // Rotation follow-through: when the phone flips portrait↔landscape we rebuild the encoder +
+    // VirtualDisplay at the new (swapped) dimensions so the stream matches the screen instead of
+    // being letterboxed/stretched inside a fixed frame. cur* hold the live session geometry.
+    private var sessionDpi = 320
+    @Volatile private var curRealW = 0
+    @Volatile private var curRealH = 0
+    @Volatile private var curLandscape = false
+    @Volatile private var restarting = false
+    private var displayManager: DisplayManager? = null
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId == Display.DEFAULT_DISPLAY) maybeRotate()
+        }
+    }
 
     // Small bounded queue keeps latency low (≈ depth ÷ fps). On video overflow we don't drop
     // mid-GOP P-frames (that corrupts H.264 until the next keyframe) — instead we flush the
@@ -124,14 +145,18 @@ class ScreenCaptureService : Service() {
             // Reverse channel: live touches from the receiver → inject on this device.
             controlReader = Thread({ controlReadLoop(s) }, "mirror-control-rx").also { it.start() }
 
+            // Session geometry, so a rotation can recompute + rebuild the encoder.
+            sessionDpi = dpi
+            curRealW = realW; curRealH = realH
+            curLandscape = CaptureSpec.isLandscape(realW, realH)
+
             encoder = ScreenEncoder(
                 projection = proj, width = width, height = height, dpi = dpi, bitRate = bitRate,
-                onUnit = { data, isConfig, isKeyFrame ->
-                    val kind = if (isConfig) MirrorProtocol.KIND_CONFIG else MirrorProtocol.KIND_VIDEO
-                    enqueue(MirrorProtocol.Frame(data, kind), isKeyFrame)
-                },
+                onUnit = ::onEncodedUnit,
                 onError = { msg -> teardown(msg) },
             ).also { it.start() }
+
+            registerRotationListener()
 
             if (withAudio) {
                 audioCapturer = AudioCapturer(
@@ -163,10 +188,70 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    /** Encoder output → framed unit on the send queue. A method (not a lambda) so the rebuilt
+     *  encoder after a rotation can reuse it. */
+    private fun onEncodedUnit(data: ByteArray, isConfig: Boolean, isKeyFrame: Boolean) {
+        val kind = if (isConfig) MirrorProtocol.KIND_CONFIG else MirrorProtocol.KIND_VIDEO
+        enqueue(MirrorProtocol.Frame(data, kind), isKeyFrame)
+    }
+
+    // --- rotation follow-through -------------------------------------------------------
+    private fun registerRotationListener() {
+        displayManager = getSystemService(DisplayManager::class.java)
+        runCatching { displayManager?.registerDisplayListener(displayListener, main) }
+    }
+
+    /** Current display geometry, oriented to the real rotation. `getRealMetrics` alone doesn't
+     *  reliably swap width/height on every device (that was the bug — the encoder never rebuilt,
+     *  so the stream stayed portrait and rotated content was just letterboxed inside it). We take
+     *  orientation from the display's rotation (a handheld sender is natural-portrait) and sort the
+     *  metrics into it, so it's correct whether or not the metrics themselves swapped. */
+    private fun currentGeom(): Triple<Int, Int, Boolean> {
+        val disp = displayManager?.getDisplay(Display.DEFAULT_DISPLAY) ?: return Triple(0, 0, false)
+        val dm = DisplayMetrics()
+        @Suppress("DEPRECATION") disp.getRealMetrics(dm)
+        val landscape = disp.rotation == Surface.ROTATION_90 || disp.rotation == Surface.ROTATION_270
+        val longer = maxOf(dm.widthPixels, dm.heightPixels)
+        val shorter = minOf(dm.widthPixels, dm.heightPixels)
+        return if (landscape) Triple(longer, shorter, true) else Triple(shorter, longer, false)
+    }
+
+    /** Display changed — if the orientation flipped portrait↔landscape, rebuild off-thread. */
+    private fun maybeRotate() {
+        if (!running || restarting || encoder == null) return
+        val (rw, rh, land) = currentGeom()
+        if (rw == 0 || rh == 0 || land == curLandscape) return // only portrait↔landscape matters
+        restarting = true
+        Thread({ rotateTo(rw, rh, land) }, "mirror-rotate").start()
+    }
+
+    private fun rotateTo(rw: Int, rh: Int, land: Boolean) {
+        try {
+            val proj = projection ?: return
+            val size = CaptureSpec.compute(rw, rh)
+            Log.i(TAG, "rotation → rebuild encoder ${size.w}x${size.h} (real ${rw}x$rh, landscape=$land)")
+            // Tell the receiver the new geometry first (keeps touch mapping correct); the fresh
+            // SPS from the rebuilt encoder re-fits the video size on the receiver automatically.
+            enqueue(MirrorProtocol.Frame(MirrorProtocol.metaPayload(size.w, size.h, rw, rh), MirrorProtocol.KIND_META))
+            encoder?.stop()
+            droppingUntilKeyframe = false
+            encoder = ScreenEncoder(
+                projection = proj, width = size.w, height = size.h, dpi = sessionDpi, bitRate = size.bitRate,
+                onUnit = ::onEncodedUnit,
+                onError = { msg -> teardown(msg) },
+            ).also { it.start() }
+            curRealW = rw; curRealH = rh; curLandscape = land
+        } catch (e: Exception) {
+            Log.w(TAG, "rotation rebuild failed: ${e.message}")
+        } finally {
+            restarting = false
+        }
+    }
+
     private fun enqueue(frame: MirrorProtocol.Frame, isKeyFrame: Boolean = false) {
         if (!running) return
-        // Config (SPS/PPS): must never be dropped.
-        if (frame.isConfig) { runCatching { queue.putFirst(frame) }; return }
+        // Config (SPS/PPS) and geometry (META): must never be dropped.
+        if (frame.isConfig || frame.isMeta) { runCatching { queue.putFirst(frame) }; return }
         // While recovering from an overflow, skip video until the fresh keyframe arrives.
         if (droppingUntilKeyframe && frame.kind == MirrorProtocol.KIND_VIDEO && !isKeyFrame) return
         if (isKeyFrame) droppingUntilKeyframe = false
@@ -251,6 +336,8 @@ class ScreenCaptureService : Service() {
         if (!running && projection == null) { stopSelfSafely(); return }
         running = false
         errorOrNull?.let { Log.w(TAG, "teardown: $it") }
+        runCatching { displayManager?.unregisterDisplayListener(displayListener) }
+        displayManager = null
         writer?.interrupt(); writer = null
         controlReader?.interrupt(); controlReader = null
         audioCapturer?.stop(); audioCapturer = null
