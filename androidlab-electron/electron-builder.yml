@@ -34,6 +34,12 @@ extraResources:
   # mirror (video + control) self-contained with no scrcpy install on the host.
   - from: resources/scrcpy-server
     to: scrcpy-server
+  # Android Auto head-unit protocol helper (GPL-3.0, vendor/aa-headunit, staged by
+  # `npm run build:aaheadunit`). Pure Node with zero runtime deps — the main process forks
+  # aa-headunit/electron-helper.js under utilityProcess; assets/ carries the head-unit TLS
+  # credential the main process reads and hands to the helper.
+  - from: resources/aa-headunit
+    to: aa-headunit
   # Native AirPlay screen-mirror receiver (vendored RPiPlay core, GPL-3.0). Built for
   # macOS/Windows/Linux from native/macos/airplay/* via CMake (`npm run
   # build:airplayhelper`); advertises itself over mDNS with no OS Bonjour/Avahi. The
@@ -58,6 +64,10 @@ mac:
   darkModeSupport: true
   minimumSystemVersion: "12.0"
   identity: null
+  # The Android Auto head unit captures the Mac's mic to forward voice to the phone
+  # (Assistant / voice search) — macOS requires this usage string to prompt for access.
+  extendInfo:
+    NSMicrophoneUsageDescription: MobileLabKit forwards your microphone to the connected phone for Android Auto voice and Google Assistant.
   # The USB (CoreMediaIO) iOS-screen capture helper is macOS-only (no Windows/Linux
   # equivalent), so it's bundled only in the mac target. Built via `build:ioshelper`.
   extraResources:

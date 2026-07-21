@@ -1,0 +1,20 @@
+{
+  "name": "aa-headunit",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "description": "Android Auto head-unit protocol helper for AndroidLab (GPLv3, kept at arm's length from the main app — see PROVENANCE.md)",
+  "type": "commonjs",
+  "bin": {
+    "aa-headunit": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/",
+    "cli": "node dist/src/cli.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

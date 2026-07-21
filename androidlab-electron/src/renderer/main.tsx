@@ -19,6 +19,7 @@ import './styles/leak.css'
 import './styles/deviceinfo.css'
 import './styles/iosinput.css'
 import './styles/devicepicker.css'
+import './styles/androidauto.css'
 import { initTheme } from './theme'
 
 // Apply the persisted (or OS-preferred) theme before the first paint so there's

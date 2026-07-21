@@ -27,7 +27,8 @@ export const TAB_SUPPORT: Record<string, Platform[]> = {
   inspector: ['android'],
   controls: ['android'],
   toolbox: ['android'],
-  shell: ['android']
+  shell: ['android'],
+  androidauto: ['android']
 }
 
 export function tabSupported(tabId: string, platform: Platform): boolean {

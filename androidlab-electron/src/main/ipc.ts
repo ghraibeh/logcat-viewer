@@ -24,6 +24,7 @@ import { MirrorService } from './services/mirror'
 import { IosMirrorService } from './services/iosmirror'
 import { IosAirplayService } from './services/iosairplay'
 import { MlkMirrorService } from './services/mlkmirror'
+import { AaHeadUnitService } from './services/aaheadunit'
 import * as iosinput from './services/iosinput'
 import type { IosInputConfig } from '@core/iosinput'
 import { readControlsState, applyControls } from './services/controls'
@@ -66,6 +67,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   let iosMirrorSvc: IosMirrorService | null = null
   let iosAirplaySvc: IosAirplayService | null = null
   let mlkMirrorSvc: MlkMirrorService | null = null
+  let aaSvc: AaHeadUnitService | null = null
   // One PTY-backed session per renderer shell tab, keyed by the tab's id.
   const shellSessions = new Map<string, ShellSession>()
   let intercept: InterceptService | null = null
@@ -1253,6 +1255,44 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return true
   })
 
+  // Android Auto head unit: the Mac runs the AA GAL protocol as a wireless head-unit server
+  // (arm's-length utilityProcess helper) and fires the gearhead wireless-startup broadcast so
+  // the selected phone projects to us. H.264/status stream up; touches go back down.
+  const ensureAa = (): AaHeadUnitService | null => {
+    if (!aaSvc) {
+      const adb = findAdb()
+      if (!adb) return null
+      aaSvc = new AaHeadUnitService(adb, {
+        onH264: (chunk) => broadcast(IPC.aaH264, chunk),
+        onPcm: (channel, rate, channels, chunk) => broadcast(IPC.aaPcm, channel, rate, channels, chunk),
+        onMicOpen: (open) => broadcast(IPC.aaMicOpen, open),
+        onStatus: (message) => broadcast(IPC.aaStatus, message),
+        onStreaming: () => broadcast(IPC.aaStreaming),
+        onEnded: (reason) => broadcast(IPC.aaEnded, reason),
+        onFailed: (message) => broadcast(IPC.aaFailed, message)
+      })
+    }
+    return aaSvc
+  }
+
+  ipcMain.handle(IPC.aaStart, (_e, serial: string) => {
+    const svc = ensureAa()
+    if (!svc) return { ok: false, message: 'adb not found' }
+    return svc.start(serial)
+  })
+  ipcMain.handle(IPC.aaStop, () => {
+    aaSvc?.stop()
+    return true
+  })
+  ipcMain.handle(IPC.aaTouch, (_e, action: number, x: number, y: number) => {
+    aaSvc?.touch(action, x, y)
+    return true
+  })
+  ipcMain.handle(IPC.aaMicData, (_e, bytes: Uint8Array) => {
+    aaSvc?.micData(bytes)
+    return true
+  })
+
   // One mute preference, applied to whichever feed is live (USB plays the device
   // audio on this Mac; AirPlay plays the decoded AAC). Setting both keeps them in
   // lockstep so toggling the feed path doesn't surprise the user with sound state.
@@ -1482,6 +1522,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     iosMirrorSvc?.shutdown()
     iosAirplaySvc?.shutdown()
     mlkMirrorSvc?.shutdown()
+    aaSvc?.shutdown()
     iosinput.shutdown()
     intercept?.shutdown()
     iosDb?.shutdown()

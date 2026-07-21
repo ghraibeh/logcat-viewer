@@ -4,7 +4,7 @@
  */
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { app, BrowserWindow, nativeImage, shell } from 'electron'
+import { app, BrowserWindow, nativeImage, session, shell } from 'electron'
 import { registerIpc } from './ipc'
 import { buildAppMenu } from './menu'
 import { IPC } from '@shared/ipc'
@@ -448,6 +448,17 @@ if (!app.requestSingleInstanceLock()) {
       const img = nativeImage.createFromPath(iconPath)
       if (!img.isEmpty()) app.dock?.setIcon(img)
     }
+
+    // Grant microphone access to our own renderer — the Android Auto head unit captures the
+    // Mac's mic (getUserMedia) and streams it to the phone for Assistant/voice. macOS still
+    // gates this behind its own TCC prompt (NSMicrophoneUsageDescription); this just stops
+    // Chromium from auto-denying the in-page request.
+    session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
+      cb(permission === 'media')
+    })
+    session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
+      return permission === 'media'
+    })
 
     registerIpc(getWindow)
     buildAppMenu(getWindow)

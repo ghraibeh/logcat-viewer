@@ -234,6 +234,20 @@ export const IPC = {
   interceptStatus: 'intercept:status',
   interceptFailed: 'intercept:failed',
 
+  // Android Auto head unit (Android): the Mac is a wireless AA head-unit server; the phone
+  // projects its car UI to us over Wi-Fi (triggered via a hidden gearhead broadcast).
+  aaStart: 'aa:start', // invoke: begin (arg: serial); forks helper + fires the trigger
+  aaStop: 'aa:stop', // invoke: stop projecting
+  aaTouch: 'aa:touch', // invoke: forward a touch (device coords + PointerAction)
+  aaMicData: 'aa:mic-data', // invoke: captured mic PCM (16-bit mono 16kHz) -> phone
+  aaH264: 'aa:h264', // event: raw Annex-B H.264 bytes (main -> renderer)
+  aaPcm: 'aa:pcm', // event: 16-bit PCM audio (channel, rate, channels, bytes)
+  aaMicOpen: 'aa:mic-open', // event: phone opened/closed the mic (renderer starts/stops capture)
+  aaStatus: 'aa:status', // event: status/handshake progress line
+  aaStreaming: 'aa:streaming', // event: video is live
+  aaEnded: 'aa:ended', // event: session ended (reason)
+  aaFailed: 'aa:failed', // event: could not start / trigger
+
   // system helpers
   systemOpenPath: 'system:open-path',
 

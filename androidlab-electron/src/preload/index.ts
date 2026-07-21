@@ -240,6 +240,19 @@ const api: AndroidLabApi = {
     onState: (cb) => subscribe<[MlkMirrorState]>(IPC.mlkMirrorState, cb),
     onFailed: (cb) => subscribe<[string]>(IPC.mlkMirrorFailed, cb)
   },
+  androidAuto: {
+    start: (serial) => ipcRenderer.invoke(IPC.aaStart, serial),
+    stop: () => ipcRenderer.invoke(IPC.aaStop),
+    touch: (action, x, y) => ipcRenderer.invoke(IPC.aaTouch, action, x, y),
+    micData: (bytes) => ipcRenderer.invoke(IPC.aaMicData, bytes),
+    onH264: (cb) => subscribe<[Uint8Array]>(IPC.aaH264, cb),
+    onPcm: (cb) => subscribe<[number, number, number, Uint8Array]>(IPC.aaPcm, cb),
+    onMicOpen: (cb) => subscribe<[boolean]>(IPC.aaMicOpen, cb),
+    onStatus: (cb) => subscribe<[string]>(IPC.aaStatus, cb),
+    onStreaming: (cb) => subscribe<[]>(IPC.aaStreaming, cb),
+    onEnded: (cb) => subscribe<[string]>(IPC.aaEnded, cb),
+    onFailed: (cb) => subscribe<[string]>(IPC.aaFailed, cb)
+  },
   iosInput: {
     getConfig: () => ipcRenderer.invoke(IPC.iosInputGetConfig),
     setConfig: (cfg) => ipcRenderer.invoke(IPC.iosInputSetConfig, cfg),

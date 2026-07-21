@@ -395,6 +395,29 @@ export interface AndroidLabApi {
     onState(cb: (state: MlkMirrorState) => void): Unsubscribe
     onFailed(cb: (message: string) => void): Unsubscribe
   }
+  /** Android Auto head unit (Android). The Mac runs the AA GAL protocol as a wireless
+   *  head-unit server and triggers the selected phone (via a hidden gearhead broadcast) to
+   *  project its car UI to us over Wi-Fi. Interactive: touches forward to the phone.
+   *  Prereqs: phone + Mac on the same Wi-Fi; Android Auto developer mode on. */
+  androidAuto: {
+    /** Start the head-unit server for `serial` and trigger AA to connect. */
+    start(serial: string): Promise<{ ok: boolean; message: string }>
+    /** Stop projecting + kill the helper. */
+    stop(): Promise<boolean>
+    /** Forward a touch (device coordinates; action = AA PointerAction: 0=down,1=up,2=move). */
+    touch(action: number, x: number, y: number): Promise<boolean>
+    /** Feed captured mic PCM (16-bit mono 16kHz) to the phone for Assistant/voice. */
+    micData(bytes: Uint8Array): Promise<boolean>
+    onH264(cb: (chunk: Uint8Array) => void): Unsubscribe
+    /** 16-bit PCM audio for an AA channel (rate/channels per the advertised sink). */
+    onPcm(cb: (channel: number, rate: number, channels: number, chunk: Uint8Array) => void): Unsubscribe
+    /** The phone opened (true) or closed (false) the mic — start/stop local capture. */
+    onMicOpen(cb: (open: boolean) => void): Unsubscribe
+    onStatus(cb: (message: string) => void): Unsubscribe
+    onStreaming(cb: () => void): Unsubscribe
+    onEnded(cb: (reason: string) => void): Unsubscribe
+    onFailed(cb: (message: string) => void): Unsubscribe
+  }
   /** iOS touch/keyboard forwarding (macOS, go-ios). View-only until the user supplies
    *  an App Store Connect signing identity and an on-device agent (WDA/DeviceKit) is
    *  provisioned + installed. Then mouse/keyboard map to `ui tap/swipe/type`. */

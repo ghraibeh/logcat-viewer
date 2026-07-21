@@ -28,6 +28,7 @@ import { tabSupported } from '@shared/capabilities'
 import { MirrorDock } from './components/MirrorDock'
 import { IosMirrorDock } from './components/IosMirrorDock'
 import { MlkMirrorDock } from './components/MlkMirrorDock'
+import { AndroidAutoView } from './components/AndroidAutoView'
 import { NoDeviceView } from './components/NoDeviceView'
 import { StatusBar } from './components/StatusBar'
 import { AboutDialog } from './components/AboutDialog'
@@ -47,7 +48,8 @@ const TABS: TabDef[] = [
   { id: 'inspector', label: 'Inspector' },
   { id: 'controls', label: 'Controls' },
   { id: 'toolbox', label: 'Toolbox' },
-  { id: 'shell', label: 'Shell' }
+  { id: 'shell', label: 'Shell' },
+  { id: 'androidauto', label: 'Android Auto' }
 ]
 
 interface ContextMenuState {
@@ -578,6 +580,8 @@ export default function App() {
         <ToolboxView c={c} />
       ) : tab === 'shell' ? (
         <ShellView c={c} />
+      ) : tab === 'androidauto' ? (
+        <AndroidAutoView c={c} />
       ) : tab === 'network' ? (
         <NetworkView c={c} />
       ) : (
