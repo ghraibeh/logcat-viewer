@@ -87,6 +87,7 @@ class AapTransport(
     private fun readLoop() {
         val buf = ByteArray(AapProto.MAX_FRAME_PAYLOAD + 16)
         var lastRxMs = android.os.SystemClock.elapsedRealtime()
+        var gotData = false
         while (running) {
             val n = try {
                 link.read(buf, READ_TIMEOUT_MS)
@@ -100,13 +101,19 @@ class AapTransport(
                 // No data this interval. When the phone drops ungracefully (leaves Wi-Fi, crashes,
                 // out of range) the socket just keeps timing out with NO EOF, so the old code
                 // looped forever and the receiver froze on the last frame. AA sends control
-                // heartbeats ~1/s, so treat a multi-second silence as a dead link.
+                // heartbeats ~1/s, so treat a multi-second silence as a dead link. Before the FIRST
+                // byte ever arrives the window is much shorter: a client that connects and then
+                // never answers the version request (Android Auto handed a wrong network on hotspot
+                // setups does exactly this) would otherwise hold the receiver busy — and reject the
+                // phone's retry connections — for the full 30s.
                 n == 0 -> {
-                    if (android.os.SystemClock.elapsedRealtime() - lastRxMs > STALL_TIMEOUT_MS) {
-                        if (running) fail("link stalled (no data for ${STALL_TIMEOUT_MS}ms)"); return
+                    val window = if (gotData) STALL_TIMEOUT_MS else HANDSHAKE_STALL_TIMEOUT_MS
+                    if (android.os.SystemClock.elapsedRealtime() - lastRxMs > window) {
+                        if (running) fail("link stalled (no data for ${window}ms)"); return
                     }
                 }
                 else -> {
+                    gotData = true
                     lastRxMs = android.os.SystemClock.elapsedRealtime()
                     rx += buf.copyOf(n)
                     drainFrames()
@@ -195,6 +202,9 @@ class AapTransport(
         // rely on TCP keep-alive (which we also enable) rather than a hair-trigger stall. A real
         // dead peer is usually caught sooner by a write failure or EOF anyway; this is the backstop.
         private const val STALL_TIMEOUT_MS = 30000
+        // Stall window before ANY byte has arrived: the peer connected but never spoke (no version
+        // response). Short so the receiver frees up quickly for the phone's next attempt.
+        private const val HANDSHAKE_STALL_TIMEOUT_MS = 10000
         fun u16be(v: Int) = byteArrayOf((v ushr 8).toByte(), v.toByte())
         fun u32be(v: Int) = byteArrayOf((v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte())
         fun readU16(b: ByteArray, o: Int) = ((b[o].toInt() and 0xff) shl 8) or (b[o + 1].toInt() and 0xff)

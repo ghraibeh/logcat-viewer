@@ -41,6 +41,7 @@ object HeadUnitConfig {
     private const val KEY_ORIENTATION = "orientation"
     private const val KEY_SCALING = "scaling"
     private const val KEY_WIRELESS = "wireless"
+    private const val KEY_SOFTAP = "softap"
     // Car-screen densities (dpi) — AA UI scale. Higher dpi ⇒ AA treats the panel as smaller ⇒
     // LARGER on-screen elements. The phone's real dpi (~480) is far too large; a car-screen 160
     // was too small on a hand-held panel. ~280 is the comfortable middle for touch use.
@@ -75,6 +76,15 @@ object HeadUnitConfig {
 
     fun saveWireless(ctx: Context, on: Boolean) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_WIRELESS, on).apply()
+    }
+
+    /** Host our own Wi-Fi (LocalOnlyHotspot) so no router/hotspot is needed — OFF by default; the
+     *  shared-network wireless + USB paths are unaffected. See [SoftApHost]. */
+    fun softApEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_SOFTAP, false)
+
+    fun saveSoftAp(ctx: Context, on: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_SOFTAP, on).apply()
     }
 
     /** Physical panel size in pixels (ignores current rotation): (longSide, shortSide-agnostic raw w,h). */

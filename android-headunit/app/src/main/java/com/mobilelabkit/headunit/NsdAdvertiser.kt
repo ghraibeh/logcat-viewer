@@ -53,12 +53,21 @@ class NsdAdvertiser(context: Context, private val port: Int, private val display
         private const val TAG = "headunit-nsd"
         const val SERVICE_TYPE = "_mlkheadunit._tcp."
 
-        /** This device's LAN IPv4 (Wi-Fi/Ethernet), for displaying on the waiting screen. */
+        /** This device's LAN IPv4 (Wi-Fi/Ethernet), for displaying on the waiting screen.
+         *  Cellular (rmnet/ccmni) 10.x addresses are site-local too — if one enumerates first the
+         *  screen shows an IP the phone can never reach, so rank Wi-Fi client (wlan), hotspot-AP
+         *  (ap/swlan) and Ethernet interfaces ahead, with anything else only as a last resort. */
         fun localIpv4(): String? {
+            fun rank(name: String) = when {
+                name.startsWith("wlan") || name.startsWith("ap") || name.startsWith("swlan") -> 0
+                name.startsWith("eth") || name.startsWith("usb") -> 1
+                else -> 2
+            }
             return runCatching {
                 Collections.list(NetworkInterface.getNetworkInterfaces())
-                    .asSequence()
                     .filter { it.isUp && !it.isLoopback }
+                    .sortedBy { rank(it.name) }
+                    .asSequence()
                     .flatMap { Collections.list(it.inetAddresses).asSequence() }
                     .filterIsInstance<Inet4Address>()
                     .firstOrNull { !it.isLoopbackAddress && it.isSiteLocalAddress }

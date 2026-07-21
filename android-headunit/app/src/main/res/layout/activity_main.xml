@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootView"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FF000000">
+
+    <SurfaceView
+        android:id="@+id/surfaceView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center" />
+
+    <!-- Opaque layer ON TOP of the SurfaceView: a bottom SurfaceView punches a transparent hole
+         in the window, so the root's black background can't hide the last decoded frame — this
+         can. Visible while waiting/disconnected, hidden once frames flow. -->
+    <View
+        android:id="@+id/cover"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:background="#FF000000" />
+
+    <!-- Designed idle/connecting screen (brand header, state hero, method cards, scan-to-connect
+         QR). Sits on top of the cover while waiting; hidden the moment video streams. -->
+    <com.mobilelabkit.headunit.IdleView
+        android:id="@+id/idle"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+</FrameLayout>

@@ -1,4 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#0B0F14</color>
+
+    <!-- Head-unit dark palette (idle screen + dialogs) -->
+    <color name="hu_bg_top">#FF080D17</color>
+    <color name="hu_bg_bottom">#FF05080F</color>
+    <color name="hu_surface">#FF131A28</color>
+    <color name="hu_surface2">#FF1B2436</color>
+    <color name="hu_stroke">#12FFFFFF</color>
+    <color name="hu_stroke_strong">#1AFFFFFF</color>
+    <color name="hu_accent">#FF4C8DFF</color>
+    <color name="hu_accent2">#FF2DD4E6</color>
+    <color name="hu_green">#FF34D399</color>
+    <color name="hu_amber">#FFF5B23A</color>
+    <color name="hu_red">#FFF87171</color>
+    <color name="hu_text_pri">#FFF4F7FC</color>
+    <color name="hu_text_sec">#FF97A3B6</color>
+    <color name="hu_text_mut">#FF58637A</color>
+
+    <!-- Pre-mixed translucent tints (alpha baked in, since XML shape fill/stroke colors can't
+         take a separate alpha multiplier the way the old runtime withAlpha() helper did). -->
+    <color name="hu_accent_22">#224C8DFF</color>
+    <color name="hu_accent_28">#284C8DFF</color>
+    <color name="hu_accent_3a">#3A4C8DFF</color>
+    <color name="hu_accent2_24">#242DD4E6</color>
+    <color name="hu_accent2_28">#282DD4E6</color>
+    <color name="hu_red_26">#26F87171</color>
+    <color name="hu_btn_outline_stroke">#33FFFFFF</color>
+    <color name="hu_btn_outline_ripple">#1AFFFFFF</color>
+    <color name="hu_btn_filled_ripple">#33000000</color>
+    <color name="hu_handle">#40FFFFFF</color>
 </resources>

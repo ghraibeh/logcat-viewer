@@ -2,7 +2,7 @@ package com.mobilelabkit.headunit
 
 import android.Manifest
 import android.app.Activity
-import android.app.AlertDialog
+import android.app.Dialog
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.util.Rational
@@ -13,6 +13,7 @@ import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
@@ -20,7 +21,6 @@ import android.media.AudioAttributes
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.SurfaceHolder
@@ -29,7 +29,6 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.CheckBox
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.TextView
@@ -48,14 +47,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var rootView: FrameLayout
     private lateinit var surfaceView: SurfaceView
     private lateinit var cover: View
-    private lateinit var status: TextView
-    private lateinit var gear: TextView
+    private lateinit var idle: IdleView
     private lateinit var usb: UsbManager
     private lateinit var videoConfig: HeadUnitConfig.VideoConfig
 
-    private var link: AapLink? = null
+    @Volatile private var link: AapLink? = null
     private var wirelessServer: WirelessServer? = null
     private var nsdAdvertiser: NsdAdvertiser? = null
+    private var softApHost: SoftApHost? = null
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
     private var btBootstrap: BtBootstrap? = null
     private var wifiDirect: WifiDirectHost? = null
@@ -103,27 +102,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         // A head unit stays on and stationary: keep the screen awake so the panel never dozes
         // (which would sleep Wi-Fi and drop the wireless session).
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        rootView = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-        surfaceView = SurfaceView(this).apply { holder.addCallback(this@MainActivity) }
+        setContentView(R.layout.activity_main)
+        rootView = findViewById(R.id.rootView)
+        surfaceView = findViewById<SurfaceView>(R.id.surfaceView).apply { holder.addCallback(this@MainActivity) }
         @Suppress("ClickableViewAccessibility")
         surfaceView.setOnTouchListener { v, e -> onSurfaceTouch(v, e) }
-        rootView.addView(surfaceView, FrameLayout.LayoutParams(MATCH, MATCH, Gravity.CENTER))
-        // Opaque layer ON TOP of the SurfaceView: a bottom SurfaceView punches a transparent hole
-        // in the window, so the root's black background can't hide the last decoded frame — this
-        // can. Visible while waiting/disconnected, hidden once frames flow.
-        cover = View(this).apply { setBackgroundColor(Color.BLACK) }
-        rootView.addView(cover, FrameLayout.LayoutParams(MATCH, MATCH, Gravity.CENTER))
-        status = TextView(this).apply {
-            setTextColor(Color.WHITE); textSize = 18f; gravity = Gravity.CENTER; setPadding(64, 64, 64, 64)
-        }
-        rootView.addView(status, FrameLayout.LayoutParams(MATCH, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
-        gear = TextView(this).apply {
-            text = "⚙"; setTextColor(Color.WHITE); textSize = 26f
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            setOnClickListener { showConfigDialog(firstRun = false) }
-        }
-        rootView.addView(gear, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.END))
-        setContentView(rootView)
+        cover = findViewById(R.id.cover)
+        idle = findViewById<IdleView>(R.id.idle).apply { onSettings = { showConfigDialog(firstRun = false) } }
         rootView.post { layoutSurface() }
 
         showWaiting()
@@ -137,6 +122,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         // (opt-in via ⚙) points the phone here. Harmless when only USB is used.
         startWireless()
         updateWirelessMode()
+        // Optional: host our own Wi-Fi so no router/hotspot is needed. Off by default; does not
+        // affect the USB or shared-network wireless paths.
+        startSoftApIfEnabled()
 
         // First launch: ask portrait vs landscape before touching the phone.
         if (!HeadUnitConfig.isConfigured(this)) showConfigDialog(firstRun = true)
@@ -157,6 +145,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         super.onDestroy(); runCatching { unregisterReceiver(permReceiver) }
         wirelessServer?.stop(); wirelessServer = null
         nsdAdvertiser?.stop(); nsdAdvertiser = null
+        softApHost?.stop(); softApHost = null
         wifiLock?.let { runCatching { if (it.isHeld) it.release() } }; wifiLock = null
         btBootstrap?.stop(); btBootstrap = null; wifiDirect?.stop(); wifiDirect = null
         teardownProtocol(); link?.close(); link = null; decoder?.release(); decoder = null
@@ -189,11 +178,49 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     override fun onPictureInPictureModeChanged(isInPip: Boolean, newConfig: android.content.res.Configuration) {
         super.onPictureInPictureModeChanged(isInPip, newConfig)
         runOnUiThread {
-            // Clean floating video: hide the ⚙ / status; restore chrome when expanded back.
-            gear.visibility = if (isInPip || streaming) View.GONE else View.VISIBLE
+            // Clean floating video: hide the idle chrome in PiP / while streaming; restore otherwise.
+            idle.visibility = if (isInPip || streaming) View.GONE else View.VISIBLE
             if (!isInPip) goImmersive()
         }
         rootView.post { layoutSurface() }
+    }
+
+    /** While Android Auto is streaming, back is a real action (it would otherwise dismiss the app
+     *  mid-projection) — confirm before tearing the link down. Idle/connecting: default behavior. */
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (!streaming) { super.onBackPressed(); return }
+        showDisconnectDialog()
+    }
+
+    /** On-brand confirmation sheet (matches the idle screen's dark palette) — a plain AlertDialog
+     *  would look like a stock Android popup floating over a car-projection UI. Destructive action
+     *  (red, on the right) is never the default focus; Cancel is the safe, easy tap.
+     *  Layout: [R.layout.dialog_disconnect] — fixed 300dp width, same phone-dialog sizing as a
+     *  standard Material AlertDialog (NOT derived from the AA car-density hack: HeadUnitConfig's
+     *  CAR_DENSITY_DPI only tags the video/discovery response sent to the phone; it never touches
+     *  this Activity's own Resources/Configuration). */
+    private fun showDisconnectDialog() {
+        val dialog = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
+        val view = layoutInflater.inflate(R.layout.dialog_disconnect, null)
+        view.findViewById<View>(R.id.btnCancel).setOnClickListener { dialog.dismiss() }
+        view.findViewById<View>(R.id.btnDisconnect).setOnClickListener { dialog.dismiss(); disconnect() }
+        dialog.setContentView(view)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.6f)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+        }
+        dialog.setCancelable(true)
+        dialog.show()
+    }
+
+    /** Tear down the active session (same cleanup as a USB detach) and re-advertise for the next phone. */
+    private fun disconnect() {
+        teardownProtocol(); link?.close(); link = null
+        busy = false; streaming = false
+        nsdAdvertiser?.start()
+        setStatus("Disconnected."); showWaiting()
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) { decoder?.setSurface(holder.surface) }
@@ -251,14 +278,35 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun startWireless() {
         if (wirelessServer?.isRunning == true) return
         wirelessServer = WirelessServer { socketLink ->
-            // A phone connected over TCP. Run the (identical) AA protocol over the socket, unless a
-            // session is already active on USB/another socket.
-            runOnUiThread {
-                if (busy || link != null) { socketLink.close(); return@runOnUiThread }
-                link = socketLink
-                setStatus("Wireless phone connected — starting Android Auto…")
-                busy = true
-                startAaProtocol(socketLink)
+            // Handle the connection RIGHT HERE on the accept thread — do NOT hop to the UI thread
+            // first. Android Auto's wireless setup resets the socket within ~30-40ms if it doesn't
+            // get our version request, and a UI-thread hop (idle-screen animation, GC) can burn most
+            // of that budget before we even send it. startAaProtocol already runs off the UI thread
+            // for USB (the "aoap" worker), so this is the same code path; its few UI touches post
+            // themselves to the UI thread. setStatus() is also main-thread-safe on its own.
+            val current = link
+            when {
+                current == null && !busy -> {
+                    link = socketLink
+                    setStatus("Wireless phone connected — starting Android Auto…")
+                    busy = true
+                    startAaProtocol(socketLink)
+                }
+                // Video already flowing, or the session is USB (incl. the AOAP mode switch,
+                // where busy is set with link still null): leave it alone.
+                streaming || current !is SocketLink -> socketLink.close()
+                else -> {
+                    // The phone connected AGAIN while the wireless handshake is still pending:
+                    // the held socket is a stalled probe (hotspot setups produce these — AA
+                    // connects, then wedges without ever answering the version request). Adopt
+                    // the fresh connection instead of rejecting it, or the retry can never win.
+                    Log.i(TAG, "wireless reconnect during handshake — replacing the stalled link")
+                    teardownProtocol(); current.close()
+                    link = socketLink
+                    setStatus("Wireless phone reconnected — starting Android Auto…")
+                    busy = true; streaming = false
+                    startAaProtocol(socketLink)
+                }
             }
         }.also { it.start() }
 
@@ -267,12 +315,31 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             nsdAdvertiser = NsdAdvertiser(this, 5288, "${Build.MANUFACTURER} ${Build.MODEL}".trim())
                 .also { it.start() }
         }
-        // Hold the Wi-Fi radio in high-perf mode so it doesn't power-save-sleep and drop frames.
+        // Hold the Wi-Fi radio out of power-save so it doesn't sleep between beacons — otherwise
+        // latency spikes to 30–100ms and Android Auto's wireless handshake times out ("version
+        // request never answered"). WIFI_MODE_FULL_HIGH_PERF is DEPRECATED and a NO-OP on Android
+        // 10+, so it left power-save on; WIFI_MODE_FULL_LOW_LATENCY (API 29+) actually disables it
+        // (active while the screen is on + app foreground, which a head unit always is).
         if (wifiLock == null) {
             val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-            wifiLock = wm.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "MobileLabKit:HeadUnit")
-                .also { runCatching { it.acquire() } }
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            else @Suppress("DEPRECATION") android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            wifiLock = wm.createWifiLock(mode, "MobileLabKit:HeadUnit").also { runCatching { it.acquire() } }
         }
+    }
+
+    // --- SoftAP (optional self-hosted Wi-Fi) -----------------------------------
+    /** Bring up our own Wi-Fi via LocalOnlyHotspot if the user enabled it. The TCP:5288 server
+     *  already binds on all interfaces, so it serves the SoftAP subnet with no other change. */
+    private fun startSoftApIfEnabled() {
+        if (!HeadUnitConfig.softApEnabled(this)) { softApHost?.stop(); softApHost = null; return }
+        if (softApHost?.active == true) { if (!streaming) showWaiting(); return }
+        val host = SoftApHost(this).also { softApHost = it }
+        host.start(
+            onReady = { if (!streaming) showWaiting() },
+            onError = { msg -> runOnUiThread { if (!streaming) { showWaiting(); Toast.makeText(this, msg, Toast.LENGTH_LONG).show() } } }
+        )
     }
 
     // --- AA protocol (modern) --------------------------------------------------
@@ -282,9 +349,6 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         nsdAdvertiser?.stop()
         try {
             val crypto = AapCrypto(assets.open("headunit_cert.pem").readBytes(), assets.open("headunit_key.pem").readBytes())
-            val dec = VideoDecoder(videoConfig.width, videoConfig.height).also { it.start() }
-            decoder = dec
-            surfaceView.holder.surface?.let { if (it.isValid) dec.setSurface(it) }
 
             lateinit var tp: AapTransport
             lateinit var sensor: SensorChannel
@@ -320,12 +384,15 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 if (ch == AapProto.CH_VIDEO && !streaming &&
                     (id == com.andrerinas.headunitrevived.aap.protocol.proto.Media.MsgType.MEDIA_MESSAGE_DATA_VALUE ||
                         id == com.andrerinas.headunitrevived.aap.protocol.proto.Media.MsgType.MEDIA_MESSAGE_CODEC_CONFIG_VALUE)
-                ) { streaming = true; runOnUiThread { cover.visibility = View.GONE; status.visibility = View.GONE; gear.visibility = View.GONE } }
+                ) { streaming = true; runOnUiThread { cover.visibility = View.GONE; idle.visibility = View.GONE } }
             }.apply {
                 onError = AapTransport.OnError { m ->
                     // USB has a DETACHED broadcast; a wireless socket only signals via this error,
                     // so fully tear down + free the link so the next connection can start.
                     runOnUiThread {
+                        // A replaced/stale transport (wireless takeover) may still error out after
+                        // a NEW session started — ignore it, or it would tear the new session down.
+                        if (transport !== tp) return@runOnUiThread
                         teardownProtocol(); link?.close(); link = null
                         busy = false; streaming = false
                         // Idle again: re-advertise so the helper's auto-reconnect can find us.
@@ -335,8 +402,22 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 }
             }
 
+            // Lightweight channels wired up FIRST, then start the reader + send the version request
+            // IMMEDIATELY. Android Auto's wireless setup drops the socket if the head unit doesn't
+            // answer within ~100ms, and the decoder/audio init below can take longer than that — so
+            // the handshake (version → TLS → discovery, none of which need media objects) is kicked
+            // off before them. The heavy init then runs while those round-trips are in flight, and
+            // finishes long before the phone opens any channel.
             sensor = SensorChannel(tp) { setStatus(it) }
             inp = InputChannel(tp, videoConfig.width, videoConfig.height) { setStatus(it) }
+            val ctrl = ControlChannel(tp, crypto, videoConfig) { setStatus(it) }
+            transport = tp; control = ctrl; input = inp
+            tp.start(); ctrl.begin()
+
+            // --- heavier setup (deferred so it doesn't delay the version request) ---
+            val dec = VideoDecoder(videoConfig.width, videoConfig.height).also { it.start() }
+            decoder = dec
+            surfaceView.holder.surface?.let { if (it.isValid) dec.setSurface(it) }
             media[AapProto.CH_VIDEO] = MediaChannel(AapProto.CH_VIDEO, tp, dec) { setStatus(it) }
             // When the decoder desyncs (dropped/late frame), ask the phone for a fresh keyframe.
             dec.onNeedKeyframe = { media[AapProto.CH_VIDEO]?.gainVideoFocus() }
@@ -351,9 +432,6 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             media[AapProto.CH_AUDIO_SYSTEM] = MediaChannel(AapProto.CH_AUDIO_SYSTEM, tp, null, audioSink = systemSink) { setStatus(it) }
             // Mic channel captures the receiver's microphone for Assistant/voice (RECORD_AUDIO).
             media[AapProto.CH_MIC] = MediaChannel(AapProto.CH_MIC, tp, null, MicRecorder()) { setStatus(it) }
-            val ctrl = ControlChannel(tp, crypto, videoConfig) { setStatus(it) }
-            transport = tp; control = ctrl; input = inp
-            tp.start(); ctrl.begin()
         } catch (e: Exception) {
             busy = false; Log.e(TAG, "AA protocol start failed", e)
             setStatus("Couldn’t start the Android Auto protocol: ${e.message}")
@@ -472,46 +550,65 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.requestLayout()
     }
 
-    /** Display chooser: orientation (auto-detected resolution shown) + a stretch-to-fill toggle. */
+    /** Display chooser: orientation (auto-detected resolution shown) + a stretch-to-fill toggle,
+     *  presented as a bottom sheet (structure in [R.layout.dialog_config]) rather than a centered
+     *  AlertDialog — a settings panel reads as a sheet the user pulls up, not a popup interrupting
+     *  the car UI. Only the values that are inherently runtime data (detected resolutions, saved
+     *  prefs) are set here. */
     private fun showConfigDialog(firstRun: Boolean) {
         val current = if (::videoConfig.isInitialized) videoConfig.orientation else HeadUnitConfig.savedOrientation(this)
         val portrait = HeadUnitConfig.detect(this, HeadUnitConfig.Orientation.PORTRAIT)
         val landscape = HeadUnitConfig.detect(this, HeadUnitConfig.Orientation.LANDSCAPE)
 
-        val group = RadioGroup(this).apply {
-            addView(RadioButton(this@MainActivity).apply { id = 1; text = "Portrait — ${portrait.width}×${portrait.height}" })
-            addView(RadioButton(this@MainActivity).apply { id = 2; text = "Landscape — ${landscape.width}×${landscape.height}" })
-            check(if (current == HeadUnitConfig.Orientation.LANDSCAPE) 2 else 1)
+        val view = layoutInflater.inflate(R.layout.dialog_config, null)
+        view.findViewById<TextView>(R.id.tvTitle).text =
+            if (firstRun) "Choose head-unit display" else "Head-unit display"
+        val group = view.findViewById<RadioGroup>(R.id.group)
+        view.findViewById<RadioButton>(R.id.rbPortrait).apply {
+            id = 1; text = "Portrait — ${portrait.width}×${portrait.height}"
         }
-        val stretch = CheckBox(this).apply {
-            text = "Stretch to fill screen (no black bars)"
+        view.findViewById<RadioButton>(R.id.rbLandscape).apply {
+            id = 2; text = "Landscape — ${landscape.width}×${landscape.height}"
+        }
+        group.check(if (current == HeadUnitConfig.Orientation.LANDSCAPE) 2 else 1)
+        val stretch = view.findViewById<CheckBox>(R.id.cbStretch).apply {
             isChecked = HeadUnitConfig.savedScaling(this@MainActivity) == HeadUnitConfig.Scaling.FILL
-            setPadding(0, dp(12), 0, 0)
         }
-        val wireless = CheckBox(this).apply {
-            text = "Wireless Android Auto (Bluetooth + Wi-Fi Direct)"
+        val wireless = view.findViewById<CheckBox>(R.id.cbWireless).apply {
             isChecked = HeadUnitConfig.wirelessEnabled(this@MainActivity)
-            setPadding(0, dp(12), 0, 0)
         }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(8), dp(20), 0)
-            addView(group); addView(stretch); addView(wireless)
+        val softAp = view.findViewById<CheckBox>(R.id.cbSoftAp).apply {
+            isChecked = HeadUnitConfig.softApEnabled(this@MainActivity)
         }
-        val builder = AlertDialog.Builder(this)
-            .setTitle(if (firstRun) "Choose head-unit display" else "Head-unit display")
-            .setView(container)
-            .setPositiveButton("OK") { _, _ ->
-                val chosen = if (group.checkedRadioButtonId == 2) HeadUnitConfig.Orientation.LANDSCAPE else HeadUnitConfig.Orientation.PORTRAIT
-                HeadUnitConfig.saveScaling(this, if (stretch.isChecked) HeadUnitConfig.Scaling.FILL else HeadUnitConfig.Scaling.FIT)
-                HeadUnitConfig.saveWireless(this, wireless.isChecked)
-                applyConfig(chosen)
-                updateWirelessMode()
-                if (firstRun) startFromIntentOrScan()
-            }
-            .setCancelable(!firstRun)
-        if (!firstRun) builder.setNegativeButton("Cancel", null)
-        builder.show()
+
+        val dialog = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
+        view.findViewById<View>(R.id.btnCancel).apply {
+            visibility = if (firstRun) View.GONE else View.VISIBLE
+            setOnClickListener { dialog.dismiss() }
+        }
+        view.findViewById<View>(R.id.btnOk).setOnClickListener {
+            val chosen = if (group.checkedRadioButtonId == 2) HeadUnitConfig.Orientation.LANDSCAPE else HeadUnitConfig.Orientation.PORTRAIT
+            HeadUnitConfig.saveScaling(this, if (stretch.isChecked) HeadUnitConfig.Scaling.FILL else HeadUnitConfig.Scaling.FIT)
+            HeadUnitConfig.saveWireless(this, wireless.isChecked)
+            HeadUnitConfig.saveSoftAp(this, softAp.isChecked)
+            dialog.dismiss()
+            applyConfig(chosen)
+            updateWirelessMode()
+            startSoftApIfEnabled()
+            if (firstRun) startFromIntentOrScan()
+        }
+
+        dialog.setContentView(view)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.6f)
+            setGravity(Gravity.BOTTOM)
+            attributes.windowAnimations = R.style.BottomSheetAnimation
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+        }
+        dialog.setCancelable(!firstRun)
+        dialog.setCanceledOnTouchOutside(!firstRun)
+        dialog.show()
     }
 
     /** Persist + apply an orientation choice; detect its resolution and relayout. */
@@ -530,29 +627,45 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun dp(v: Int): Int =
-        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
-
-    private fun showWaiting() {
-        val wireless = if (HeadUnitConfig.wirelessEnabled(this)) {
-            val ip = NsdAdvertiser.localIpv4()
-            "\n\nWIRELESS: on the phone, open “AA Wireless Helper” and connect to\n" +
-                (if (ip != null) "     $ip : 5288     (or just tap Scan — this head unit is discoverable)"
-                 else "     this device’s Wi-Fi IP : 5288   (join the same Wi-Fi first)")
-        } else ""
-        setStatus(
-            "MobileLabKit — Android Auto head unit\n\n" +
-                "Plug an Android phone into this device (USB host — USB-C↔USB-C or OTG), " +
-                "or use wireless below. Set up Android Auto on the phone first." +
-                wireless +
-                "\n\nDisplay: ${videoConfig.label}   —   tap ⚙ to change"
+    /** Configure the idle screen for the WAITING state: which methods are available, the SoftAP
+     *  join card (if hosting), and the display label. */
+    private fun showWaiting() = runOnUiThread {
+        if (streaming) return@runOnUiThread
+        val ap = softApHost?.info
+        idle.setMethods(usb = true, wireless = HeadUnitConfig.wirelessEnabled(this) || ap != null)
+        idle.setSoftAp(ap)
+        // No SoftAP: if wireless is on, we're already listening on TCP:5288 — offer a scan-to-connect
+        // QR for this shared-network IP too, instead of only a generic "waiting" card.
+        idle.setShareIp(if (ap == null && HeadUnitConfig.wirelessEnabled(this)) NsdAdvertiser.localIpv4() else null)
+        idle.setDisplayLabel(videoConfig.label)
+        idle.showState(
+            IdleView.Phase.WAITING,
+            when {
+                ap != null -> "Scan the code with “AA Wireless Helper”, or join the Wi-Fi below."
+                HeadUnitConfig.wirelessEnabled(this) -> "Plug in over USB, or connect from “AA Wireless Helper” on the same Wi-Fi."
+                else -> "Plug an Android phone into this device over USB (USB-C↔USB-C or OTG)."
+            }
         )
+        cover.visibility = View.VISIBLE
+        idle.visibility = View.VISIBLE
     }
 
+    /** Live status text from the USB/protocol flow → the idle hero, with a phase inferred from the
+     *  wording so the state chip + spinner reflect connecting vs. error vs. waiting. */
     private fun setStatus(text: String) = runOnUiThread {
+        val lower = text.lowercase()
+        val phase = when {
+            lower.contains("error") || lower.contains("failed") || lower.contains("couldn") ||
+                lower.contains("denied") || lower.contains("ended") -> IdleView.Phase.ERROR
+            lower.contains("starting") || lower.contains("connect") || lower.contains("handshake") ||
+                lower.contains("tls") || lower.contains("version") || lower.contains("discovery") ||
+                lower.contains("focus") || lower.contains("open") || lower.contains("waiting for") -> IdleView.Phase.CONNECTING
+            else -> IdleView.Phase.WAITING
+        }
         if (!streaming) {
-            cover.visibility = View.VISIBLE   // hide any frozen last frame behind the message
-            status.visibility = View.VISIBLE; status.text = text; gear.visibility = View.VISIBLE
+            cover.visibility = View.VISIBLE   // hide any frozen last frame behind the idle screen
+            idle.visibility = View.VISIBLE
+            idle.showState(phase, text)
         }
         Log.i(TAG, text.replace("\n", " · "))
     }

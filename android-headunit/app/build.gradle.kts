@@ -38,4 +38,6 @@ dependencies {
     // top-level enum names across files that full protoc rejects but the committed code
     // handles). This is the CURRENT AA protocol; aasdk's 2018 protos are too old.
     implementation("com.google.protobuf:protobuf-java:3.25.3")
+    // QR generation only (no camera) for the SoftAP "Host Wi-Fi" join code shown on screen.
+    implementation("com.google.zxing:core:3.5.3")
 }

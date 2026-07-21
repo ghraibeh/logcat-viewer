@@ -15,8 +15,8 @@ android {
         applicationId = "com.mobilelabkit.aahelper"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
     }
 
     buildTypes {
@@ -36,4 +36,8 @@ android {
 }
 
 dependencies {
+    // ComponentActivity for registerForActivityResult (the QR ScanContract flow below).
+    implementation("androidx.activity:activity:1.8.2")
+    // QR scanner for the SoftAP "Host Wi-Fi" join code the head unit shows (camera + decode).
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }
