@@ -3,7 +3,7 @@
  * This is the single boundary between the privileged main process (subprocess +
  * fs + dialogs) and the sandboxed renderer.
  */
-import { ipcMain, dialog, shell, BrowserWindow, app } from 'electron'
+import { ipcMain, dialog, shell, BrowserWindow, app, desktopCapturer } from 'electron'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { IPC } from '@shared/ipc'
@@ -24,6 +24,7 @@ import { MirrorService } from './services/mirror'
 import { IosMirrorService } from './services/iosmirror'
 import { IosAirplayService } from './services/iosairplay'
 import { MlkMirrorService } from './services/mlkmirror'
+import { MlkCastService } from './services/mlkcast'
 import { AaHeadUnitService } from './services/aaheadunit'
 import * as iosinput from './services/iosinput'
 import type { IosInputConfig } from '@core/iosinput'
@@ -67,6 +68,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   let iosMirrorSvc: IosMirrorService | null = null
   let iosAirplaySvc: IosAirplayService | null = null
   let mlkMirrorSvc: MlkMirrorService | null = null
+  let mlkCastSvc: MlkCastService | null = null
   let aaSvc: AaHeadUnitService | null = null
   // One PTY-backed session per renderer shell tab, keyed by the tab's id.
   const shellSessions = new Map<string, ShellSession>()
@@ -1255,6 +1257,41 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return true
   })
 
+  // Mac→Android cast SENDER: the renderer captures + encodes; this connects to the Android
+  // receiver and streams the encoded Annex-B over the _mlkmirror._tcp wire protocol.
+  const ensureMlkCast = (): MlkCastService => {
+    if (!mlkCastSvc) {
+      mlkCastSvc = new MlkCastService({
+        onState: (state) => broadcast(IPC.mlkCastState, state),
+        onFailed: (message) => broadcast(IPC.mlkCastFailed, message)
+      })
+    }
+    return mlkCastSvc
+  }
+  ipcMain.handle(IPC.mlkCastBrowseStart, () => {
+    ensureMlkCast().startBrowse((list) => broadcast(IPC.mlkCastReceivers, list))
+    return true
+  })
+  ipcMain.handle(IPC.mlkCastBrowseStop, () => {
+    mlkCastSvc?.stopBrowse()
+    return true
+  })
+  ipcMain.handle(IPC.mlkCastScreens, async () => {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 320, height: 200 } // preview for the picker (live-ish on refresh)
+    })
+    return sources.map((s) => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL() }))
+  })
+  ipcMain.handle(IPC.mlkCastConnect, (_e, host: string, port: number, width: number, height: number) =>
+    ensureMlkCast().connect(host, port, width, height)
+  )
+  ipcMain.on(IPC.mlkCastPush, (_e, chunk: Uint8Array, key: boolean) => mlkCastSvc?.push(chunk, key))
+  ipcMain.handle(IPC.mlkCastStop, () => {
+    mlkCastSvc?.stop()
+    return true
+  })
+
   // Android Auto head unit: the Mac runs the AA GAL protocol as a wireless head-unit server
   // (arm's-length utilityProcess helper) and fires the gearhead wireless-startup broadcast so
   // the selected phone projects to us. H.264/status stream up; touches go back down.
@@ -1522,6 +1559,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     iosMirrorSvc?.shutdown()
     iosAirplaySvc?.shutdown()
     mlkMirrorSvc?.shutdown()
+    mlkCastSvc?.shutdown()
     aaSvc?.shutdown()
     iosinput.shutdown()
     intercept?.shutdown()

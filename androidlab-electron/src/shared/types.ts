@@ -119,6 +119,27 @@ export interface MlkMirrorState {
   waiting?: boolean
 }
 
+/** State for the Mac→Android cast SENDER (this Mac casting its screen to the
+ *  MobileLabKit Mirror Android app over the same _mlkmirror._tcp protocol). */
+export interface MlkCastState {
+  message: string
+  casting: boolean
+}
+
+/** A phone discovered over mDNS running "Receive a screen" — a cast target. */
+export interface MlkCastReceiver {
+  name: string
+  host: string
+  port: number
+}
+
+/** A capturable display on this Mac + a preview thumbnail (data URL) for the screen picker. */
+export interface MlkScreen {
+  id: string
+  name: string
+  thumbnail: string
+}
+
 /** Which device the detached mirror window should mirror. The main window pushes
  *  this to the popout on open and whenever the selected device changes, so the
  *  standalone window (Android Studio-style) always tracks the active device. */

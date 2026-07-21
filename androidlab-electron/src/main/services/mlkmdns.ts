@@ -79,6 +79,175 @@ function ipv4Rdata(ip: string): Buffer {
   return Buffer.from(ip.split('.').map((n) => parseInt(n, 10) & 0xff))
 }
 
+/** Decode a (possibly compression-pointer) DNS name; returns the dotted name + next offset. */
+function parseName(msg: Buffer, start: number): { name: string; off: number } | null {
+  const labels: string[] = []
+  let off = start
+  let jumped = false
+  let afterPointer = start
+  let guard = 0
+  while (off < msg.length && guard++ < 128) {
+    const len = msg[off]
+    if (len === 0) {
+      off++
+      break
+    }
+    if ((len & 0xc0) === 0xc0) {
+      if (off + 1 >= msg.length) return null
+      const ptr = ((len & 0x3f) << 8) | msg[off + 1]
+      if (!jumped) afterPointer = off + 2
+      off = ptr
+      jumped = true
+      continue
+    }
+    off++
+    if (off + len > msg.length) return null
+    labels.push(msg.toString('utf8', off, off + len))
+    off += len
+  }
+  return { name: labels.join('.'), off: jumped ? afterPointer : off }
+}
+
+export interface DiscoveredReceiver {
+  name: string
+  host: string
+  port: number
+}
+
+/**
+ * mDNS browser for `_mlkmirror._tcp` — finds Android phones running the app's "Receive a
+ * screen" so the Mac→Android caster doesn't need a typed IP. Sends a PTR query and merges
+ * the SRV (port + target host) and A (IPv4) records from the multicast responses. Raw dgram
+ * (dependency-free); a browser only needs to RECEIVE the multicast answers, which every
+ * socket joined to the group gets — unlike being discovered, this works fine alongside
+ * macOS mDNSResponder.
+ */
+export class MlkBrowser {
+  private sock: Socket | null = null
+  private queryTimer: ReturnType<typeof setInterval> | null = null
+  private onUpdate: ((list: DiscoveredReceiver[]) => void) | null = null
+  private readonly serviceType = '_mlkmirror._tcp.local'
+  private readonly instances = new Map<string, string>() // lc name -> display name
+  private readonly srv = new Map<string, { port: number; target: string }>() // instance lc -> srv
+  private readonly ips = new Map<string, string>() // host lc -> ipv4
+
+  start(onUpdate: (list: DiscoveredReceiver[]) => void): void {
+    this.stop()
+    this.onUpdate = onUpdate
+    const sock = createSocket({ type: 'udp4', reuseAddr: true })
+    this.sock = sock
+    sock.on('error', () => this.stop())
+    sock.on('message', (msg) => this.onMessage(msg))
+    sock.bind(MDNS_PORT, () => {
+      try {
+        sock.addMembership(MDNS_ADDR)
+      } catch {
+        /* membership may already exist */
+      }
+      try {
+        sock.setMulticastTTL(255)
+        sock.setMulticastLoopback(false)
+      } catch {
+        /* non-fatal */
+      }
+      this.query()
+      this.queryTimer = setInterval(() => this.query(), 2000)
+    })
+  }
+
+  stop(): void {
+    if (this.queryTimer) {
+      clearInterval(this.queryTimer)
+      this.queryTimer = null
+    }
+    if (this.sock) {
+      try {
+        this.sock.close()
+      } catch {
+        /* already closed */
+      }
+      this.sock = null
+    }
+    this.instances.clear()
+    this.srv.clear()
+    this.ips.clear()
+    this.onUpdate = null
+  }
+
+  private query(): void {
+    if (!this.sock) return
+    const header = Buffer.alloc(12)
+    header.writeUInt16BE(1, 4) // qdcount = 1
+    const q = Buffer.concat([encodeName(this.serviceType), Buffer.alloc(4)])
+    q.writeUInt16BE(TYPE_PTR, q.length - 4)
+    q.writeUInt16BE(CLASS_IN, q.length - 2)
+    const pkt = Buffer.concat([header, q])
+    try {
+      this.sock.send(pkt, 0, pkt.length, MDNS_PORT, MDNS_ADDR)
+    } catch {
+      /* interface went away */
+    }
+  }
+
+  private onMessage(msg: Buffer): void {
+    if (msg.length < 12) return
+    if ((msg.readUInt16BE(2) & 0x8000) === 0) return // only responses
+    const qd = msg.readUInt16BE(4)
+    const rr = msg.readUInt16BE(6) + msg.readUInt16BE(8) + msg.readUInt16BE(10)
+    let off = 12
+    for (let i = 0; i < qd && off < msg.length; i++) {
+      const p = parseName(msg, off)
+      if (!p) return
+      off = p.off + 4 // qtype + qclass
+    }
+    let changed = false
+    for (let i = 0; i < rr && off < msg.length; i++) {
+      const p = parseName(msg, off)
+      if (!p) return
+      off = p.off
+      if (off + 10 > msg.length) return
+      const type = msg.readUInt16BE(off)
+      const rdlen = msg.readUInt16BE(off + 8)
+      const rdoff = off + 10
+      off = rdoff + rdlen
+      const nameLc = p.name.toLowerCase()
+      // Our socket receives ALL multicast mDNS traffic on the LAN, so we must accept only
+      // records that belong to _mlkmirror._tcp — otherwise every companion-link / remotepairing
+      // / airplay service on the network shows up as a bogus "receiver".
+      const isOurInstance = nameLc.endsWith(`.${this.serviceType}`)
+      if (type === TYPE_PTR && nameLc === this.serviceType) {
+        const inst = parseName(msg, rdoff)
+        if (inst) this.instances.set(inst.name.toLowerCase(), inst.name)
+      } else if (type === TYPE_SRV && rdlen >= 6 && isOurInstance) {
+        const port = msg.readUInt16BE(rdoff + 4)
+        const tgt = parseName(msg, rdoff + 6)
+        if (tgt) {
+          this.srv.set(nameLc, { port, target: tgt.name.toLowerCase() })
+          this.instances.set(nameLc, p.name)
+          changed = true
+        }
+      } else if (type === TYPE_A && rdlen === 4) {
+        // A records are a host→IP lookup for our SRV targets; harmless to keep all.
+        this.ips.set(nameLc, `${msg[rdoff]}.${msg[rdoff + 1]}.${msg[rdoff + 2]}.${msg[rdoff + 3]}`)
+        if (this.srv.size > 0) changed = true
+      }
+    }
+    if (changed) this.emit()
+  }
+
+  private emit(): void {
+    const list: DiscoveredReceiver[] = []
+    for (const [instLc, srv] of this.srv) {
+      const ip = this.ips.get(srv.target)
+      if (!ip) continue
+      const full = this.instances.get(instLc) ?? instLc
+      const name = full.replace(/\._mlkmirror\._tcp\.local\.?$/i, '')
+      list.push({ name, host: ip, port: srv.port })
+    }
+    this.onUpdate?.(list)
+  }
+}
+
 /** The public advertiser: dns-sd -R on macOS, raw dgram responder elsewhere. */
 export class MlkAdvertiser {
   private proc: ChildProcess | null = null

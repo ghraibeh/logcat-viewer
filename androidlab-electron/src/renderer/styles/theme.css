@@ -391,6 +391,17 @@ button.adv-toggle.checked {
   min-width: 0;
 }
 
+/* Keep-alive tab pane: every visited tab stays mounted inside one of these;
+   inactive panes are hidden with an inline display:none so their state
+   survives tab switches. Mirrors .main-content's inner layout. */
+.tab-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
 /* ---- Logs layout: app panel | log view ---------------------------------- */
 .logs-tab {
   display: flex;

@@ -28,6 +28,7 @@ import { tabSupported } from '@shared/capabilities'
 import { MirrorDock } from './components/MirrorDock'
 import { IosMirrorDock } from './components/IosMirrorDock'
 import { MlkMirrorDock } from './components/MlkMirrorDock'
+import { MlkCastDock } from './components/MlkCastDock'
 import { AndroidAutoView } from './components/AndroidAutoView'
 import { NoDeviceView } from './components/NoDeviceView'
 import { StatusBar } from './components/StatusBar'
@@ -63,6 +64,13 @@ export default function App() {
   const { theme, toggleTheme } = useTheme()
 
   const [tab, setTab] = useState('logs')
+  // Keep-alive tabs (QTabWidget parity): a tab mounts the first time it's
+  // visited and is then hidden with display:none instead of unmounted, so its
+  // state (loaded lists, scroll positions, shell sessions, capture results)
+  // survives switching tabs. Adjusted during render so a newly-visited tab
+  // paints in the same frame.
+  const [visitedTabs, setVisitedTabs] = useState<ReadonlySet<string>>(() => new Set([tab]))
+  if (!visitedTabs.has(tab)) setVisitedTabs(new Set<string>(visitedTabs).add(tab))
   const [selectedRows, setSelectedRows] = useState<ReadonlySet<number>>(new Set())
   const [detailText, setDetailText] = useState('')
   const [anchor, setAnchor] = useState<number | null>(null)
@@ -89,6 +97,11 @@ export default function App() {
   const [mlkReceiver, setMlkReceiver] = useState(false)
   const mlkReceiverRef = useRef(mlkReceiver)
   mlkReceiverRef.current = mlkReceiver
+  // Mac→Android cast SENDER (this Mac casts its screen to the Android app). Takes over the
+  // dock, mutually exclusive with the receivers / a device mirror.
+  const [mlkCast, setMlkCast] = useState(false)
+  const mlkCastRef = useRef(mlkCast)
+  mlkCastRef.current = mlkCast
   const [mirrorWidth, setMirrorWidth] = useState(360)
   const [secondaryReq, setSecondaryReq] = useState(0)
   const [leakReq, setLeakReq] = useState<{ serial: string; pkg: string } | null>(null)
@@ -371,10 +384,12 @@ export default function App() {
   // Toolbar button: closed → docked; anything open → fully closed (also closes
   // the popout window, no re-dock).
   const toggleMirror = useCallback(() => {
-    // If the receiver is currently occupying the dock, switch it to the device mirror
-    // (keep it open) rather than closing.
-    if (airplayReceiverRef.current) {
+    // If a receiver or the cast sender is occupying the dock, switch it to the device
+    // mirror (keep the dock open) rather than closing.
+    if (airplayReceiverRef.current || mlkReceiverRef.current || mlkCastRef.current) {
       setAirplayReceiver(false)
+      setMlkReceiver(false)
+      setMlkCast(false)
       setMirrorMode('docked')
       return
     }
@@ -398,6 +413,7 @@ export default function App() {
       // Taking over the dock from a device mirror popout: close that window first.
       if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
       setMlkReceiver(false) // mutually exclusive with the Android mirror receiver
+      setMlkCast(false)
       setAirplayReceiver(true)
       setMirrorMode('docked')
     }
@@ -414,7 +430,23 @@ export default function App() {
     } else {
       if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
       setAirplayReceiver(false)
+      setMlkCast(false)
       setMlkReceiver(true)
+      setMirrorMode('docked')
+    }
+  }, [])
+
+  // Toggle the Mac→Android cast sender: capture + encode this Mac and stream it to the
+  // Android app (in Receive mode). Takes over the dock, mutually exclusive with the others.
+  const toggleMlkCast = useCallback(() => {
+    if (mlkCastRef.current) {
+      setMlkCast(false)
+      setMirrorMode('closed')
+    } else {
+      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
+      setAirplayReceiver(false)
+      setMlkReceiver(false)
+      setMlkCast(true)
       setMirrorMode('docked')
     }
   }, [])
@@ -455,6 +487,109 @@ export default function App() {
     }
   }, [mirrorMode, c.serial, c.platform, c.connection, airplayReceiver])
 
+  // Body of one keep-alive tab pane (see visitedTabs above).
+  const renderTab = (id: string) => {
+    switch (id) {
+      case 'deviceinfo':
+        return <DeviceInfoView c={c} />
+      case 'logs':
+        return (
+          <div className="logs-tab">
+            {/* iOS syslog is device-wide and can't be filtered by app (no
+                bundle→PID like adb), so the app-picker filter is Android-only. */}
+            {c.platform !== 'ios' ? (
+              <>
+                <AppPickerPanel c={c} width={panelWidth} />
+                <div className="splitter" onMouseDown={onSplitterDown} />
+              </>
+            ) : null}
+            <div className="logs-right">
+              <FilterBar c={c} searchRef={searchRef} onSavePreset={doSavePreset} />
+              <LogWorkArea
+                c={c}
+                selectedRows={selectedRows}
+                onRowMouseDown={onRowMouseDown}
+                onRowMouseEnter={onRowMouseEnter}
+                onRowContextMenu={onRowContextMenu}
+                onOpenLog={() => void doOpenLog()}
+              />
+              <div className="detail">{detailText}</div>
+            </div>
+          </div>
+        )
+      case 'monitor':
+        return (
+          <div className="logs-tab">
+            {c.platform !== 'ios' ? (
+              <>
+                <AppPickerPanel c={c} width={panelWidth} />
+                <div className="splitter" onMouseDown={onSplitterDown} />
+              </>
+            ) : null}
+            <MonitorView
+              c={c}
+              visible={tab === 'monitor'}
+              onDetectLeaks={(serial, pkg) => setLeakReq({ serial, pkg })}
+            />
+          </div>
+        )
+      case 'databases':
+        return (
+          <div className="logs-tab">
+            <AppPickerPanel c={c} width={panelWidth} />
+            <div className="splitter" onMouseDown={onSplitterDown} />
+            <DatabaseView c={c} />
+          </div>
+        )
+      case 'files':
+        return (
+          <div className="logs-tab">
+            <AppPickerPanel c={c} width={panelWidth} />
+            <div className="splitter" onMouseDown={onSplitterDown} />
+            <FilesView c={c} />
+          </div>
+        )
+      case 'apps':
+        return c.platform === 'ios' ? (
+          <IosAppsView c={c} onStatus={showToast} onMessage={setMsgBox} />
+        ) : (
+          <AppManagerView
+            c={c}
+            onStatus={showToast}
+            onFailed={(m) => setMsgBox({ title: 'App Manager', body: m })}
+            onMessage={setMsgBox}
+          />
+        )
+      case 'inspector':
+        return <InspectorView c={c} />
+      case 'controls':
+        return (
+          <ControlsView
+            c={c}
+            onViewSecondary={() => {
+              // The secondary-display view lives in the in-app dock; re-dock first
+              // if the mirror is currently popped out into its own window.
+              if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
+              setMirrorMode('docked')
+              setSecondaryReq((n) => n + 1)
+            }}
+          />
+        )
+      case 'location':
+        return <LocationView c={c} />
+      case 'toolbox':
+        return <ToolboxView c={c} />
+      case 'shell':
+        return <ShellView c={c} />
+      case 'androidauto':
+        return <AndroidAutoView c={c} />
+      case 'network':
+        return <NetworkView c={c} />
+      default:
+        return null
+    }
+  }
+
   // Context-menu target computation (mirrors _show_table_menu).
   const ctxTarget = (() => {
     if (!ctxMenu) return null
@@ -482,10 +617,12 @@ export default function App() {
         onMirror={toggleMirror}
         onAirplayReceiver={toggleAirplayReceiver}
         onMlkReceiver={toggleMlkReceiver}
+        onMlkCast={toggleMlkCast}
         onIosInput={() => setIosInputOpen(true)}
         mirrorOpen={mirrorMode !== 'closed'}
         airplayReceiverOn={airplayReceiver}
         mlkReceiverOn={mlkReceiver}
+        mlkCastOn={mlkCast}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -503,99 +640,29 @@ export default function App() {
       <div className="main-content">
       {c.devices.length === 0 ? (
         <NoDeviceView c={c} airplayOn={airplayReceiver} onAirplay={toggleAirplayReceiver} />
-      ) : tab === 'deviceinfo' ? (
-        <DeviceInfoView c={c} />
-      ) : tab === 'logs' ? (
-        <div className="logs-tab">
-          {/* iOS syslog is device-wide and can't be filtered by app (no
-              bundle→PID like adb), so the app-picker filter is Android-only. */}
-          {c.platform !== 'ios' ? (
-            <>
-              <AppPickerPanel c={c} width={panelWidth} />
-              <div className="splitter" onMouseDown={onSplitterDown} />
-            </>
-          ) : null}
-          <div className="logs-right">
-            <FilterBar c={c} searchRef={searchRef} onSavePreset={doSavePreset} />
-            <LogWorkArea
-              c={c}
-              selectedRows={selectedRows}
-              onRowMouseDown={onRowMouseDown}
-              onRowMouseEnter={onRowMouseEnter}
-              onRowContextMenu={onRowContextMenu}
-              onOpenLog={() => void doOpenLog()}
-            />
-            <div className="detail">{detailText}</div>
-          </div>
+      ) : null}
+      {TABS.filter((t) => visitedTabs.has(t.id) && tabSupported(t.id, c.platform)).map((t) => (
+        <div
+          key={t.id}
+          className="tab-pane"
+          style={t.id === tab && c.devices.length > 0 ? undefined : { display: 'none' }}
+        >
+          {renderTab(t.id)}
         </div>
-      ) : tab === 'monitor' ? (
-        <div className="logs-tab">
-          {c.platform !== 'ios' ? (
-            <>
-              <AppPickerPanel c={c} width={panelWidth} />
-              <div className="splitter" onMouseDown={onSplitterDown} />
-            </>
-          ) : null}
-          <MonitorView c={c} onDetectLeaks={(serial, pkg) => setLeakReq({ serial, pkg })} />
-        </div>
-      ) : tab === 'databases' ? (
-        <div className="logs-tab">
-          <AppPickerPanel c={c} width={panelWidth} />
-          <div className="splitter" onMouseDown={onSplitterDown} />
-          <DatabaseView c={c} />
-        </div>
-      ) : tab === 'files' ? (
-        <div className="logs-tab">
-          <AppPickerPanel c={c} width={panelWidth} />
-          <div className="splitter" onMouseDown={onSplitterDown} />
-          <FilesView c={c} />
-        </div>
-      ) : tab === 'apps' ? (
-        c.platform === 'ios' ? (
-          <IosAppsView c={c} onStatus={showToast} onMessage={setMsgBox} />
-        ) : (
-          <AppManagerView
-            c={c}
-            onStatus={showToast}
-            onFailed={(m) => setMsgBox({ title: 'App Manager', body: m })}
-            onMessage={setMsgBox}
-          />
-        )
-      ) : tab === 'inspector' ? (
-        <InspectorView c={c} />
-      ) : tab === 'controls' ? (
-        <ControlsView
-          c={c}
-          onViewSecondary={() => {
-            // The secondary-display view lives in the in-app dock; re-dock first
-            // if the mirror is currently popped out into its own window.
-            if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
-            setMirrorMode('docked')
-            setSecondaryReq((n) => n + 1)
-          }}
-        />
-      ) : tab === 'location' ? (
-        <LocationView c={c} />
-      ) : tab === 'toolbox' ? (
-        <ToolboxView c={c} />
-      ) : tab === 'shell' ? (
-        <ShellView c={c} />
-      ) : tab === 'androidauto' ? (
-        <AndroidAutoView c={c} />
-      ) : tab === 'network' ? (
-        <NetworkView c={c} />
-      ) : (
-        <div className="tab-placeholder">
-          <div className="big">{TABS.find((t) => t.id === tab)?.label}</div>
-          <div>This tool is migrated in Phase 3 of the MobileLabKit → Electron port.</div>
-        </div>
-      )}
+      ))}
       </div>
       {mirrorMode === 'docked' ? (
         <>
           <div className="mirror-splitter" onMouseDown={onMirrorSplitterDown} />
           <div className="mirror-dock-holder" style={{ width: mirrorWidth, display: 'flex' }}>
-            {mlkReceiver ? (
+            {mlkCast ? (
+              <MlkCastDock
+                onClose={() => {
+                  setMlkCast(false)
+                  setMirrorMode('closed')
+                }}
+              />
+            ) : mlkReceiver ? (
               <MlkMirrorDock
                 onClose={() => {
                   setMlkReceiver(false)

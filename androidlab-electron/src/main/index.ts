@@ -4,7 +4,7 @@
  */
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { app, BrowserWindow, nativeImage, session, shell } from 'electron'
+import { app, BrowserWindow, desktopCapturer, ipcMain, nativeImage, session, shell } from 'electron'
 import { registerIpc } from './ipc'
 import { buildAppMenu } from './menu'
 import { IPC } from '@shared/ipc'
@@ -459,6 +459,28 @@ if (!app.requestSingleInstanceLock()) {
     session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
       return permission === 'media'
     })
+
+    // "Cast this Mac": grant getDisplayMedia the display the user picked in our own screen
+    // picker (castSourceId), else the primary — with no OS picker. The modern getDisplayMedia
+    // path captures at the display's real resolution (the legacy chromeMediaSource=desktop
+    // constraint capped it low → blurry cast).
+    let castSourceId: string | null = null
+    ipcMain.handle(IPC.mlkCastSource, (_e, id: string | null) => {
+      castSourceId = id
+      return true
+    })
+    session.defaultSession.setDisplayMediaRequestHandler(
+      (_request, callback) => {
+        desktopCapturer
+          .getSources({ types: ['screen'] })
+          .then((sources) => {
+            const chosen = (castSourceId && sources.find((s) => s.id === castSourceId)) || sources[0]
+            callback(chosen ? { video: chosen } : {})
+          })
+          .catch(() => callback({}))
+      },
+      { useSystemPicker: false }
+    )
 
     registerIpc(getWindow)
     buildAppMenu(getWindow)

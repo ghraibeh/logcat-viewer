@@ -13,6 +13,8 @@ import { Icon } from './Icon'
 
 const HAS_WEBCODECS = typeof (globalThis as { VideoDecoder?: unknown }).VideoDecoder !== 'undefined'
 const MAX_DECODE_QUEUE = 6
+// Input still arriving but no decoded frame for this long ⇒ the decoder wedged; rebuild it.
+const STALL_MS = 2000
 
 /** Canvas + WebCodecs decoder for the Annex-B feed. Android MediaCodec H.264 is
  *  limited-range like the iOS USB path, so no full-range colour correction is needed. */
@@ -27,6 +29,10 @@ class VideoView {
   private raf = 0
   private running = false
   private flushTimer: ReturnType<typeof setTimeout> | null = null
+  private lastDecodeMs = 0
+  private lastOutputMs = 0
+  private errCount = 0
+  private errWindow = 0
   onFail: ((m: string) => void) | null = null
   onFirstFrame: (() => void) | null = null
 
@@ -44,6 +50,13 @@ class VideoView {
 
   push(chunk: Uint8Array): void {
     if (!HAS_WEBCODECS) return
+    // Watchdog: bytes still arriving but the decoder stopped emitting frames → it wedged
+    // (lost sync, or bound state went bad). Rebuild it; the next keyframe now carries its
+    // SPS/PPS (demuxer re-arm), so it resyncs within ~1s instead of freezing for good.
+    const now = performance.now()
+    if (this.configured && this.lastDecodeMs && now - this.lastOutputMs > STALL_MS && now - this.lastDecodeMs < STALL_MS) {
+      this.recover('decode stalled')
+    }
     for (const au of this.demuxer.push(chunk)) this.feed(au.data, au.key)
     if (this.flushTimer) clearTimeout(this.flushTimer)
     this.flushTimer = setTimeout(() => {
@@ -56,7 +69,7 @@ class VideoView {
     try {
       this.decoder = new VideoDecoder({
         output: (frame) => this.setPending(frame),
-        error: (e) => this.fail(e.message || 'decode error')
+        error: (e) => this.recover(e.message || 'decode error')
       })
     } catch (e) {
       this.fail(e instanceof Error ? e.message : String(e))
@@ -95,16 +108,18 @@ class VideoView {
       try {
         dec.configure({ codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' })
         this.configured = true
+        this.lastOutputMs = performance.now() // arm the stall watchdog from configure time
       } catch (e) {
-        this.fail(e instanceof Error ? e.message : String(e))
+        this.recover(e instanceof Error ? e.message : String(e))
         return
       }
     }
     try {
       dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: this.ts, data }))
       this.ts += 33333
+      this.lastDecodeMs = performance.now()
     } catch (e) {
-      this.fail(e instanceof Error ? e.message : String(e))
+      this.recover(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -117,6 +132,7 @@ class VideoView {
       }
     }
     this.pending = frame
+    this.lastOutputMs = performance.now()
     if (this.onFirstFrame) {
       this.onFirstFrame()
       this.onFirstFrame = null
@@ -159,6 +175,26 @@ class VideoView {
     } catch {
       /* already closed */
     }
+  }
+
+  /** Transient decode error / stall: tear the decoder down and resync at the next keyframe
+   *  (self-decodable now that the demuxer re-arms keyframes with SPS/PPS). Only surface a hard
+   *  failure if errors storm, i.e. the stream is genuinely unrecoverable. */
+  private recover(reason: string): void {
+    try {
+      this.decoder?.close()
+    } catch {
+      /* already closed */
+    }
+    this.decoder = null
+    this.configured = false
+    this.lastDecodeMs = 0
+    const now = performance.now()
+    if (now - this.errWindow > 5000) {
+      this.errWindow = now
+      this.errCount = 0
+    }
+    if (++this.errCount > 10) this.fail(reason)
   }
 
   private fail(m: string): void {

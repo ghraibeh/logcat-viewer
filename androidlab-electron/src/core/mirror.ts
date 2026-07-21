@@ -208,8 +208,13 @@ export class AnnexBDemuxer {
   private curAU: Uint8Array[] = []
   private curHasVcl = false
   private curKey = false
+  private curHasSps = false
   private codec: string | null = null
   private lastSps: Uint8Array | null = null
+  // Cached parameter-set NALs (with start codes) used to re-arm a keyframe that arrived
+  // without them — see finishAU.
+  private lastSpsNal: Uint8Array | null = null
+  private lastPpsNal: Uint8Array | null = null
   private spsGen = 0
 
   /** `avc1.PPCCLL` from the most recent SPS, else null. */
@@ -274,7 +279,8 @@ export class AnnexBDemuxer {
     this.curAU = []
     this.curHasVcl = false
     this.curKey = false
-    // keep codec across screenrecord reconnects
+    this.curHasSps = false
+    // keep codec + cached SPS/PPS across reconnects (used to re-arm bare keyframes)
   }
 
   private consumeNal(payload: Uint8Array, nalWithSc: Uint8Array, out: AccessUnit[]): void {
@@ -309,6 +315,10 @@ export class AnnexBDemuxer {
         this.lastSps = payload.slice()
         this.spsGen++
       }
+      this.lastSpsNal = nalWithSc.slice() // whole NAL (w/ start code), to re-arm keyframes
+      this.curHasSps = true
+    } else if (type === 8) {
+      this.lastPpsNal = nalWithSc.slice()
     }
 
     this.curAU.push(nalWithSc)
@@ -320,12 +330,23 @@ export class AnnexBDemuxer {
     if (this.curAU.length === 0) {
       this.curHasVcl = false
       this.curKey = false
+      this.curHasSps = false
       return null
     }
-    const au: AccessUnit = { data: concatAll(this.curAU), key: this.curKey }
+    // A keyframe that arrived WITHOUT its SPS/PPS (senders that transmit the parameter
+    // sets only once — e.g. the MobileLabKit Wi-Fi caster) can't be decoded on its own,
+    // so any decoder reset (queue backlog, rotation, transient error) would stall forever
+    // waiting for a keyframe it can't use. Re-arm the keyframe with the cached SPS/PPS so
+    // every keyframe is self-decodable and a reset always recovers at the next one.
+    const nals =
+      this.curKey && !this.curHasSps && this.lastSpsNal && this.lastPpsNal
+        ? [this.lastSpsNal, this.lastPpsNal, ...this.curAU]
+        : this.curAU
+    const au: AccessUnit = { data: concatAll(nals), key: this.curKey }
     this.curAU = []
     this.curHasVcl = false
     this.curKey = false
+    this.curHasSps = false
     return au
   }
 }

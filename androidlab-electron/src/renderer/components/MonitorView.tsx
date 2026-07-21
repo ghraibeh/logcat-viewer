@@ -160,9 +160,11 @@ function Card({
 
 export function MonitorView({
   c,
+  visible,
   onDetectLeaks
 }: {
   c: Controller
+  visible: boolean
   onDetectLeaks: (serial: string, pkg: string) => void
 }) {
   const [interval, setIntervalMs] = useState(1000)
@@ -190,12 +192,19 @@ export function MonitorView({
     }
   }, [])
 
-  // (Re)start polling on device / app / interval change; reset the readouts.
+  // Reset the readouts on device / app change (not on hide/show — the graph
+  // history survives leaving and re-entering the tab).
   useEffect(() => {
     setSt(initState(c.serial, c.appPkg))
-    if (c.serial) void window.androidlab.monitor.start(c.serial, c.appPkg, interval)
+  }, [c.serial, c.appPkg])
+
+  // Poll only while the tab is showing (the Qt MonitorWorker was visible-only
+  // too) — the Monitor tab stays mounted when hidden but must not keep
+  // touching the device.
+  useEffect(() => {
+    if (visible && c.serial) void window.androidlab.monitor.start(c.serial, c.appPkg, interval)
     else void window.androidlab.monitor.stop()
-  }, [c.serial, c.appPkg, interval])
+  }, [c.serial, c.appPkg, interval, visible])
 
   return (
     <div className="mon-view">

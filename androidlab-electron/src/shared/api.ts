@@ -29,6 +29,9 @@ import type {
   IosAppListResult,
   IosMirrorState,
   MlkMirrorState,
+  MlkCastState,
+  MlkCastReceiver,
+  MlkScreen,
   IosProcessListResult,
   LeakDone,
   LogcatState,
@@ -393,6 +396,26 @@ export interface AndroidLabApi {
     /** Raw 48kHz stereo 16-bit interleaved PCM audio from the casting phone. */
     onPcm(cb: (chunk: Uint8Array) => void): Unsubscribe
     onState(cb: (state: MlkMirrorState) => void): Unsubscribe
+    onFailed(cb: (message: string) => void): Unsubscribe
+  }
+  /** Mac→Android cast SENDER: capture this Mac's screen, H.264-encode in-page with
+   *  WebCodecs, and stream it to the MobileLabKit Mirror Android app (in Receive mode)
+   *  over the same _mlkmirror._tcp wire protocol. Video-only. */
+  mlkCast: {
+    /** Discover phones in "Receive a screen" mode over mDNS. The callback fires with the
+     *  current list as receivers appear; the returned Unsubscribe stops the browse. */
+    browse(cb: (receivers: MlkCastReceiver[]) => void): Unsubscribe
+    /** Capturable displays with a preview thumbnail (data URL) — for the screen picker. */
+    getScreens(): Promise<MlkScreen[]>
+    /** Choose which display getDisplayMedia captures next (by id); null = primary. */
+    setSource(id: string | null): Promise<boolean>
+    /** Connect to a receiver at host:port and send the stream header. True on success. */
+    connect(host: string, port: number, width: number, height: number): Promise<boolean>
+    /** Push one Annex-B chunk from the encoder; `key` marks a keyframe. Fire-and-forget. */
+    push(chunk: Uint8Array, key: boolean): void
+    /** Stop casting + close the socket. */
+    stop(): Promise<boolean>
+    onState(cb: (state: MlkCastState) => void): Unsubscribe
     onFailed(cb: (message: string) => void): Unsubscribe
   }
   /** Android Auto head unit (Android). The Mac runs the AA GAL protocol as a wireless

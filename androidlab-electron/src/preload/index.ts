@@ -12,6 +12,8 @@ import type {
   FlowBatch,
   IosMirrorState,
   MlkMirrorState,
+  MlkCastState,
+  MlkCastReceiver,
   LeakDone,
   LogcatState,
   MenuAction,
@@ -239,6 +241,23 @@ const api: AndroidLabApi = {
     onPcm: (cb) => subscribe<[Uint8Array]>(IPC.mlkMirrorPcm, cb),
     onState: (cb) => subscribe<[MlkMirrorState]>(IPC.mlkMirrorState, cb),
     onFailed: (cb) => subscribe<[string]>(IPC.mlkMirrorFailed, cb)
+  },
+  mlkCast: {
+    browse: (cb) => {
+      const un = subscribe<[MlkCastReceiver[]]>(IPC.mlkCastReceivers, cb)
+      void ipcRenderer.invoke(IPC.mlkCastBrowseStart)
+      return () => {
+        void ipcRenderer.invoke(IPC.mlkCastBrowseStop)
+        un()
+      }
+    },
+    getScreens: () => ipcRenderer.invoke(IPC.mlkCastScreens),
+    setSource: (id) => ipcRenderer.invoke(IPC.mlkCastSource, id),
+    connect: (host, port, width, height) => ipcRenderer.invoke(IPC.mlkCastConnect, host, port, width, height),
+    push: (chunk, key) => ipcRenderer.send(IPC.mlkCastPush, chunk, key),
+    stop: () => ipcRenderer.invoke(IPC.mlkCastStop),
+    onState: (cb) => subscribe<[MlkCastState]>(IPC.mlkCastState, cb),
+    onFailed: (cb) => subscribe<[string]>(IPC.mlkCastFailed, cb)
   },
   androidAuto: {
     start: (serial) => ipcRenderer.invoke(IPC.aaStart, serial),

@@ -201,6 +201,18 @@ export const IPC = {
   mlkMirrorState: 'mlk-mirror:state', // event: status (advertising name / connected / ended)
   mlkMirrorFailed: 'mlk-mirror:failed', // event: could not advertise / listen
 
+  // Mac→Android cast SENDER (this Mac casts its screen to the Android app over _mlkmirror._tcp).
+  mlkCastScreens: 'mlk-cast:screens', // list capturable screens (id + name + live thumbnail)
+  mlkCastSource: 'mlk-cast:source', // choose which screen getDisplayMedia captures (by id)
+  mlkCastConnect: 'mlk-cast:connect', // connect to a receiver + send the stream header
+  mlkCastPush: 'mlk-cast:push', // renderer → main: one Annex-B chunk (send, high-frequency)
+  mlkCastStop: 'mlk-cast:stop', // stop casting + close the socket
+  mlkCastState: 'mlk-cast:state', // event: casting status
+  mlkCastFailed: 'mlk-cast:failed', // event: connect / capture failure
+  mlkCastBrowseStart: 'mlk-cast:browse-start', // begin mDNS discovery of receivers
+  mlkCastBrowseStop: 'mlk-cast:browse-stop', // stop discovery
+  mlkCastReceivers: 'mlk-cast:receivers', // event: discovered receiver list (main -> renderer)
+
   // iOS touch/keyboard forwarding (WebDriverAgent/DeviceKit via go-ios)
   iosInputGetConfig: 'iosinput:get-config', // read persisted signing config
   iosInputSetConfig: 'iosinput:set-config', // save signing config (paths + ids, no key material)

@@ -15,10 +15,12 @@ export function Toolbar({
   onMirror,
   onAirplayReceiver,
   onMlkReceiver,
+  onMlkCast,
   onIosInput,
   mirrorOpen,
   airplayReceiverOn,
   mlkReceiverOn,
+  mlkCastOn,
   theme,
   onToggleTheme
 }: {
@@ -29,10 +31,13 @@ export function Toolbar({
   onAirplayReceiver: () => void
   /** Toggle the Android→Mac mirror receiver (our _mlkmirror._tcp service). */
   onMlkReceiver: () => void
+  /** Toggle the Mac→Android cast sender (this Mac casts its screen to the phone). */
+  onMlkCast: () => void
   onIosInput: () => void
   mirrorOpen: boolean
   airplayReceiverOn: boolean
   mlkReceiverOn: boolean
+  mlkCastOn: boolean
   theme: ThemeMode
   onToggleTheme: () => void
 }) {
@@ -76,6 +81,13 @@ export function Toolbar({
           onClick={onMlkReceiver}
         >
           <Icon name="receiveScreen" size={16} />
+        </button>
+        <button
+          className={`toggle${mlkCastOn ? ' active' : ''}`}
+          title="Cast this Mac to a phone — stream this Mac's screen to the MobileLabKit Mirror Android app (in Receive mode) over Wi-Fi"
+          onClick={onMlkCast}
+        >
+          <Icon name="laptop" size={16} />
         </button>
         {isIos ? (
           <button className="toggle" title="iOS touch input — signing settings" onClick={onIosInput}>
