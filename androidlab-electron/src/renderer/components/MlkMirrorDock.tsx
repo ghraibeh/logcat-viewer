@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnnexBDemuxer } from '@core/mirror'
 import type { MlkMirrorState } from '@shared/types'
 import { Icon } from './Icon'
+import { AppQr } from './AppQr'
 
 const HAS_WEBCODECS = typeof (globalThis as { VideoDecoder?: unknown }).VideoDecoder !== 'undefined'
 const MAX_DECODE_QUEUE = 6
@@ -353,24 +354,53 @@ export function MlkMirrorDock({ onClose }: { onClose: () => void }): JSX.Element
       </div>
       <div className="mlk-mirror-body">
         <canvas ref={canvasRef} className="mlk-mirror-canvas" style={{ display: live ? 'block' : 'none' }} />
-        {!live && (
-          <div className="mlk-mirror-card">
-            {error ? (
-              <>
-                <div className="mlk-mirror-card-title">Couldn't receive</div>
-                <div className="mlk-mirror-card-sub">{error}</div>
-              </>
-            ) : (
-              <>
-                <div className="mlk-mirror-card-title">Waiting for a phone…</div>
-                <div className="mlk-mirror-card-sub">
-                  On the Android phone open <b>MobileLabKit Mirror</b> ▸ <b>Cast this screen</b>, then
-                  pick <b>{state.name || 'this Mac'}</b>.
+        {!live &&
+          (error ? (
+            <div className="mlk-cast-scroll" style={{ width: '100%' }}>
+              <div className="mlk-cast-hero" style={{ color: 'var(--red)', background: 'color-mix(in srgb, var(--red) 16%, transparent)', boxShadow: '0 0 0 1px color-mix(in srgb, var(--red) 35%, transparent) inset' }}>
+                <Icon name="alertTriangle" size={28} />
+              </div>
+              <div>
+                <div className="mlk-cast-title">Couldn’t receive</div>
+                <div className="mlk-cast-sub" style={{ marginTop: 5 }}>{error}</div>
+              </div>
+            </div>
+          ) : (
+            <div className="mlk-cast-scroll" style={{ width: '100%' }}>
+              <div className="mlk-cast-hero searching">
+                <Icon name="android" size={30} />
+              </div>
+              <div>
+                <div className="mlk-cast-title">Cast an Android phone here</div>
+                <div className="mlk-cast-sub" style={{ marginTop: 5 }}>
+                  Show an Android phone’s screen on this Mac over Wi-Fi.
                 </div>
-              </>
-            )}
-          </div>
-        )}
+              </div>
+              <div className="mlk-cast-steps">
+                <div className="mlk-cast-step">
+                  <span className="mlk-cast-step-n">1</span>
+                  <span>Open <b>MobileLabKit Mirror</b> on your phone</span>
+                </div>
+                <div className="mlk-cast-step">
+                  <span className="mlk-cast-step-n">2</span>
+                  <span>Tap <b>Cast this screen</b></span>
+                </div>
+                <div className="mlk-cast-step">
+                  <span className="mlk-cast-step-n">3</span>
+                  <span>Pick <b>{state.name || 'this Mac'}</b></span>
+                </div>
+              </div>
+              <div className="mlk-cast-searching">
+                <span className="mlk-cast-dots">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                Waiting for a phone…
+              </div>
+              <AppQr />
+            </div>
+          ))}
       </div>
     </div>
   )

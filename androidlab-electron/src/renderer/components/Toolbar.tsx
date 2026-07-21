@@ -1,8 +1,8 @@
 /**
- * Shared device toolbar (device row): device picker + refresh + Mirror + AirPlay
- * + theme + About. The picker is a custom dropdown (DevicePicker) that lists each
- * device's transports (USB / Wi-Fi) as pickable sub-entries. App selection lives
- * in the left-hand AppPickerPanel. Stream controls live in the filter bar, as in ui.py.
+ * Shared device toolbar (device row): device picker + refresh + one Screen-mirroring
+ * button + theme + About. The single mirroring button opens the intent-first chooser
+ * (ScreenChooser) which routes to adb mirror / AirPlay / the MobileLabKit protocol —
+ * no more four separate mechanism toggles. App selection lives in the left AppPickerPanel.
  */
 import type { Controller } from '../state/useAppController'
 import { Icon } from './Icon'
@@ -12,37 +12,22 @@ import type { ThemeMode } from '../theme'
 export function Toolbar({
   c,
   onAbout,
-  onMirror,
-  onAirplayReceiver,
-  onMlkReceiver,
-  onMlkCast,
+  onMirrorHub,
   onIosInput,
-  mirrorOpen,
-  airplayReceiverOn,
-  mlkReceiverOn,
-  mlkCastOn,
+  mirrorHubOpen,
   theme,
   onToggleTheme
 }: {
   c: Controller
   onAbout: () => void
-  onMirror: () => void
-  /** Toggle the standalone AirPlay receiver (works with no device connected). */
-  onAirplayReceiver: () => void
-  /** Toggle the Android→Mac mirror receiver (our _mlkmirror._tcp service). */
-  onMlkReceiver: () => void
-  /** Toggle the Mac→Android cast sender (this Mac casts its screen to the phone). */
-  onMlkCast: () => void
+  /** Open/close the Screen-mirroring hub (the chooser that routes to every path). */
+  onMirrorHub: () => void
   onIosInput: () => void
-  mirrorOpen: boolean
-  airplayReceiverOn: boolean
-  mlkReceiverOn: boolean
-  mlkCastOn: boolean
+  mirrorHubOpen: boolean
   theme: ThemeMode
   onToggleTheme: () => void
 }) {
   const noAdb = c.adbReady && !c.adbPath
-  const hasDevice = !!c.serial
   const isIos = c.platform === 'ios'
 
   return (
@@ -61,33 +46,12 @@ export function Toolbar({
         </button>
         <div style={{ flex: 1 }} />
         <button
-          className={mirrorOpen && !airplayReceiverOn && !mlkReceiverOn ? 'active' : undefined}
-          title="Mirror the device's screen"
-          disabled={!hasDevice}
-          onClick={onMirror}
+          className={mirrorHubOpen ? 'active' : undefined}
+          title="Screen mirroring — mirror a device here, or cast this Mac to a phone"
+          onClick={onMirrorHub}
         >
-          Mirror
-        </button>
-        <button
-          className={`toggle${airplayReceiverOn ? ' active' : ''}`}
-          title="AirPlay receiver — advertise “MobileLabKit” so any iPhone on the network can mirror to it (no cable needed)"
-          onClick={onAirplayReceiver}
-        >
-          <Icon name="airplay" size={16} />
-        </button>
-        <button
-          className={`toggle${mlkReceiverOn ? ' active' : ''}`}
-          title="Receive an Android screen — advertise this Mac so the MobileLabKit Mirror Android app can cast to it over Wi-Fi"
-          onClick={onMlkReceiver}
-        >
-          <Icon name="receiveScreen" size={16} />
-        </button>
-        <button
-          className={`toggle${mlkCastOn ? ' active' : ''}`}
-          title="Cast this Mac to a phone — stream this Mac's screen to the MobileLabKit Mirror Android app (in Receive mode) over Wi-Fi"
-          onClick={onMlkCast}
-        >
-          <Icon name="laptop" size={16} />
+          <Icon name="monitor" size={15} />
+          <span style={{ marginLeft: 6 }}>Screen mirroring</span>
         </button>
         {isIos ? (
           <button className="toggle" title="iOS touch input — signing settings" onClick={onIosInput}>

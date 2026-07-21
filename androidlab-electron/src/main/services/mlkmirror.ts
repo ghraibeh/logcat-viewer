@@ -13,10 +13,9 @@
  * shape as iosairplay.ts: runToken guards stale async, start/stop/shutdown.
  */
 import { createServer, type Server, type Socket } from 'node:net'
-import { hostname } from 'node:os'
-import { execFileSync } from 'node:child_process'
 import type { MlkMirrorState } from '@shared/types'
 import { MlkAdvertiser } from './mlkmdns'
+import { deviceLabel } from '../deviceName'
 
 const MAGIC = Buffer.from('MLK1', 'ascii')
 const HEADER_LEN = 4 + 16 // magic + capW,capH,realW,realH
@@ -33,22 +32,6 @@ export interface MlkMirrorCallbacks {
   onFailed: (message: string) => void
 }
 
-/** The friendly receiver name shown in the phone's Cast list: "<Mac name> (Mirror)"
- *  — the macOS analogue of the Android app's "<device model> (Mirror)". */
-function receiverName(): string {
-  let base = ''
-  try {
-    if (process.platform === 'darwin') {
-      base = execFileSync('/usr/sbin/scutil', ['--get', 'ComputerName'], { timeout: 2000 })
-        .toString()
-        .trim()
-    }
-  } catch {
-    /* fall through to hostname */
-  }
-  if (!base) base = hostname().replace(/\.local$/, '')
-  return `${base} (Mirror)`
-}
 
 /** Reassembles the framed TCP stream into header + units. */
 class FrameParser {
@@ -101,7 +84,7 @@ export class MlkMirrorService {
   start(): string {
     this.stop()
     const token = ++this.runToken
-    this.name = receiverName()
+    this.name = deviceLabel()
     const server = createServer((sock) => this.onConnection(sock, token))
     this.server = server
     server.on('error', (e: NodeJS.ErrnoException) => {

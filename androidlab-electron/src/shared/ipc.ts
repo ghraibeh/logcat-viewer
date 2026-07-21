@@ -213,6 +213,9 @@ export const IPC = {
   mlkCastBrowseStop: 'mlk-cast:browse-stop', // stop discovery
   mlkCastReceivers: 'mlk-cast:receivers', // event: discovered receiver list (main -> renderer)
 
+  // This Mac's unified advertised name (AirPlay + MobileLabKit) — "<Computer> (MobileLabKit)".
+  deviceLabel: 'system:device-label',
+
   // iOS touch/keyboard forwarding (WebDriverAgent/DeviceKit via go-ios)
   iosInputGetConfig: 'iosinput:get-config', // read persisted signing config
   iosInputSetConfig: 'iosinput:set-config', // save signing config (paths + ids, no key material)

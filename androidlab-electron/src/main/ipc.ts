@@ -25,6 +25,7 @@ import { IosMirrorService } from './services/iosmirror'
 import { IosAirplayService } from './services/iosairplay'
 import { MlkMirrorService } from './services/mlkmirror'
 import { MlkCastService } from './services/mlkcast'
+import { deviceLabel } from './deviceName'
 import { AaHeadUnitService } from './services/aaheadunit'
 import * as iosinput from './services/iosinput'
 import type { IosInputConfig } from '@core/iosinput'
@@ -1268,6 +1269,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     }
     return mlkCastSvc
   }
+  ipcMain.handle(IPC.deviceLabel, () => deviceLabel())
   ipcMain.handle(IPC.mlkCastBrowseStart, () => {
     ensureMlkCast().startBrowse((list) => broadcast(IPC.mlkCastReceivers, list))
     return true

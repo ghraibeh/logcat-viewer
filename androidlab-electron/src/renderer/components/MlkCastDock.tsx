@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MlkCastState, MlkCastReceiver, MlkScreen } from '@shared/types'
 import { Icon } from './Icon'
+import { AppQr } from './AppQr'
 
 // MediaStreamTrackProcessor isn't in the standard DOM lib types (it lives in a separate
 // @types package). Electron 33's Chromium has it — declare the minimal surface we use.
@@ -625,6 +626,7 @@ export function MlkCastDock({ onClose }: { onClose: () => void }): JSX.Element {
               </button>
             )}
             {error ? <div className="mlk-cast-err">{error}</div> : null}
+            <AppQr />
           </div>
         )}
       </div>

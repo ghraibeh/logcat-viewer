@@ -409,6 +409,12 @@ export function IosMirrorDock({
     receiver || connection === 'wifi' ? 'airplay' : 'usb'
   )
   const [waiting, setWaiting] = useState(false) // airplay: advertised, phone not yet connected
+  // This Mac's advertised name (same across AirPlay + the MobileLabKit protocol) — shown in
+  // the connect guide so the user knows exactly what to tap in Control Center.
+  const [rxName, setRxName] = useState('this Mac')
+  useEffect(() => {
+    void window.androidlab.deviceLabel().then(setRxName)
+  }, [])
   // AirPlay stream resolution (persisted). Changing it restarts the receiver.
   const [resolution, setResolution] = useState<Resolution>(loadResolution)
   const [streamSettingsOpen, setStreamSettingsOpen] = useState(false)
@@ -807,9 +813,38 @@ export function IosMirrorDock({
           <div className="mirror-msg">{failed}</div>
         ) : !hasFrame ? (
           mode === 'airplay' && waiting ? (
-            <div className="mirror-loading ios-airplay-wait">
-              <Icon name="airplay" size={40} />
-              <div className="mirror-loading-tx">{message}</div>
+            <div className="mirror-loading ios-airplay-guide">
+              <div className="mlk-cast-hero searching">
+                <Icon name="airplay" size={30} />
+              </div>
+              <div>
+                <div className="mlk-cast-title">AirPlay to this Mac</div>
+                <div className="mlk-cast-sub" style={{ marginTop: 5 }}>
+                  Mirror an iPhone or iPad’s screen here over Wi-Fi — no cable needed.
+                </div>
+              </div>
+              <div className="mlk-cast-steps">
+                <div className="mlk-cast-step">
+                  <span className="mlk-cast-step-n">1</span>
+                  <span>Open <b>Control Center</b> on your iPhone or iPad</span>
+                </div>
+                <div className="mlk-cast-step">
+                  <span className="mlk-cast-step-n">2</span>
+                  <span>Tap <b>Screen Mirroring</b></span>
+                </div>
+                <div className="mlk-cast-step">
+                  <span className="mlk-cast-step-n">3</span>
+                  <span>Pick <b>{rxName}</b></span>
+                </div>
+              </div>
+              <div className="mlk-cast-searching">
+                <span className="mlk-cast-dots">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                Waiting for a device…
+              </div>
             </div>
           ) : mode === 'airplay' || serial ? (
             <div className="mirror-loading">

@@ -37,6 +37,7 @@ function subscribe<A extends unknown[]>(
 }
 
 const api: AndroidLabApi = {
+  deviceLabel: () => ipcRenderer.invoke(IPC.deviceLabel),
   adb: {
     find: () => ipcRenderer.invoke(IPC.adbFind),
     listDevices: () => ipcRenderer.invoke(IPC.adbListDevices),

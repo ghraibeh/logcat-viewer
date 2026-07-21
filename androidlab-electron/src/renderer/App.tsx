@@ -29,6 +29,8 @@ import { MirrorDock } from './components/MirrorDock'
 import { IosMirrorDock } from './components/IosMirrorDock'
 import { MlkMirrorDock } from './components/MlkMirrorDock'
 import { MlkCastDock } from './components/MlkCastDock'
+import { ScreenChooser, type MirrorPick } from './components/ScreenChooser'
+import { Icon } from './components/Icon'
 import { AndroidAutoView } from './components/AndroidAutoView'
 import { NoDeviceView } from './components/NoDeviceView'
 import { StatusBar } from './components/StatusBar'
@@ -102,6 +104,9 @@ export default function App() {
   const [mlkCast, setMlkCast] = useState(false)
   const mlkCastRef = useRef(mlkCast)
   mlkCastRef.current = mlkCast
+  // The mirroring hub (chooser): when docked with this true, the dock shows the intent-first
+  // picker instead of any single mirror. Picking a row clears it and starts that path.
+  const [chooser, setChooser] = useState(false)
   const [mirrorWidth, setMirrorWidth] = useState(360)
   const [secondaryReq, setSecondaryReq] = useState(0)
   const [leakReq, setLeakReq] = useState<{ serial: string; pkg: string } | null>(null)
@@ -381,75 +386,52 @@ export default function App() {
   }, [])
 
   // --- mirror open / dock / pop-out -------------------------------------
-  // Toolbar button: closed → docked; anything open → fully closed (also closes
-  // the popout window, no re-dock).
-  const toggleMirror = useCallback(() => {
-    // If a receiver or the cast sender is occupying the dock, switch it to the device
-    // mirror (keep the dock open) rather than closing.
-    if (airplayReceiverRef.current || mlkReceiverRef.current || mlkCastRef.current) {
-      setAirplayReceiver(false)
-      setMlkReceiver(false)
-      setMlkCast(false)
-      setMirrorMode('docked')
-      return
-    }
-    if (mirrorModeRef.current === 'closed') {
-      setMirrorMode('docked')
-    } else {
-      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
-      setMirrorMode('closed')
-    }
+  // --- screen-mirroring hub (one chooser replaces the old 4 toggles) ------
+  const clearSessions = useCallback(() => {
+    setAirplayReceiver(false)
+    setMlkReceiver(false)
+    setMlkCast(false)
   }, [])
 
-  // Top-bar AirPlay button: toggle the standalone receiver. Opening shows the docked
-  // receiver (waiting for a phone to pick "MobileLabKit"); closing tears it down.
-  const toggleAirplayReceiver = useCallback(() => {
-    if (airplayReceiverRef.current) {
-      // Also close the detached window if the receiver is currently popped out.
-      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
-      setAirplayReceiver(false)
-      setMirrorMode('closed')
-    } else {
-      // Taking over the dock from a device mirror popout: close that window first.
-      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
-      setMlkReceiver(false) // mutually exclusive with the Android mirror receiver
-      setMlkCast(false)
-      setAirplayReceiver(true)
-      setMirrorMode('docked')
-    }
+  /** Open the hub (chooser) in the dock. */
+  const openMirrorHub = useCallback(() => {
+    if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
+    clearSessions()
+    setChooser(true)
+    setMirrorMode('docked')
+  }, [clearSessions])
+
+  /** Fully close the dock. */
+  const closeMirror = useCallback(() => {
+    if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
+    clearSessions()
+    setChooser(false)
+    setMirrorMode('closed')
+  }, [clearSessions])
+
+  /** Toolbar button: open the hub when closed, close everything when open. */
+  const toggleMirrorHub = useCallback(() => {
+    if (mirrorModeRef.current === 'closed') openMirrorHub()
+    else closeMirror()
+  }, [openMirrorHub, closeMirror])
+
+  /** Pick a path from the chooser → hand off to that path's dock. */
+  const pickMirror = useCallback((kind: MirrorPick) => {
+    if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
+    setAirplayReceiver(kind === 'airplay')
+    setMlkReceiver(kind === 'mlkReceiver')
+    setMlkCast(kind === 'mlkCast')
+    setChooser(false)
+    setMirrorMode('docked')
   }, [])
 
-  // Toggle the Android→Mac mirror receiver: advertise this Mac over _mlkmirror._tcp so
-  // the MobileLabKit Mirror Android app can cast to it. Takes over the dock (mutually
-  // exclusive with a device mirror / the AirPlay receiver).
-  const toggleMlkReceiver = useCallback(() => {
-    if (mlkReceiverRef.current) {
-      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
-      setMlkReceiver(false)
-      setMirrorMode('closed')
-    } else {
-      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
-      setAirplayReceiver(false)
-      setMlkCast(false)
-      setMlkReceiver(true)
-      setMirrorMode('docked')
-    }
-  }, [])
-
-  // Toggle the Mac→Android cast sender: capture + encode this Mac and stream it to the
-  // Android app (in Receive mode). Takes over the dock, mutually exclusive with the others.
-  const toggleMlkCast = useCallback(() => {
-    if (mlkCastRef.current) {
-      setMlkCast(false)
-      setMirrorMode('closed')
-    } else {
-      if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
-      setAirplayReceiver(false)
-      setMlkReceiver(false)
-      setMlkCast(true)
-      setMirrorMode('docked')
-    }
-  }, [])
+  /** From an active session, return to the chooser ("switch source"). */
+  const backToChooser = useCallback(() => {
+    if (mirrorModeRef.current === 'popped') void window.androidlab.mirror.closePopout(false)
+    clearSessions()
+    setChooser(true)
+    setMirrorMode('docked')
+  }, [clearSessions])
 
   // Detach the docked mirror into its own OS window (Android Studio-style).
   const popOutMirror = useCallback(() => {
@@ -614,15 +596,9 @@ export default function App() {
       <Toolbar
         c={c}
         onAbout={() => setAbout(true)}
-        onMirror={toggleMirror}
-        onAirplayReceiver={toggleAirplayReceiver}
-        onMlkReceiver={toggleMlkReceiver}
-        onMlkCast={toggleMlkCast}
+        onMirrorHub={toggleMirrorHub}
         onIosInput={() => setIosInputOpen(true)}
-        mirrorOpen={mirrorMode !== 'closed'}
-        airplayReceiverOn={airplayReceiver}
-        mlkReceiverOn={mlkReceiver}
-        mlkCastOn={mlkCast}
+        mirrorHubOpen={mirrorMode !== 'closed'}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -639,7 +615,7 @@ export default function App() {
       <div className="main-row">
       <div className="main-content">
       {c.devices.length === 0 ? (
-        <NoDeviceView c={c} airplayOn={airplayReceiver} onAirplay={toggleAirplayReceiver} />
+        <NoDeviceView c={c} airplayOn={airplayReceiver} onAirplay={() => pickMirror('airplay')} />
       ) : null}
       {TABS.filter((t) => visitedTabs.has(t.id) && tabSupported(t.id, c.platform)).map((t) => (
         <div
@@ -654,68 +630,77 @@ export default function App() {
       {mirrorMode === 'docked' ? (
         <>
           <div className="mirror-splitter" onMouseDown={onMirrorSplitterDown} />
-          <div className="mirror-dock-holder" style={{ width: mirrorWidth, display: 'flex' }}>
-            {mlkCast ? (
-              <MlkCastDock
-                onClose={() => {
-                  setMlkCast(false)
-                  setMirrorMode('closed')
-                }}
-              />
-            ) : mlkReceiver ? (
-              <MlkMirrorDock
-                onClose={() => {
-                  setMlkReceiver(false)
-                  setMirrorMode('closed')
-                }}
-              />
-            ) : airplayReceiver ? (
-              <IosMirrorDock
-                receiver
-                serial={null}
-                onPopout={popOutMirror}
-                onClose={() => {
-                  setAirplayReceiver(false)
-                  setMirrorMode('closed')
-                }}
-                onCaptured={(r) =>
-                  r.ok
-                    ? setMsgBox({ title: 'Capture saved', body: `✓  ${r.message}`, dir: r.dir })
-                    : r.message !== 'cancelled'
-                      ? showToast(`✗ ${r.message}`)
-                      : undefined
-                }
-              />
-            ) : c.platform === 'ios' ? (
-              <IosMirrorDock
-                serial={c.serial}
-                connection={c.connection}
-                onClose={() => setMirrorMode('closed')}
-                onPopout={popOutMirror}
-                onCaptured={(r) =>
-                  r.ok
-                    ? setMsgBox({ title: 'Capture saved', body: `✓  ${r.message}`, dir: r.dir })
-                    : r.message !== 'cancelled'
-                      ? showToast(`✗ ${r.message}`)
-                      : undefined
-                }
-              />
-            ) : (
-              <MirrorDock
-                serial={c.serial}
-                install={c.install}
-                secondaryReq={secondaryReq}
-                onClose={() => setMirrorMode('closed')}
-                onPopout={popOutMirror}
-                onCaptured={(r) =>
-                  r.ok
-                    ? setMsgBox({ title: 'Capture saved', body: `✓  ${r.message}`, dir: r.dir })
-                    : r.message !== 'cancelled'
-                      ? showToast(`✗ ${r.message}`)
-                      : undefined
-                }
-              />
-            )}
+          <div className="mirror-dock-holder" style={{ width: mirrorWidth, display: 'flex', flexDirection: 'column' }}>
+            {/* One unified back bar for every mirror screen — the single, consistent way to
+                return to the chooser, regardless of which dock is active. */}
+            {!chooser ? (
+              <div className="mirror-back-bar">
+                <button className="mirror-back-btn" title="Back to Screen mirroring" onClick={backToChooser}>
+                  <Icon name="chevronLeft" size={15} />
+                  <span>Screen mirroring</span>
+                </button>
+              </div>
+            ) : null}
+            <div className="mirror-dock-body">
+              {chooser ? (
+                <ScreenChooser
+                  hasDevice={c.devices.length > 0}
+                  deviceName={
+                    c.devices.find((d) => d.serial === c.serial)?.description || c.serial || 'this device'
+                  }
+                  platform={c.platform}
+                  onPick={pickMirror}
+                  onClose={closeMirror}
+                />
+              ) : mlkCast ? (
+                <MlkCastDock onClose={closeMirror} />
+              ) : mlkReceiver ? (
+                <MlkMirrorDock onClose={closeMirror} />
+              ) : airplayReceiver ? (
+                <IosMirrorDock
+                  receiver
+                  serial={null}
+                  onPopout={popOutMirror}
+                  onClose={closeMirror}
+                  onCaptured={(r) =>
+                    r.ok
+                      ? setMsgBox({ title: 'Capture saved', body: `✓  ${r.message}`, dir: r.dir })
+                      : r.message !== 'cancelled'
+                        ? showToast(`✗ ${r.message}`)
+                        : undefined
+                  }
+                />
+              ) : c.platform === 'ios' ? (
+                <IosMirrorDock
+                  serial={c.serial}
+                  connection={c.connection}
+                  onClose={closeMirror}
+                  onPopout={popOutMirror}
+                  onCaptured={(r) =>
+                    r.ok
+                      ? setMsgBox({ title: 'Capture saved', body: `✓  ${r.message}`, dir: r.dir })
+                      : r.message !== 'cancelled'
+                        ? showToast(`✗ ${r.message}`)
+                        : undefined
+                  }
+                />
+              ) : (
+                <MirrorDock
+                  serial={c.serial}
+                  install={c.install}
+                  secondaryReq={secondaryReq}
+                  onClose={closeMirror}
+                  onPopout={popOutMirror}
+                  onCaptured={(r) =>
+                    r.ok
+                      ? setMsgBox({ title: 'Capture saved', body: `✓  ${r.message}`, dir: r.dir })
+                      : r.message !== 'cancelled'
+                        ? showToast(`✗ ${r.message}`)
+                        : undefined
+                  }
+                />
+              )}
+            </div>
           </div>
         </>
       ) : null}

@@ -20,6 +20,7 @@
  */
 import { app } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { deviceLabel } from '../deviceName'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { AnnexBDemuxer } from '@core/mirror'
@@ -34,8 +35,9 @@ export interface IosAirplayCallbacks {
   onFailed: (message: string) => void
 }
 
-/** The Bonjour name the receiver advertises — what the user taps on the phone. */
-export const AIRPLAY_NAME = 'MobileLabKit'
+/** The Bonjour name the receiver advertises — what the user taps on the phone. Unified with
+ *  the MobileLabKit protocol receiver (deviceLabel) so this Mac shows ONE identity everywhere. */
+const AIRPLAY_NAME = deviceLabel()
 
 /** Advertised AirPlay display resolution (the phone mirrors at up to this). */
 export interface AirplayResolution {

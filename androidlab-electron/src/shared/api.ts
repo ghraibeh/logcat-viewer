@@ -63,6 +63,8 @@ import type { IosNetworkInfo } from '@core/goios'
 export type Unsubscribe = () => void
 
 export interface AndroidLabApi {
+  /** This Mac's unified advertised name across AirPlay + the MobileLabKit protocol. */
+  deviceLabel(): Promise<string>
   adb: {
     find(): Promise<{ path: string | null }>
     listDevices(): Promise<Device[]>
