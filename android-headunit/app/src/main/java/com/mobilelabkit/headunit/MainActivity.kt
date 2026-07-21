@@ -22,6 +22,7 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -108,7 +109,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         @Suppress("ClickableViewAccessibility")
         surfaceView.setOnTouchListener { v, e -> onSurfaceTouch(v, e) }
         cover = findViewById(R.id.cover)
-        idle = findViewById<IdleView>(R.id.idle).apply { onSettings = { showConfigDialog(firstRun = false) } }
+        idle = findViewById<IdleView>(R.id.idle).apply {
+            onSettings = { showConfigDialog(firstRun = false) }
+            onMethodSelected = { m -> onIdleMethodPicked(m) }
+        }
         rootView.post { layoutSurface() }
 
         showWaiting()
@@ -214,6 +218,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
         dialog.setCancelable(true)
         dialog.show()
+        // The scrim/card wrappers are focusable=false (see dialog_disconnect.xml) so they can't
+        // steal D-pad focus from the buttons — but nothing then has focus by default on a TV
+        // remote, so seed it onto Cancel (the safe default) explicitly.
+        view.findViewById<View>(R.id.btnCancel).requestFocus()
     }
 
     /** Tear down the active session (same cleanup as a USB detach) and re-advertise for the next phone. */
@@ -458,7 +466,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private fun teardownProtocol() {
         focusWatchdog?.interrupt(); focusWatchdog = null
-        control?.stop(); transport?.stop(); transport = null
+        control?.stop(); input?.stop(); transport?.stop(); transport = null
         control = null; input = null; decoder?.release(); decoder = null
         audioSinks.forEach { it.release() }; audioSinks = emptyList()
     }
@@ -472,13 +480,39 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val inp = input ?: return false
         val action = when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> Input.TouchEvent.PointerAction.TOUCH_ACTION_DOWN
+            MotionEvent.ACTION_POINTER_DOWN -> Input.TouchEvent.PointerAction.TOUCH_ACTION_POINTER_DOWN
             MotionEvent.ACTION_MOVE -> Input.TouchEvent.PointerAction.TOUCH_ACTION_MOVE
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> Input.TouchEvent.PointerAction.TOUCH_ACTION_UP
+            MotionEvent.ACTION_POINTER_UP -> Input.TouchEvent.PointerAction.TOUCH_ACTION_POINTER_UP
+            MotionEvent.ACTION_UP -> Input.TouchEvent.PointerAction.TOUCH_ACTION_UP
+            MotionEvent.ACTION_CANCEL -> Input.TouchEvent.PointerAction.TOUCH_ACTION_CANCEL
             else -> return false
         }
-        val x = (e.x / v.width.coerceAtLeast(1) * videoConfig.width).toInt()
-        val y = (e.y / v.height.coerceAtLeast(1) * videoConfig.height).toInt()
-        inp.sendTouch(action, x, y)
+        // Forward EVERY active finger so multi-touch gestures (pinch-to-zoom, rotate) work — the
+        // phone needs all pointer positions each frame. actionIndex marks which finger this
+        // POINTER_DOWN/POINTER_UP is for. Coordinates map from the surface into AA display space.
+        val sx = videoConfig.width.toFloat() / v.width.coerceAtLeast(1)
+        val sy = videoConfig.height.toFloat() / v.height.coerceAtLeast(1)
+        val pointers = (0 until e.pointerCount).map { i ->
+            InputChannel.TouchPointer(e.getPointerId(i), (e.getX(i) * sx).toInt(), (e.getY(i) * sy).toInt())
+        }
+        inp.sendTouch(action, pointers, e.actionIndex)
+        return true
+    }
+
+    // Android TV remote: once AA video is actually streaming, D-pad/select/back/media drive the
+    // projected car UI on the phone (same as a head unit's hardware buttons) instead of the
+    // activity's own view focus. Before streaming starts, keys fall through to the normal
+    // Activity handling so the idle screen / settings dialog stay D-pad-navigable.
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
+        forwardKeyToPhone(keyCode, down = true) || super.onKeyDown(keyCode, event)
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean =
+        forwardKeyToPhone(keyCode, down = false) || super.onKeyUp(keyCode, event)
+
+    private fun forwardKeyToPhone(keyCode: Int, down: Boolean): Boolean {
+        if (!streaming || keyCode !in REMOTE_FORWARDED_KEYCODES) return false
+        val inp = input ?: return false
+        inp.sendKey(keyCode, down)
         return true
     }
 
@@ -575,12 +609,16 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val stretch = view.findViewById<CheckBox>(R.id.cbStretch).apply {
             isChecked = HeadUnitConfig.savedScaling(this@MainActivity) == HeadUnitConfig.Scaling.FILL
         }
-        val wireless = view.findViewById<CheckBox>(R.id.cbWireless).apply {
-            isChecked = HeadUnitConfig.wirelessEnabled(this@MainActivity)
-        }
-        val softAp = view.findViewById<CheckBox>(R.id.cbSoftAp).apply {
-            isChecked = HeadUnitConfig.softApEnabled(this@MainActivity)
-        }
+        // Connection method as ONE exclusive choice. AP = host our own Wi-Fi + show the join QR;
+        // picking USB or Wireless turns the AP back off (see the OK handler + startSoftApIfEnabled).
+        val groupConn = view.findViewById<RadioGroup>(R.id.groupConn)
+        groupConn.check(
+            when {
+                HeadUnitConfig.softApEnabled(this) -> R.id.rbConnAp
+                HeadUnitConfig.wirelessEnabled(this) -> R.id.rbConnWireless
+                else -> R.id.rbConnUsb
+            }
+        )
 
         val dialog = Dialog(this, android.R.style.Theme_Translucent_NoTitleBar)
         // Full-screen window (the sheet itself is bottom-anchored via the XML's layout_gravity)
@@ -594,12 +632,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         view.findViewById<View>(R.id.btnOk).setOnClickListener {
             val chosen = if (group.checkedRadioButtonId == 2) HeadUnitConfig.Orientation.LANDSCAPE else HeadUnitConfig.Orientation.PORTRAIT
             HeadUnitConfig.saveScaling(this, if (stretch.isChecked) HeadUnitConfig.Scaling.FILL else HeadUnitConfig.Scaling.FIT)
-            HeadUnitConfig.saveWireless(this, wireless.isChecked)
-            HeadUnitConfig.saveSoftAp(this, softAp.isChecked)
+            val ap = groupConn.checkedRadioButtonId == R.id.rbConnAp
+            // Wireless server + NSD are useful for both Wireless and AP modes; only USB turns them off.
+            HeadUnitConfig.saveWireless(this, ap || groupConn.checkedRadioButtonId == R.id.rbConnWireless)
+            HeadUnitConfig.saveSoftAp(this, ap)
             dialog.dismiss()
             applyConfig(chosen)
             updateWirelessMode()
-            startSoftApIfEnabled()
+            startSoftApIfEnabled()  // AP on → starts SoftAP + the QR appears; else stops it
             if (firstRun) startFromIntentOrScan()
         }
 
@@ -630,6 +670,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             }
         })
         dialog.show()
+        // Same as the disconnect dialog: the scrim/sheet are focusable=false so they don't steal
+        // D-pad focus, but something still needs to hold it initially on a TV remote — seed it
+        // onto the currently-checked orientation option.
+        group.findViewById<View>(group.checkedRadioButtonId).requestFocus()
     }
 
     /** Persist + apply an orientation choice; detect its resolution and relayout. */
@@ -648,12 +692,35 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    /** Which method the persisted config maps to (AP wins over plain wireless). */
+    private fun savedMethod(): IdleView.Method = when {
+        HeadUnitConfig.softApEnabled(this) -> IdleView.Method.AP_WIFI
+        HeadUnitConfig.wirelessEnabled(this) -> IdleView.Method.WIRELESS
+        else -> IdleView.Method.USB
+    }
+
+    /** User tapped a method card on the idle screen: persist it and (dis)engage the SoftAP.
+     *  AP WIFI → host our own Wi-Fi + show the join QR; USB/Wireless → turn the SoftAP back off. */
+    private fun onIdleMethodPicked(m: IdleView.Method) {
+        when (m) {
+            IdleView.Method.AP_WIFI -> { HeadUnitConfig.saveWireless(this, true); HeadUnitConfig.saveSoftAp(this, true) }
+            IdleView.Method.WIRELESS -> { HeadUnitConfig.saveWireless(this, true); HeadUnitConfig.saveSoftAp(this, false) }
+            IdleView.Method.USB -> { HeadUnitConfig.saveWireless(this, false); HeadUnitConfig.saveSoftAp(this, false) }
+        }
+        updateWirelessMode()
+        startSoftApIfEnabled()  // AP on → SoftAP + QR appear (on onReady); else stops it
+        if (!streaming) showWaiting()
+    }
+
     /** Configure the idle screen for the WAITING state: which methods are available, the SoftAP
      *  join card (if hosting), and the display label. */
     private fun showWaiting() = runOnUiThread {
         if (streaming) return@runOnUiThread
         val ap = softApHost?.info
-        idle.setMethods(usb = true, wireless = HeadUnitConfig.wirelessEnabled(this) || ap != null)
+        // All three methods are always selectable (tapping one engages it); sync the highlight to
+        // the persisted mode without re-firing the tap callback.
+        idle.setMethods(usb = true, wireless = true)
+        idle.setActiveMethod(savedMethod())
         idle.setSoftAp(ap)
         // No SoftAP: if wireless is on, we're already listening on TCP:5288 — offer a scan-to-connect
         // QR for this shared-network IP too, instead of only a generic "waiting" card.
@@ -706,5 +773,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         private const val REQ_WIRELESS = 102
         private const val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
         private const val WRAP = FrameLayout.LayoutParams.WRAP_CONTENT
+
+        /** Keys an Android TV remote sends that make sense to hand to the projected AA session. */
+        private val REMOTE_FORWARDED_KEYCODES = setOf(
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_BACK,
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
+            KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_PREVIOUS
+        )
     }
 }

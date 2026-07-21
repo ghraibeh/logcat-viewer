@@ -4,7 +4,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:clickable="true"
-    android:focusable="true">
+    android:focusable="false">
 
     <LinearLayout
         android:layout_width="300dp"
@@ -15,7 +15,7 @@
         android:paddingBottom="18dp"
         android:background="@drawable/bg_dialog_card"
         android:clickable="true"
-        android:focusable="true">
+        android:focusable="false">
 
         <FrameLayout
             android:layout_width="36dp"

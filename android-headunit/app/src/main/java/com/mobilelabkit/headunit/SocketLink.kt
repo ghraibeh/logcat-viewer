@@ -37,7 +37,7 @@ class SocketLink(private val socket: Socket) : AapLink {
         return try {
             output.write(data); output.flush(); data.size
         } catch (e: Exception) {
-            Log.w(TAG, "socket write error: ${e.message}"); -1
+            Log.w(TAG, "socket write error: ${e.javaClass.simpleName}: ${e.message}"); -1
         }
     }
 

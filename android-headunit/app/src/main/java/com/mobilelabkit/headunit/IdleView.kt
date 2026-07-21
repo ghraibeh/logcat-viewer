@@ -41,6 +41,9 @@ class IdleView @JvmOverloads constructor(
     enum class Method { USB, WIRELESS, AP_WIFI }
 
     var onSettings: (() -> Unit)? = null
+    /** Fired when the USER taps a method card — the host turns the SoftAP on (AP_WIFI) or off
+     *  (USB/WIRELESS) in response. NOT fired by [setActiveMethod] (programmatic sync). */
+    var onMethodSelected: ((Method) -> Unit)? = null
 
     private lateinit var stateText: TextView
     private lateinit var stateRow: LinearLayout
@@ -100,6 +103,23 @@ class IdleView @JvmOverloads constructor(
         stopUsbAnimation(); stopWirelessAnimation()
     }
 
+    /** Nothing in this screen ever calls requestFocus() on its own, so a TV remote's D-pad has
+     *  nothing to move focus from/to whenever the idle screen (re)appears — e.g. after a session
+     *  disconnects and we're back to "waiting for a phone". Seed focus each time. */
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        if (changedView === this && visibility == View.VISIBLE && built) requestInitialFocus()
+    }
+
+    private fun requestInitialFocus() {
+        val target = when (stMethod) {
+            Method.USB -> chipUsb
+            Method.WIRELESS -> chipWireless
+            Method.AP_WIFI -> chipApWifi
+        }
+        (if (target.visibility == View.VISIBLE) target else findViewById(R.id.btnSettings)).requestFocus()
+    }
+
     // --- construction ------------------------------------------------------------
     private fun build(landscape: Boolean) {
         if (built) { stopUsbAnimation(); stopWirelessAnimation() }
@@ -157,15 +177,25 @@ class IdleView @JvmOverloads constructor(
     private fun applyAll() {
         applyState(); updateChipSelection(); applyConnect()
         chipUsb.visibility = vis(stUsb); chipWireless.visibility = vis(stWireless)
+        if (visibility == View.VISIBLE) requestInitialFocus()
     }
 
-    /** Tapping a method chip previews it in the connect area — USB/Wireless/AP WIFI are mutually
-     *  exclusive tabs, not simultaneous info chips. */
+    /** Tapping a method chip selects it (USB/Wireless/AP WIFI are mutually exclusive) AND tells the
+     *  host to (dis)engage that transport — AP WIFI starts the SoftAP + shows its join QR, USB and
+     *  Wireless stop it. */
     private fun selectMethod(m: Method) {
         if (stMethod == m) return
         stMethod = m
         updateChipSelection()
         applyConnect()
+        onMethodSelected?.invoke(m)
+    }
+
+    /** Highlight [m] WITHOUT firing [onMethodSelected] — used to sync the tab to the persisted mode
+     *  (initial load, or a change made from the Settings sheet). */
+    fun setActiveMethod(m: Method) {
+        stMethod = m
+        if (built) { updateChipSelection(); applyConnect() }
     }
 
     private fun updateChipSelection() {

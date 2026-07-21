@@ -74,7 +74,7 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toStartOf="@id/guideMid"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/logoBlock"
+        app:layout_constraintTop_toBottomOf="@+id/logoBlock"
         app:layout_constraintVertical_bias="0.50">
 
         <View

@@ -47,10 +47,17 @@ class AapTransport(
     fun sendMessage(channel: Int, messageId: Int, content: ByteArray, encrypted: Boolean) {
         Log.i(TAG, "TX %-12s id=0x%04x enc=%b len=%d".format(AapProto.channelName(channel), messageId, encrypted, content.size))
         val plain = u16be(messageId) + content
-        val body = if (encrypted) crypto.encrypt(plain) else plain
         val enc = if (encrypted) AapProto.ENC_ENCRYPTED else AapProto.ENC_PLAIN
 
         synchronized(sendLock) {
+            // Encrypt INSIDE the lock. SSLEngine.wrap() (crypto.encrypt) must be serialized across
+            // senders: two concurrent wraps — e.g. the ~1s keepalive ping (ping thread) and a touch
+            // event (UI thread), or an audio/media response (reader thread) — interleave the ordered
+            // outbound TLS record stream, so the phone can't decrypt it and drops the link. During
+            // smooth streaming only the ping sends, so it's stable until a touch adds a second
+            // concurrent sender — which is exactly why touching the projected screen killed the
+            // session. (wrap vs the reader thread's unwrap/decrypt is a different direction — safe.)
+            val body = if (encrypted) crypto.encrypt(plain) else plain
             val total = body.size
             var off = 0
             val chunk = AapProto.MAX_FRAME_PAYLOAD
