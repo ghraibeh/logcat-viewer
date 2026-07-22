@@ -17,7 +17,7 @@ android {
 
         // One ABI covers the Galaxy A55 and arm64 emulators; add x86_64 for Intel
         // emulators (also build that ABI's deps: ABIS="arm64-v8a x86_64" build-android-deps.sh).
-        ndk { abiFilters += listOf("arm64-v8a") }
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
 
         externalNativeBuild {
             cmake {
