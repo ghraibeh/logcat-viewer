@@ -97,6 +97,9 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     @Volatile private var controlConnected = false
     private val controlQueue = LinkedBlockingQueue<MirrorProtocol.Touch>(256)
     private var controlWriter: Thread? = null
+    // Set by the decoder (any thread) when its reference chain broke; the control writer
+    // turns it into a CTRL_NEED_IDR so the sender emits a fresh keyframe immediately.
+    private val needIdr = java.util.concurrent.atomic.AtomicBoolean(false)
     private var lastTouchMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -211,7 +214,12 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
                     }
                 }
             }
-        }.also { it.start() }
+        }.also { dec ->
+            // Reference chain broke (drop/rebuild) → have the sender IDR right away instead
+            // of smearing corrupted P-frames until the next scheduled keyframe.
+            dec.onNeedKeyframe = { needIdr.set(true) }
+            dec.start()
+        }
         acquireWifi()
         bindWifiThen { startServer() }
     }
@@ -272,11 +280,19 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     private fun openServerSocket(): ServerSocket? = try {
         ServerSocket().apply {
             reuseAddress = true
+            // Small receive buffer (inherited by accepted sockets — must be set before
+            // bind): the kernel's default is megabytes, i.e. SECONDS of stream a slow
+            // decoder can silently fall behind — video that never drops just arrives
+            // late, forever. Every KB the kernel may hold is standing latency when the
+            // decoder paces the chain (~4 ms/KB at 2 Mbps); 48 KB ≈ 200 ms worst case.
+            // TCP backpressure then reaches the sender within a frame or two, and its
+            // queue-overflow drop + keyframe machinery governs latency as designed.
+            runCatching { receiveBufferSize = 48 * 1024 }
             bind(InetSocketAddress(MirrorProtocol.DEFAULT_PORT))
         }
     } catch (e: Exception) {
         Log.w(TAG, "fixed port ${MirrorProtocol.DEFAULT_PORT} busy (${e.message}); using ephemeral")
-        try { ServerSocket(0) } catch (e2: Exception) { null }
+        try { ServerSocket(0).apply { runCatching { receiveBufferSize = 48 * 1024 } } } catch (e2: Exception) { null }
     }
 
     private fun serverLoop() {
@@ -353,6 +369,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             try {
                 val cout = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
                 while (controlConnected && !socket.isClosed) {
+                    if (needIdr.getAndSet(false)) MirrorProtocol.writeNeedIdr(cout)
                     val t = controlQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
                     MirrorProtocol.writeTouch(cout, t)
                 }

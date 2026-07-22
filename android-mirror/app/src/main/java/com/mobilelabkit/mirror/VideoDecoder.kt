@@ -23,6 +23,17 @@ import java.util.concurrent.TimeUnit
  * Real-time backpressure: [submit] BLOCKS rather than dropping — dropping a mid-stream P-frame
  * corrupts the picture until the next keyframe, so blocking backpressures TCP and lets the
  * SENDER make the clean drop decision (via keyframe resync).
+ *
+ * Loss handling (ported from the AirPlay receiver's battle-tested decoder): any dropped or
+ * cleared frame closes an IDR gate — subsequent P-frames are HELD (last good frame stays on
+ * screen) instead of being decoded against missing references, which is what smears the whole
+ * picture into blocky garbage. Because we own the sender, the gate also fires
+ * [onNeedKeyframe] so the encoder emits a fresh IDR immediately (sub-frame resync) rather
+ * than waiting out the 1 s GOP. The stall watchdog is anchored on the oldest
+ * fed-but-undrained frame (a paused sender can never trip it), and a chronically stalling
+ * hardware decoder (some head units ship broken OMX decoders that starve for tens of
+ * seconds) gets replaced with Android's software AVC decoder for the rest of the session —
+ * at our ≤960-long-edge stream sizes software decode is cheap and deterministic.
  */
 class VideoDecoder(
     private val fallbackW: Int,
@@ -47,12 +58,40 @@ class VideoDecoder(
     private var curW = 0
     private var curH = 0
 
-    // Stall watchdog: if we keep feeding the codec input but it stops rendering output, the
-    // decoder has wedged (lost sync on a dropped frame, or is bound to a surface that got swapped
-    // out by an aspect/rotation resize). Rebuild it — it re-syncs at the sender's next keyframe
-    // (≤1 s). Only fires while input is still arriving, so it never trips on a paused sender.
+    /** Fired (any decoder thread) when the reference chain broke — a frame was dropped/cleared
+     *  or the codec was rebuilt — and the sender should emit a fresh IDR now. Throttled to one
+     *  request per [KEYFRAME_REQ_THROTTLE_MS]. The receiver forwards it over the reverse
+     *  control channel (CTRL_NEED_IDR). */
+    @Volatile var onNeedKeyframe: (() -> Unit)? = null
+    @Volatile private var lastKeyframeReqMs = 0L
+
+    // Resync gate: set whenever a frame was lost (queue clear, input-buffer drop, codec
+    // rebuild). Non-config units are held until the next IDR — decoding past a gap is what
+    // produces the smeared/blocky picture. Config units bypass the gate.
+    @Volatile private var awaitingIdr = false
+
+    // Stall watchdog state (decode thread only): pendingSinceMs = when the OLDEST currently
+    // undrained frame was queued (0 = none). Anchored to fed frames — a paused sender can
+    // never look like a stall. firstOutputSeen widens the leash during codec warmup.
+    private var pendingSinceMs = 0L
     private var lastInputMs = 0L
-    private var lastRenderMs = 0L
+    private var firstOutputSeen = false
+
+    // IDR-starvation detector: how long the gate has been holding a live stream.
+    private var heldSinceMs = 0L
+    private var lastHeldMs = 0L
+
+    // Chronic-stall fallback: repeated watchdog rebuilds mark the hardware decoder as
+    // unreliable and switch to Android's software AVC decoder for the session.
+    private var stallRebuilds = 0
+    private var firstStallMs = 0L
+    @Volatile private var forcedCodecName: String? = null
+
+    // Latency governor: a queue that stays deep means we're rendering seconds behind live
+    // (a slow stretch let backlog accumulate, and a no-drop pipeline never drains it — the
+    // picture is clean but permanently late). Skip forward once, cleanly.
+    private var deepSinceMs = 0L
+    private var lastCatchupMs = 0L
 
     fun start() {
         if (running) return
@@ -75,11 +114,24 @@ class VideoDecoder(
         if (!running) return
         try {
             if (!queue.offer(Chunk(data, isConfig), 2, TimeUnit.SECONDS)) {
-                queue.poll(); queue.offer(Chunk(data, isConfig)) // last resort if decode wedged
+                // Last resort if decode wedged: something is now missing from the reference
+                // chain — gate until a fresh IDR (and ask the sender for one immediately).
+                Log.w(TAG, "decode queue wedged — dropping oldest, holding for next IDR")
+                queue.poll(); queue.offer(Chunk(data, isConfig))
+                awaitingIdr = true
+                requestKeyframe()
             }
         } catch (e: InterruptedException) {
             // shutting down
         }
+    }
+
+    /** Throttled [onNeedKeyframe] — one wire request per KEYFRAME_REQ_THROTTLE_MS. */
+    private fun requestKeyframe() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastKeyframeReqMs < KEYFRAME_REQ_THROTTLE_MS) return
+        lastKeyframeReqMs = now
+        onNeedKeyframe?.invoke()
     }
 
     /** A sender disconnected — flush so the next connection reconfigures cleanly. */
@@ -108,13 +160,51 @@ class VideoDecoder(
                 val u = queue.poll(10, TimeUnit.MILLISECONDS)
                 if (u != null) feed(u)
                 drain(info)
-                // Watchdog: input still flowing but no output for a while → wedged decoder.
                 val now = SystemClock.elapsedRealtime()
-                if (codec != null && lastInputMs != 0L &&
-                    now - lastRenderMs > STALL_MS && now - lastInputMs < STALL_MS
+                // Stall watchdog: a fed frame sat undrained for the limit while newer input
+                // kept flowing ⇒ the codec has wedged. Anchored to the oldest PENDING frame
+                // — a paused/quiet sender leaves nothing pending and can never trip this.
+                val stallLimit = if (firstOutputSeen) STALL_MS else STARTUP_STALL_MS
+                if (codec != null && pendingSinceMs != 0L &&
+                    now - pendingSinceMs > stallLimit && now - lastInputMs < STALL_MS
                 ) {
-                    Log.w(TAG, "decoder stalled (${now - lastRenderMs}ms no output, input live) — rebuilding")
-                    resetCodec() // next frame reconfigures from lastConfig; re-syncs at next keyframe
+                    Log.w(TAG, "decoder stalled (oldest fed frame ${now - pendingSinceMs}ms undrained, input live) — rebuilding")
+                    // Repeated stalls mean the hardware decoder itself is broken (some head
+                    // units starve for tens of seconds) — switch to software AVC for the
+                    // session; at ≤960-long-edge it decodes everything comfortably.
+                    if (firstStallMs == 0L || now - firstStallMs > STALL_WINDOW_MS) {
+                        firstStallMs = now; stallRebuilds = 0
+                    }
+                    if (++stallRebuilds >= STALL_FALLBACK_COUNT && forcedCodecName == null) {
+                        forcedCodecName = softwareAvcDecoderName()
+                        Log.w(TAG, "hardware decoder unreliable ($stallRebuilds stalls) — switching to ${forcedCodecName ?: "<none found>"}")
+                    }
+                    resetCodec()
+                    requestKeyframe()
+                }
+                // IDR starvation: the gate has held a live stream for a while — the keyframe
+                // we asked for got lost somewhere. Ask again (throttled).
+                if (awaitingIdr && heldSinceMs != 0L &&
+                    now - heldSinceMs > STARVED_MS && now - lastHeldMs < 1000L
+                ) {
+                    Log.w(TAG, "IDR-starved ${now - heldSinceMs}ms with frames arriving — re-requesting keyframe")
+                    heldSinceMs = now
+                    requestKeyframe()
+                }
+                // Latency governor: the queue staying deep = rendering behind live. One
+                // clean skip-forward: drop the backlog, gate, and resync on a fresh IDR.
+                if (queue.size >= CATCHUP_DEPTH) {
+                    if (deepSinceMs == 0L) deepSinceMs = now
+                    if (now - deepSinceMs > CATCHUP_AFTER_MS && now - lastCatchupMs > CATCHUP_COOLDOWN_MS) {
+                        Log.w(TAG, "decode backlog ≥$CATCHUP_DEPTH frames for ${now - deepSinceMs}ms — skipping forward to live")
+                        queue.clear()
+                        awaitingIdr = true
+                        requestKeyframe()
+                        lastCatchupMs = now
+                        deepSinceMs = 0L
+                    }
+                } else {
+                    deepSinceMs = 0L
                 }
             } catch (ie: InterruptedException) {
                 break
@@ -142,6 +232,19 @@ class VideoDecoder(
             return // csd-0 already carries the SPS/PPS
         }
 
+        if (awaitingIdr) {
+            if (!containsNalType(u.data, NAL_IDR)) {
+                // Hold the last good frame until the resync IDR arrives — decoding past a
+                // gap is what smears the picture. Time the hold for the starvation detector.
+                val now = SystemClock.elapsedRealtime()
+                if (heldSinceMs == 0L) heldSinceMs = now
+                lastHeldMs = now
+                return
+            }
+            awaitingIdr = false
+            heldSinceMs = 0L
+        }
+
         var mc = codec
         if (mc == null) {
             // First frame after a surface (re)create — rebuild from the last SPS/PPS we saw.
@@ -151,13 +254,24 @@ class VideoDecoder(
             if (!configure(s, cfg, w, h)) return
             mc = codec ?: return
         }
-        val idx = mc.dequeueInputBuffer(8_000)
-        if (idx < 0) return // no free input buffer → drop (real-time)
+        // Be patient: at 30 fps the codec's buffers briefly saturate now and then; an 8 ms
+        // patience turned each blip into a dropped frame, and a drop costs a full IDR
+        // round-trip. Only a genuinely wedged codec keeps us waiting the full 250 ms —
+        // that's the stall watchdog's job.
+        val idx = mc.dequeueInputBuffer(INPUT_WAIT_US)
+        if (idx < 0) {
+            Log.w(TAG, "no input buffer in ${INPUT_WAIT_US / 1000}ms — dropping frame, holding for next IDR")
+            awaitingIdr = true
+            requestKeyframe()
+            return
+        }
         val buf = mc.getInputBuffer(idx) ?: return
         buf.clear()
         buf.put(u.data)
         mc.queueInputBuffer(idx, 0, u.data.size, ptsIndex++ * 16_666L, 0)
-        lastInputMs = SystemClock.elapsedRealtime()
+        val now = SystemClock.elapsedRealtime()
+        if (pendingSinceMs == 0L || now - lastInputMs > STALL_MS) pendingSinceMs = now
+        lastInputMs = now
     }
 
     private fun drain(info: MediaCodec.BufferInfo) {
@@ -167,7 +281,8 @@ class VideoDecoder(
             when {
                 idx >= 0 -> {
                     mc.releaseOutputBuffer(idx, true) // render to the Surface
-                    lastRenderMs = SystemClock.elapsedRealtime()
+                    pendingSinceMs = 0L // codec is producing — nothing considered stuck
+                    firstOutputSeen = true
                 }
                 idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
                     Log.i(TAG, "output format: ${mc.outputFormat}")
@@ -184,15 +299,16 @@ class VideoDecoder(
             val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h)
             fmt.setByteBuffer("csd-0", ByteBuffer.wrap(csd)) // fully specify before start()
             fmt.setInteger("low-latency", 1)                 // API 30+ hint; harmless elsewhere
-            val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            val forced = forcedCodecName
+            val c = if (forced != null) MediaCodec.createByCodecName(forced)
+                    else MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             c.configure(fmt, s, null, 0)
             c.start()
             codec = c
             curW = w; curH = h
             ptsIndex = 0
-            // Fresh codec — arm the watchdog from now so it isn't tripped by startup latency.
-            val now = SystemClock.elapsedRealtime()
-            lastRenderMs = now; lastInputMs = 0L
+            pendingSinceMs = 0L; lastInputMs = 0L // fresh codec — nothing fed, nothing pending
+            firstOutputSeen = false
             Log.i(TAG, "MediaCodec configured ${w}x${h} (${c.name})")
             onVideoSize?.invoke(w, h)
             true
@@ -210,7 +326,46 @@ class VideoDecoder(
         }
         codec = null
         curW = 0; curH = 0
-        lastInputMs = 0L // don't let the watchdog re-fire before the rebuilt codec renders
+        // A fresh codec has no reference frames — hold everything until the next IDR
+        // (config units bypass the gate and reconfigure; the sender answers our keyframe
+        // request within a frame or two, so the hold is brief).
+        awaitingIdr = true
+        pendingSinceMs = 0L; lastInputMs = 0L
+        firstOutputSeen = false
+        heldSinceMs = 0L
+    }
+
+    /** Android's software AVC decoder, for when the hardware one proves broken. */
+    private fun softwareAvcDecoderName(): String? {
+        return try {
+            val infos = android.media.MediaCodecList(android.media.MediaCodecList.ALL_CODECS).codecInfos
+            infos.firstOrNull { info ->
+                !info.isEncoder &&
+                    info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } &&
+                    (if (android.os.Build.VERSION.SDK_INT >= 29) info.isSoftwareOnly
+                     else info.name.startsWith("OMX.google.", ignoreCase = true))
+            }?.name
+        } catch (_: Exception) { null }
+    }
+
+    /** Whether any NAL of [type] is present (no emulation-stripping/allocation needed). */
+    private fun containsNalType(data: ByteArray, type: Int): Boolean {
+        val n = data.size
+        var i = 0
+        while (i + 2 < n) {
+            val sc = when {
+                data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte() -> 3
+                i + 3 < n && data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                    data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte() -> 4
+                else -> 0
+            }
+            if (sc == 0) { i++; continue }
+            val nalStart = i + sc
+            if (nalStart >= n) break
+            if ((data[nalStart].toInt() and 0x1F) == type) return true
+            i = nalStart + 1
+        }
+        return false
     }
 
     // --- H.264 SPS resolution parsing -------------------------------------------------------
@@ -328,7 +483,17 @@ class VideoDecoder(
 
     companion object {
         private const val TAG = "mirror-video"
-        private const val STALL_MS = 1500L // input flowing but no render this long ⇒ rebuild
+        private const val NAL_IDR = 5
+        private const val STALL_MS = 1500L // a fed frame undrained this long (input live) ⇒ rebuild
+        private const val STARTUP_STALL_MS = 4500L // pre-first-output leash (cold-start latency)
+        private const val STARVED_MS = 3000L // gate holding a live stream this long ⇒ re-request IDR
+        private const val INPUT_WAIT_US = 250_000L // input-buffer patience (drops cost an IDR round-trip)
+        private const val KEYFRAME_REQ_THROTTLE_MS = 300L // at most one CTRL_NEED_IDR per this window
+        private const val STALL_WINDOW_MS = 60_000L // stall-count window for the software fallback
+        private const val STALL_FALLBACK_COUNT = 3 // stalls within the window ⇒ software decoder
+        private const val CATCHUP_DEPTH = 4 // queue depth (of 6) considered "behind live"
+        private const val CATCHUP_AFTER_MS = 700L // deep this long ⇒ skip forward
+        private const val CATCHUP_COOLDOWN_MS = 3000L // min gap between skips
         private val HIGH_PROFILES =
             intArrayOf(100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135)
     }

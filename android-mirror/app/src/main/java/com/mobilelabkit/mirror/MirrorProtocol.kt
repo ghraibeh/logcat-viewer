@@ -46,6 +46,12 @@ object MirrorProtocol {
 
     // Reverse-channel (receiver → sender) live touch events.
     const val CTRL_TOUCH = 1
+    // Reverse-channel keyframe request: the receiver's decoder lost sync (dropped a frame,
+    // starved, or rebuilt) and wants the encoder to emit an IDR now instead of smearing
+    // reference-corrupted P-frames until the next scheduled keyframe. One byte, no payload.
+    // Both ends must be at least this protocol build (an older sender's control reader
+    // treats any unknown type as fatal) — the two ends of this app always ship together.
+    const val CTRL_NEED_IDR = 2
     const val TOUCH_DOWN = 0
     const val TOUCH_MOVE = 1
     const val TOUCH_UP = 2
@@ -90,15 +96,26 @@ object MirrorProtocol {
         out.flush()
     }
 
-    /** Reads one reverse-channel control message. */
-    fun readTouch(din: DataInputStream): Touch {
+    fun writeNeedIdr(out: DataOutputStream) {
+        out.writeByte(CTRL_NEED_IDR)
+        out.flush()
+    }
+
+    /** Reads one reverse-channel control message: a [Touch], or null for a keyframe request
+     *  (CTRL_NEED_IDR carries no payload). Throws on an unknown type (wrong/old peer). */
+    fun readControl(din: DataInputStream): Touch? {
         val type = din.readByte().toInt()
-        if (type != CTRL_TOUCH) throw IllegalStateException("unknown control type $type")
-        val action = din.readByte().toInt()
-        val x = din.readInt()
-        val y = din.readInt()
-        val dt = din.readInt()
-        return Touch(action, x, y, dt)
+        return when (type) {
+            CTRL_NEED_IDR -> null
+            CTRL_TOUCH -> {
+                val action = din.readByte().toInt()
+                val x = din.readInt()
+                val y = din.readInt()
+                val dt = din.readInt()
+                Touch(action, x, y, dt)
+            }
+            else -> throw IllegalStateException("unknown control type $type")
+        }
     }
 
     /** Build a KIND_META unit's 16-byte payload (sender screen rotated → new geometry). Sent

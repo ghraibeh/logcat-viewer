@@ -131,13 +131,18 @@ class ScreenCaptureService : Service() {
         try {
             val s = Socket()
             s.tcpNoDelay = true
-            // Bound the OS send buffer so a slow link backpressures our app queue quickly
-            // (the queue then resyncs via keyframe) instead of hiding seconds of frames in the
-            // kernel. Plenty for LAN throughput (bandwidth-delay product is tiny on Wi-Fi).
-            runCatching { s.sendBufferSize = 128 * 1024 }
+            // Bound the OS send buffer so a slow link/receiver backpressures our app queue
+            // quickly (the queue then resyncs via keyframe) instead of hiding seconds of
+            // frames in the kernel. When the receiver's decoder paces below the capture fps,
+            // TCP keeps every buffer on the path FULL — each KB here is standing latency
+            // (~4 ms per KB at 2 Mbps). 32 KB ≈ 130 ms worst case, still far above what LAN
+            // throughput needs (bandwidth-delay product on Wi-Fi is a few KB).
+            runCatching { s.sendBufferSize = 32 * 1024 }
             s.connect(InetSocketAddress(host, port), 8000)
             socket = s
-            val dout = DataOutputStream(BufferedOutputStream(s.getOutputStream(), 1 shl 16))
+            // Small stream buffer (syscall batching only) — writeLoop flushes every unit, so
+            // no frame ever waits here for the buffer to fill.
+            val dout = DataOutputStream(BufferedOutputStream(s.getOutputStream(), 8 * 1024))
             out = dout
             MirrorProtocol.writeHeader(dout, width, height, realW, realH)
 
@@ -174,14 +179,21 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    /** Reads live touch events from the receiver and injects them via the accessibility
-     *  service (null if the user hasn't enabled it → touches ignored). */
+    /** Reads reverse-channel messages from the receiver: live touch events (injected via the
+     *  accessibility service — null instance if the user hasn't enabled it → ignored) and
+     *  keyframe requests (the receiver's decoder lost sync → give it a fresh IDR now rather
+     *  than let it smear corrupted P-frames until the next scheduled keyframe). */
     private fun controlReadLoop(s: Socket) {
         try {
             val cin = DataInputStream(s.getInputStream())
             while (running && !s.isClosed) {
-                val t = MirrorProtocol.readTouch(cin)
-                MirrorAccessibilityService.instance?.onTouch(t)
+                val t = MirrorProtocol.readControl(cin)
+                if (t == null) {
+                    Log.i(TAG, "receiver requested a keyframe — forcing IDR")
+                    encoder?.requestKeyFrame()
+                } else {
+                    MirrorAccessibilityService.instance?.onTouch(t)
+                }
             }
         } catch (e: Exception) {
             Log.i(TAG, "control reader ended: ${e.message}")
@@ -275,7 +287,10 @@ class ScreenCaptureService : Service() {
             while (running) {
                 val f = queue.pollFirst(200, TimeUnit.MILLISECONDS) ?: continue
                 MirrorProtocol.writeUnit(dout, f.data, 0, f.data.size, f.kind)
-                if (queue.isEmpty()) dout.flush()
+                // Flush every unit: under continuous flow the queue is rarely empty, and an
+                // unflushed frame sitting in the stream buffer is pure added latency. One
+                // syscall per unit at ≤30 fps is nothing.
+                dout.flush()
             }
         } catch (e: InterruptedException) {
             // shutting down
