@@ -28,6 +28,10 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
 
     private data class Unit(val data: ByteArray, val isConfig: Boolean)
 
+    /** Fired (on the decode thread) whenever the coded stream size changes — initial
+     *  configure or a rotation-driven resolution swap. Caller hops to the UI thread. */
+    @Volatile var onVideoSize: ((Int, Int) -> kotlin.Unit)? = null
+
     private val queue = LinkedBlockingQueue<Unit>(120)
     @Volatile private var surface: Surface? = null
     @Volatile private var running = false
@@ -42,6 +46,14 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
     @Volatile private var lastConfig: ByteArray? = null
     private var curW = 0
     private var curH = 0
+
+    // Set whenever a unit gets dropped (queue overflow or no free input buffer). H.264
+    // P-frames reference the frame before them, so decoding past a drop feeds the codec
+    // frames whose reference is gone — that's what shows up as blocky/corrupted video
+    // (worst during scrolling, which is exactly when frame size/rate spikes and a real-time
+    // decoder is most likely to fall behind). Once set, non-config units are held (last good
+    // frame stays on screen) until the next IDR resyncs the stream cleanly.
+    @Volatile private var awaitingIdr = false
 
     fun start() {
         if (running) return
@@ -61,7 +73,11 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
     fun submit(data: ByteArray, isConfig: Boolean) {
         if (!running) return
         if (!queue.offer(Unit(data, isConfig))) {
-            queue.poll()               // drop oldest, keep newest (stay live)
+            // Backlog means the decode thread can't keep up. Dropping just the oldest unit
+            // still corrupts every P-frame downstream of the gap, so clear the whole backlog
+            // and resync at the next IDR instead of feeding the codec a broken reference chain.
+            queue.clear()
+            awaitingIdr = true
             queue.offer(Unit(data, isConfig))
         }
     }
@@ -120,6 +136,11 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
             return
         }
 
+        if (awaitingIdr) {
+            if (!containsNalType(u.data, NAL_IDR)) return // hold last good frame until resync
+            awaitingIdr = false
+        }
+
         var mc = codec
         if (mc == null) {
             // No codec yet (first frame after a surface (re)create). Rebuild from the last
@@ -131,7 +152,10 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
             mc = codec ?: return
         }
         val idx = mc.dequeueInputBuffer(8_000)
-        if (idx < 0) return // no free input buffer → drop (real-time)
+        if (idx < 0) {
+            awaitingIdr = true // dropped: everything after this is now an orphaned reference
+            return
+        }
         val buf = mc.getInputBuffer(idx) ?: return
         buf.clear()
         buf.put(u.data)
@@ -170,6 +194,7 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
             curW = w; curH = h
             ptsIndex = 0
             Log.i(TAG, "MediaCodec configured ${w}x${h} (${c.name})")
+            onVideoSize?.invoke(w, h)
             true
         } catch (e: Exception) {
             Log.e(TAG, "MediaCodec configure failed (${w}x${h})", e)
@@ -185,6 +210,7 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
         }
         codec = null
         curW = 0; curH = 0
+        awaitingIdr = false // a fresh codec has no stale reference chain to resync from
     }
 
     // --- H.264 SPS resolution parsing ------------------------------------------
@@ -195,6 +221,26 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
     private fun parseSpsDimensions(annexb: ByteArray): Pair<Int, Int>? {
         val sps = findNalPayload(annexb, 7) ?: return null
         return try { decodeSpsDims(sps) } catch (_: Exception) { null }
+    }
+
+    /** Whether any NAL of [type] is present (no emulation-stripping/allocation needed). */
+    private fun containsNalType(data: ByteArray, type: Int): Boolean {
+        val n = data.size
+        var i = 0
+        while (i + 2 < n) {
+            val sc = when {
+                data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte() -> 3
+                i + 3 < n && data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                    data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte() -> 4
+                else -> 0
+            }
+            if (sc == 0) { i++; continue }
+            val nalStart = i + sc
+            if (nalStart >= n) break
+            if ((data[nalStart].toInt() and 0x1F) == type) return true
+            i = nalStart + 1
+        }
+        return false
     }
 
     /** First NAL of [type]'s payload (bytes after the 1-byte NAL header), emulation-stripped. */
@@ -326,6 +372,7 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
 
     companion object {
         private const val TAG = "airplay-video"
+        private const val NAL_IDR = 5
         private val HIGH_PROFILES =
             intArrayOf(100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135)
     }
