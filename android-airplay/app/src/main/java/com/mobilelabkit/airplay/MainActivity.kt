@@ -23,7 +23,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.provider.Settings
 import android.text.SpannableStringBuilder
 import android.text.style.ForegroundColorSpan
@@ -106,25 +105,8 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     private val ui = Handler(Looper.getMainLooper())
     private val hideControls = Runnable { if (streaming) controls.visibility = View.GONE }
 
-    // The mirror video and the HTTP control connection are separate TCP streams: when the
-    // iPhone drops ungracefully (leaves Wi-Fi, crashes, out of range) the frames just stop
-    // while the control connection lingers, so onClientDisconnected() can fire late or not
-    // at all. This watchdog treats "no frame for a while" as a disconnect and resets.
-    private val watchdog = object : Runnable {
-        override fun run() {
-            if (streaming && SystemClock.elapsedRealtime() - lastFrameMs > STALL_MS) {
-                Log.i(TAG, "no video for >${STALL_MS}ms — treating as disconnect")
-                streaming = false
-                decoder?.onDisconnected()
-                resetScreen()
-            }
-            ui.postDelayed(this, WATCHDOG_INTERVAL_MS)
-        }
-    }
-
     @Volatile private var streaming = false
     @Volatile private var restarting = false
-    @Volatile private var lastFrameMs = 0L
     private var muted = false
 
     private val advertisedName: String = DEFAULT_NAME
@@ -203,7 +185,19 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
         // viewer feel.
         scaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
+                // View.scaleX/Y always scale around the view's own CENTER pivot, not the pinch
+                // focal point — left alone, the content visually slides out from under your
+                // fingers as it scales (reads as "the view bouncing"). Compensate with a pan
+                // delta that keeps the point under the fingers' midpoint fixed on screen (the
+                // touch listener is on `root`, but the SurfaceView is centered within it via
+                // Gravity.CENTER, so root's center IS the SurfaceView's pivot in root-space).
+                val prevScale = zoomScale
                 setZoom(zoomScale * detector.scaleFactor)
+                val cx = root.width / 2f
+                val cy = root.height / 2f
+                val dx = (detector.focusX - cx) * (prevScale - zoomScale)
+                val dy = (detector.focusY - cy) * (prevScale - zoomScale)
+                applyPan(panX + dx, panY + dy)
                 return true
             }
         })
@@ -230,7 +224,6 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
             dec.start()
         }
         showWaiting()
-        ui.postDelayed(watchdog, WATCHDOG_INTERVAL_MS)
         acquireWifi()
         // Pin the whole process to the Wi-Fi network BEFORE creating the native sockets.
         // Android routes each app's sockets by fwmark; without this, our mDNS multicast
@@ -518,7 +511,6 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     // --- NativeReceiver.Listener (called on native threads) --------------------
     override fun onVideoFrame(data: ByteArray, pts: Long, isConfig: Boolean) {
         decoder?.submit(data, isConfig)
-        lastFrameMs = SystemClock.elapsedRealtime() // feeds the stall watchdog
         if (!streaming && !isConfig) {
             streaming = true
             runOnUiThread {
@@ -529,19 +521,25 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
         }
     }
 
+    // onClientConnected/onClientDisconnected fire from the native RTSP HTTP server's generic
+    // per-TCP-connection accept/close (conn_init/conn_destroy in jni_bridge.c) — NOT from the
+    // mirror video socket specifically. The iPhone opens short-lived HTTP connections for
+    // ancillary requests (notably a periodic /feedback heartbeat) on the SAME control port
+    // while mirroring continues uninterrupted, so these fire every few seconds even though
+    // nothing about the actual video session changed. Treating either as "connected"/
+    // "disconnected" blanked the screen (and tore down the decoder) constantly during
+    // completely normal use — visible as a black screen every ~4s, recovering with a blocky
+    // picture once a real frame arrived and the decoder had to reconfigure from scratch. So
+    // neither touches UI/decoder state at all; only a genuine first video frame (onVideoFrame)
+    // or an explicit user action (resolution change → restartReceiver) does. This does mean
+    // there's no automatic "waiting for iPhone" fallback if mirroring is ever genuinely stopped
+    // — the last frame just stays on screen — which is the deliberately preferred tradeoff here.
     override fun onClientConnected() {
-        streaming = false
-        runOnUiThread {
-            cover.visibility = View.VISIBLE // blank any stale frame until new frames arrive
-            status.text = "Connecting…"
-            setWaitingVisible(true)
-        }
+        Log.i(TAG, "control connection opened (may be an ancillary/feedback connection, not necessarily the mirror socket)")
     }
 
     override fun onClientDisconnected() {
-        streaming = false
-        decoder?.onDisconnected()
-        resetScreen()
+        Log.i(TAG, "control connection closed (may be an ancillary/feedback connection, not necessarily the mirror socket)")
     }
 
     // --- aspect-ratio-preserving layout ------------------------------------------
@@ -591,7 +589,6 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     override fun onDestroy() {
         super.onDestroy()
         ui.removeCallbacks(hideControls)
-        ui.removeCallbacks(watchdog)
         NativeReceiver.stop()
         decoder?.release()
         decoder = null
@@ -802,12 +799,6 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     companion object {
         private const val TAG = "airplay"
         private const val DEFAULT_NAME = "MobileLabKit.android"
-
-        /** Reset the screen if no video frame arrives for this long while streaming — the
-         *  AirPlay mirror sends continuously, so a multi-second gap means the client is gone.
-         *  Generous enough not to trip on a brief network hiccup. */
-        private const val STALL_MS = 4000L
-        private const val WATCHDOG_INTERVAL_MS = 1000L
 
         private const val MIN_ZOOM = 1f
         private const val MAX_ZOOM = 5f

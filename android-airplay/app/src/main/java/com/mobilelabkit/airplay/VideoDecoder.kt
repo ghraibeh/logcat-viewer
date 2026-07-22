@@ -22,7 +22,17 @@ import java.util.concurrent.TimeUnit
  * working audio. A stream-resolution change (rotation) rebuilds the codec.
  *
  * Real-time: if the input queue backs up we drop the oldest, and if no input buffer is
- * free we drop the frame.
+ * free we drop the frame (both hold the last good frame on screen and resync at the next
+ * IDR — see `awaitingIdr` — rather than feed the codec a broken P-frame reference chain).
+ * `setSurface` hot-swaps a running codec's render target via `setOutputSurface` instead of a
+ * full teardown/reconfigure when the Surface instance changes (e.g. entering/leaving
+ * picture-in-picture recreates it) — decode state (reference frames) doesn't depend on the
+ * output surface, so this avoids a black gap while waiting for a fresh keyframe that a full
+ * reset would force. Deliberately NO "no output for N ms" stall watchdog: an earlier version
+ * rebuilt the codec on that heuristic, but it fired far too readily under normal conditions
+ * and made things worse (repeatedly tearing down a codec that wasn't actually stuck). Idle
+ * stretches with no new frames are normal — see the `onClientConnected`/`onClientDisconnected`
+ * note in MainActivity.
  */
 class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
 
@@ -40,6 +50,12 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
     private var codec: MediaCodec? = null
     private var ptsIndex = 0L
     @Volatile private var resetRequested = false
+
+    // A pending setSurface() call, applied on the decode thread (all codec touches stay on
+    // one thread). Surface itself can legitimately become null, so a separate flag — not
+    // nullability — marks "there's a change to apply".
+    @Volatile private var pendingSurface: Surface? = null
+    @Volatile private var surfaceChangePending = false
 
     // The SPS/PPS (Annex-B) most recently seen. Kept so we can (re)build the codec after a
     // surface loss without waiting for the iPhone to resend its config.
@@ -61,12 +77,17 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
         thread = Thread({ loop() }, "airplay-decode").also { it.start() }
     }
 
-    /** The SurfaceView's surface just became available (or was destroyed → null). */
+    /** The SurfaceView's surface became available/destroyed/recreated (e.g. entering/leaving
+     *  picture-in-picture, which swaps in a genuinely new Surface instance). Deferred to the
+     *  decode thread — see [applySurfaceChange] — which hot-swaps the running codec's output
+     *  via `MediaCodec.setOutputSurface` rather than tearing it down: decode state (reference
+     *  frames) isn't tied to the render target, so this keeps playback continuous through the
+     *  swap instead of blanking to black until the next keyframe (what a full reconfigure
+     *  would require). */
     fun setSurface(s: Surface?) {
-        surface = s
-        // Surface gone: tear the codec down (on the decode thread) and reconfigure on the
-        // next config/frame. Flagged rather than reset here so codec ops stay on one thread.
-        if (s == null) resetRequested = true
+        if (s === surface) return
+        pendingSurface = s
+        surfaceChangePending = true
     }
 
     /** Feed one Annex-B unit from the native receiver. Non-blocking (drops when full). */
@@ -104,7 +125,11 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
             try {
                 if (resetRequested) {
                     resetRequested = false
-                    resetCodec() // handle disconnect / surface-loss on this thread only
+                    resetCodec() // handle disconnect on this thread only
+                }
+                if (surfaceChangePending) {
+                    surfaceChangePending = false
+                    applySurfaceChange(pendingSurface)
                 }
                 val u = queue.poll(10, TimeUnit.MILLISECONDS)
                 if (u != null) feed(u)
@@ -116,6 +141,24 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
                 resetCodec()
             }
         }
+    }
+
+    /** Apply a pending setSurface() on the decode thread: hot-swap the running codec's output
+     *  surface when possible (preserves decode state — no black gap, no keyframe wait), else
+     *  fall back to a full reset (surface lost, no codec yet, or the swap itself failed). */
+    private fun applySurfaceChange(s: Surface?) {
+        val oldSurface = surface
+        surface = s
+        val mc = codec
+        if (s != null && mc != null && oldSurface != null) {
+            try {
+                mc.setOutputSurface(s)
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "setOutputSurface failed, falling back to a full reset", e)
+            }
+        }
+        resetCodec()
     }
 
     private fun feed(u: Unit) {
