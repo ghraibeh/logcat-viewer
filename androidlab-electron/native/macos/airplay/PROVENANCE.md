@@ -49,7 +49,7 @@ handshake that AirPlay screen mirroring requires. The added `vendor/` libraries
 
 ## Local edits to the vendored tree
 
-The RPiPlay core is kept **pristine** for easy re-syncing, with three exceptions:
+The RPiPlay core is kept **pristine** for easy re-syncing, with four exceptions:
 
 1. `dnssd.c` — added a `USE_BUNDLED_MDNS` path that points its dns_sd function
    pointers at `bonjour_shim` (instead of the OS Bonjour/Avahi), so the receiver
@@ -65,6 +65,18 @@ The RPiPlay core is kept **pristine** for easy re-syncing, with three exceptions
    bogus subdomain and Apple's resolver silently dropped the whole service.
    Behaviour is unchanged for names without backslashes. (Both edit sites are
    marked "AndroidLab edit".)
+4. `raop_rtp_mirror.c` — the TCP mirror-frame parser trusted every length prefix off
+   the wire (`payload_size`, the H.264 NAL length prefixes, the SPS/PPS sizes) with
+   only an `assert()` (compiled out in release builds) or no check at all. A
+   torn/misaligned read — more likely at the higher packet rate a fast-scrolling
+   mirror produces — could walk `memcpy`/array access past the end of a buffer,
+   corrupting decoder input and showing up as blocky/broken video on the receiver
+   that persisted until the iPhone's encoder next sent a spontaneous keyframe (there
+   is no keyframe-request path in this codebase). Every length is now bounds-checked
+   against the actual payload before use; a malformed one drops just that frame/config
+   packet (logged) instead of corrupting memory or the bitstream. All edit sites are
+   marked "AndroidLab edit". This file is shared with the Android receiver
+   (`android-airplay/`), so the fix applies to both.
 
 `bonjour_shim.c` (our own file, not vendored) also gained: RFC 6762 §11 multicast
 TTL 255; Android-only `IP_MULTICAST_IF` pinning to the discovered LAN IPv4 (Android

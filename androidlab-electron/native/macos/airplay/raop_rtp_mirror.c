@@ -143,6 +143,12 @@ raop_rtp_init_mirror_aes(raop_rtp_mirror_t *raop_rtp_mirror, uint64_t streamConn
 //#define DUMP_H264
 
 #define RAOP_PACKET_LEN 32768
+// AndroidLab edit: sanity ceiling for the 4-byte payload_size read off the wire. Without
+// this, a torn/misaligned TCP read (more likely under the higher packet rate a
+// fast-scrolling mirror produces) can hand back a garbage length — including negative
+// values that reinterpret as multi-gigabyte mallocs — which previously went straight into
+// malloc() with no validation at all.
+#define MIRROR_MAX_PAYLOAD (16 * 1024 * 1024)
 /**
  * Mirror
  */
@@ -263,6 +269,15 @@ raop_rtp_mirror_thread(void *arg)
             unsigned short payload_type = byteutils_get_short(packet, 4) & 0xff;
             unsigned short payload_option = byteutils_get_short(packet, 6);
 
+            // AndroidLab edit: the framing gives no way to relocate the next real header
+            // once a length prefix is bogus, so the only safe move is to drop this
+            // connection and let the client reconnect cleanly.
+            if (payload_size <= 0 || payload_size > MIRROR_MAX_PAYLOAD) {
+                logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                           "raop_rtp_mirror bogus payload_size %d — resetting stream", payload_size);
+                break;
+            }
+
             if (payload == NULL) {
                 payload = malloc(payload_size);
                 readstart = 0;
@@ -311,13 +326,29 @@ raop_rtp_mirror_thread(void *arg)
                 int nalu_type = payload[4] & 0x1f;
                 int nalu_size = 0;
                 int nalus_count = 0;
+                // AndroidLab edit: the length-prefix parse below used to trust `nc_len`
+                // with only an `assert` (compiled out in NDEBUG/release builds) — a
+                // malformed value either spun forever or walked the read/write past the
+                // end of payload_decrypted, corrupting decoder input. That's exactly the
+                // failure mode reported as "blocky/broken video while scrolling": faster
+                // motion means a higher packet rate, which is when a torn read is most
+                // likely to hand back a bad length. Now any malformed length just drops
+                // this one frame (decoder holds the last good frame — see VideoDecoder.kt's
+                // awaitingIdr) instead of corrupting memory or the bitstream.
+                bool nalu_malformed = false;
 
                 // It seems the AirPlay protocol prepends NALs with their size, which we're replacing with the 4-byte
                 // start code for the NAL Byte-Stream Format.
-                while (nalu_size < payload_size) {
+                while (nalu_size + 4 <= payload_size) {
                     int nc_len = (payload_decrypted[nalu_size + 0] << 24) | (payload_decrypted[nalu_size + 1] << 16) |
                                  (payload_decrypted[nalu_size + 2] << 8) | (payload_decrypted[nalu_size + 3]);
-                    assert(nc_len > 0);
+                    if (nc_len <= 0 || nalu_size + 4 + nc_len > payload_size) {
+                        logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                                   "raop_rtp_mirror malformed NAL length %d at offset %d/%d — dropping frame",
+                                   nc_len, nalu_size, payload_size);
+                        nalu_malformed = true;
+                        break;
+                    }
 
                     payload_decrypted[nalu_size + 0] = 0;
                     payload_decrypted[nalu_size + 1] = 0;
@@ -335,13 +366,15 @@ raop_rtp_mirror_thread(void *arg)
                 fwrite(payload_decrypted, payload_size, 1, file);
 #endif
 
-                h264_decode_struct h264_data;
-                h264_data.data_len = payload_size;
-                h264_data.data = payload_decrypted;
-                h264_data.frame_type = 1;
-                h264_data.pts = ntp_timestamp;
+                if (!nalu_malformed) {
+                    h264_decode_struct h264_data;
+                    h264_data.data_len = payload_size;
+                    h264_data.data = payload_decrypted;
+                    h264_data.frame_type = 1;
+                    h264_data.pts = ntp_timestamp;
 
-                raop_rtp_mirror->callbacks.video_process(raop_rtp_mirror->callbacks.cls, raop_rtp_mirror->ntp, &h264_data);
+                    raop_rtp_mirror->callbacks.video_process(raop_rtp_mirror->callbacks.cls, raop_rtp_mirror->ntp, &h264_data);
+                }
                 free(payload_decrypted);
 
             } else if ((payload_type & 255) == 1) {
@@ -356,23 +389,42 @@ raop_rtp_mirror_thread(void *arg)
 
                 // The sps_pps is not encrypted
                 h264codec_t h264;
-                h264.version = payload[0];
-                h264.profile_high = payload[1];
-                h264.compatibility = payload[2];
-                h264.level = payload[3];
-                h264.reserved_6_and_nal = payload[4];
-                h264.reserved_3_and_sps = payload[5];
-                h264.sps_size = (short) (((payload[6] & 255) << 8) + (payload[7] & 255));
-                logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG, "raop_rtp_mirror sps size = %d", h264.sps_size);
-                h264.sequence_parameter_set = malloc(h264.sps_size);
-                memcpy(h264.sequence_parameter_set, payload + 8, h264.sps_size);
-                h264.number_of_pps = payload[h264.sps_size + 8];
-                h264.pps_size = (short) (((payload[h264.sps_size + 9] & 2040) + payload[h264.sps_size + 10]) & 255);
-                h264.picture_parameter_set = malloc(h264.pps_size);
-                logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG, "raop_rtp_mirror pps size = %d", h264.pps_size);
-                memcpy(h264.picture_parameter_set, payload + h264.sps_size + 11, h264.pps_size);
+                h264.sequence_parameter_set = NULL;
+                h264.picture_parameter_set = NULL;
+                // AndroidLab edit: same class of bug as the video-NAL path above — sps_size/
+                // pps_size come straight off the wire and previously fed memcpy() with no
+                // check against payload_size at all. Bound each read before trusting it,
+                // and drop the config packet instead of reading/copying past the buffer.
+                bool config_valid = payload_size >= 8;
+                if (config_valid) {
+                    h264.version = payload[0];
+                    h264.profile_high = payload[1];
+                    h264.compatibility = payload[2];
+                    h264.level = payload[3];
+                    h264.reserved_6_and_nal = payload[4];
+                    h264.reserved_3_and_sps = payload[5];
+                    h264.sps_size = (short) (((payload[6] & 255) << 8) + (payload[7] & 255));
+                    config_valid = h264.sps_size >= 0 && 8 + h264.sps_size + 3 <= payload_size;
+                }
+                if (config_valid) {
+                    logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG, "raop_rtp_mirror sps size = %d", h264.sps_size);
+                    h264.sequence_parameter_set = malloc(h264.sps_size);
+                    memcpy(h264.sequence_parameter_set, payload + 8, h264.sps_size);
+                    h264.number_of_pps = payload[h264.sps_size + 8];
+                    h264.pps_size = (short) (((payload[h264.sps_size + 9] & 2040) + payload[h264.sps_size + 10]) & 255);
+                    config_valid = h264.pps_size >= 0 && h264.sps_size + 11 + h264.pps_size <= payload_size;
+                }
+                if (config_valid) {
+                    h264.picture_parameter_set = malloc(h264.pps_size);
+                    logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG, "raop_rtp_mirror pps size = %d", h264.pps_size);
+                    memcpy(h264.picture_parameter_set, payload + h264.sps_size + 11, h264.pps_size);
+                } else {
+                    logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                               "raop_rtp_mirror malformed SPS/PPS header (payload %d bytes) — dropping config packet",
+                               payload_size);
+                }
 
-                if (h264.sps_size + h264.pps_size < 102400) {
+                if (config_valid && h264.sps_size + h264.pps_size < 102400) {
                     // Copy the sps and pps into a buffer to hand to the decoder
                     int sps_pps_len = (h264.sps_size + h264.pps_size) + 8;
                     unsigned char sps_pps[sps_pps_len];
