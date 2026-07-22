@@ -1,0 +1,52 @@
+name: MLKHeadUnit
+options:
+  bundleIdPrefix: com.penguinin
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+packages:
+  AAHeadUnitCore:
+    path: AAHeadUnitCore
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: W652YXV7VM
+    SWIFT_VERSION: "5.9"
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  MLKHeadUnit:
+    type: application
+    platform: iOS
+    sources:
+      - App
+    resources:
+      - App/Resources/headunit.p12
+    dependencies:
+      - package: AAHeadUnitCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.penguinin.mlkheadunit
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: MLK Head Unit
+        UILaunchScreen: {}
+        # Head unit is landscape, like a car dashboard — lock it so the 1920x1080
+        # projection fills the screen instead of letterboxing into a portrait strip.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Head unit stays live behind the lock screen / backgrounding while projecting.
+        UIBackgroundModes:
+          - audio
+          - voip
+        NSLocalNetworkUsageDescription: >-
+          MLK Head Unit listens for an Android Auto phone on your local network.
+        NSBonjourServices:
+          - _mlkheadunit._tcp
+        NSMicrophoneUsageDescription: >-
+          The microphone is used for the Google Assistant and calls while projecting Android Auto.
