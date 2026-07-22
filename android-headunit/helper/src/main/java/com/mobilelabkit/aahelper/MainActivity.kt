@@ -340,9 +340,7 @@ class MainActivity : ComponentActivity() {
                 return
             }
             edit.putString(KEY_SOFTAP_SSID, ssid).putString(KEY_SOFTAP_PASS, pass).apply()
-            KeepAliveService.startSoftAp(this, ssid, pass, ip, port)
-            status.text = "Joining “$ssid” and connecting to $ip:$port (Host-Wi-Fi mode).\n" +
-                "Allow the “connect to this device’s Wi-Fi?” prompt if it appears."
+            connectHostWifi(ssid, pass, ip, port)
         } else {
             edit.apply()
             // Shared network: ignore any leftover SoftAP creds — this is the whole point of an
@@ -376,6 +374,62 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }.start()
+    }
+
+    // --- Host-Wi-Fi: join the head unit's SoftAP as a DEVICE-WIDE network ------
+    // The old path joined via WifiNetworkSpecifier, which makes a Wi-Fi network PRIVATE to this
+    // app's uid — Android Auto (gearhead, a different app) can't use it, so it "joined" but never
+    // projected. Instead we ask the OS to add the SoftAP as a normal, device-wide network; once the
+    // phone is on it, gearhead can use it and we connect the same way as the shared-network path.
+    private var pendingHostConnect: Triple<String, Int, String>? = null   // ip, port, ssid
+
+    private val addWifiLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        // Some OEMs return CANCELED even when the user saved, so don't gate on the result code —
+        // just wait for the phone to actually land on the head unit's Wi-Fi, then connect.
+        pendingHostConnect?.let { (ip, port, ssid) -> awaitJoinThenConnect(ssid, ip, port) }
+    }
+
+    private fun connectHostWifi(ssid: String, pass: String, ip: String, port: Int) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val sug = android.net.wifi.WifiNetworkSuggestion.Builder()
+                .setSsid(ssid).setWpa2Passphrase(pass).build()
+            val intent = Intent(Settings.ACTION_WIFI_ADD_NETWORKS)
+                .putParcelableArrayListExtra(Settings.EXTRA_WIFI_NETWORK_LIST, arrayListOf(sug))
+            pendingHostConnect = Triple(ip, port, ssid)
+            status.text = "Tap “Save/Add” when Android offers to add “$ssid” — then it connects automatically."
+            runCatching { addWifiLauncher.launch(intent) }
+                .onFailure { fallbackManualJoin(ssid) }
+        } else {
+            // Pre-Android-11 has no add-networks prompt; best-effort via the specifier join.
+            KeepAliveService.startSoftAp(this, ssid, pass, ip, port)
+            status.text = "Joining “$ssid”… allow the Wi-Fi prompt if it appears."
+        }
+    }
+
+    /** After the SoftAP is added, poll until the phone is actually ON it, then connect the shared
+     *  way (fire at the head unit's gateway IP over the now-device-wide Wi-Fi). */
+    private fun awaitJoinThenConnect(ssid: String, ip: String, port: Int) {
+        val h = android.os.Handler(android.os.Looper.getMainLooper())
+        status.text = "Waiting to join “$ssid”…"
+        val poll = object : Runnable {
+            var tries = 0
+            override fun run() {
+                when {
+                    currentSsid().equals(ssid, ignoreCase = true) -> preflightThenStart(ip, port)
+                    ++tries < 25 -> h.postDelayed(this, 1000)
+                    else -> fallbackManualJoin(ssid)
+                }
+            }
+        }
+        h.post(poll)
+    }
+
+    private fun fallbackManualJoin(ssid: String) {
+        status.text = "Couldn’t auto-join “$ssid”. Join it from Android’s Wi-Fi settings, then switch to " +
+            "“Same Wi-Fi network” and tap Connect. (It has no internet — if the phone keeps leaving it, " +
+            "forget your router / turn off “Switch to mobile data”.)"
     }
 
     // --- QR scan (Host-Wi-Fi join) --------------------------------------------
