@@ -774,11 +774,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         private const val MATCH = FrameLayout.LayoutParams.MATCH_PARENT
         private const val WRAP = FrameLayout.LayoutParams.WRAP_CONTENT
 
-        /** Keys an Android TV remote sends that make sense to hand to the projected AA session. */
+        /** Keys an Android TV remote sends that make sense to hand to the projected AA session.
+         *  NOTE: BACK is deliberately NOT here — it must fall through to [onBackPressed] so the
+         *  head unit's own "disconnect from vehicle?" confirmation shows. Forwarding BACK to the
+         *  phone consumed the key and silently suppressed that dialog. */
         private val REMOTE_FORWARDED_KEYCODES = setOf(
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
-            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_BACK,
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
             KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_PREVIOUS
         )
