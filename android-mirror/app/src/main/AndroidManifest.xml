@@ -67,7 +67,9 @@
             android:exported="false"
             android:launchMode="singleTop"
             android:screenOrientation="fullUser"
-            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|screenLayout" />
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|screenLayout|uiMode" />
 
         <service
             android:name=".ScreenCaptureService"

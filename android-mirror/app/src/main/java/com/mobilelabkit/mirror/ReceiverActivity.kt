@@ -1,8 +1,11 @@
 package com.mobilelabkit.mirror
 
 import android.app.Activity
+import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -12,9 +15,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.util.Rational
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -37,7 +43,12 @@ import java.util.concurrent.TimeUnit
  * Receiver role: advertise `_mlkmirror._tcp`, accept one sender at a time, and decode the
  * incoming H.264 stream onto a full-screen SurfaceView. The full-screen shell (SurfaceView,
  * cover, Wi-Fi/multicast locks, immersive mode, Wi-Fi bind) mirrors android-chromecast /
- * android-airplay so behaviour stays consistent across the receivers.
+ * android-airplay so behaviour stays consistent across the receivers. A 2-finger pinch zooms the
+ * mirrored video locally (view transform only); once zoomed, a single finger pans instead of its
+ * usual job of passing through live as remote-control touch (which only applies at 1x, since
+ * that's the only time there's nowhere to pan to). Home/recents while a sender is connected drops into
+ * picture-in-picture instead of just backgrounding (phones/tablets only — gracefully absent on
+ * Android TV, which doesn't support PiP).
  */
 class ReceiverActivity : Activity(), SurfaceHolder.Callback {
 
@@ -60,10 +71,23 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     private val ui = Handler(Looper.getMainLooper())
     private val hideAspect = Runnable { aspectLabel.visibility = View.GONE }
 
+    // Pinch-to-zoom (2 fingers) + drag-to-pan (1 finger, once zoomed) on the mirrored video —
+    // local view transforms only (scaleX/Y + translationX/Y on the SurfaceView). A single
+    // finger still passes through to remote control (handleTouch) at 1x zoom — panning only
+    // takes over once zoomed in, since that's the only time there's somewhere to pan to.
+    private var zoomScale = 1f
+    private var panX = 0f
+    private var panY = 0f
+    private var panLastX = 0f
+    private var panLastY = 0f
+    private lateinit var scaleDetector: ScaleGestureDetector
+    private var remoteTouchDown = false
+
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
     @Volatile private var running = false
+    @Volatile private var connected = false // a sender is actively streaming (gates auto-PiP)
     private var serverSocket: ServerSocket? = null
     private var serverThread: Thread? = null
 
@@ -122,12 +146,71 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             if (r - l != or2 - ol || b - t != ob - ot) applyAspect()
         }
 
-        // Capture touches on the mirror and stream them live to the sender (if it has touch
-        // control enabled). Consume events (return true) so we track the whole gesture.
-        surfaceView.setOnTouchListener { v, e -> handleTouch(v, e); true }
+        scaleDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val prevScale = zoomScale
+                zoomScale = (zoomScale * detector.scaleFactor).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                surfaceView.scaleX = zoomScale
+                surfaceView.scaleY = zoomScale
+                // View.scaleX/Y always scale around the view's own CENTER pivot, not the pinch
+                // focal point — left alone, the content visually slides out from under your
+                // fingers as it scales (reads as "the view bouncing"). Compensate with a pan
+                // delta that keeps the point under the fingers' midpoint fixed on screen: for a
+                // center-pivoted scale, screenX = translationX + cx + (focusX - cx) * scale, so
+                // holding screenX constant across the scale step solves to this delta.
+                //
+                // The touch listener is on `root` (NOT surfaceView itself) precisely so focusX/Y
+                // stay in a fixed, untransformed coordinate frame throughout the gesture — if it
+                // were on surfaceView, the coordinates it reports would themselves be relative to
+                // the view's own live-changing transform, undermining this whole derivation (that
+                // was the actual bug: same math, wrong — self-referential — coordinate frame).
+                // root's center works as the pivot reference because surfaceView is centered
+                // within it (Gravity.CENTER).
+                val cx = root.width / 2f
+                val cy = root.height / 2f
+                val dx = (detector.focusX - cx) * (prevScale - zoomScale)
+                val dy = (detector.focusY - cy) * (prevScale - zoomScale)
+                applyPan(panX + dx, panY + dy)
+                return true
+            }
+        }).apply {
+            // Quick-scale ("double-tap-and-drag to zoom") drives onScale off a SINGLE finger —
+            // since every touch is fed here regardless of pointer count, that can quietly fight
+            // with the single-finger pan/remote-control handling and show up as zoom jitter.
+            isQuickScaleEnabled = false
+        }
+        // Capture touches on the mirror: a 2-finger pinch zooms locally (view transform only,
+        // never forwarded). A single finger pans once zoomed in (also local-only); at 1x it
+        // still passes through live to the sender's real screen coords (remote control), same
+        // as before. Consume events (return true) so we track the whole gesture.
+        root.setOnTouchListener { _, e ->
+            scaleDetector.onTouchEvent(e)
+            when {
+                e.pointerCount > 1 -> {
+                    // A 2nd finger just joined an in-flight single-finger remote drag — end
+                    // that gesture on the sender cleanly instead of leaving it stuck "pressed".
+                    if (e.actionMasked == MotionEvent.ACTION_POINTER_DOWN && remoteTouchDown) {
+                        remoteTouchDown = false
+                        send(MirrorProtocol.Touch(MirrorProtocol.TOUCH_CANCEL, 0, 0, 1))
+                    }
+                }
+                zoomScale > MIN_ZOOM -> handlePanTouch(e)
+                else -> handleTouch(e)
+            }
+            true
+        }
 
         decoder = VideoDecoder(1280, 720) { w, h ->
-            runOnUiThread { videoW = w; videoH = h; applyAspect() }
+            runOnUiThread {
+                videoW = w; videoH = h
+                applyAspect()
+                resetZoom()
+                if (pipSupported() && isInPictureInPictureMode) {
+                    runCatching {
+                        setPictureInPictureParams(PictureInPictureParams.Builder().setAspectRatio(pipAspectRatio()).build())
+                    }
+                }
+            }
         }.also { it.start() }
         acquireWifi()
         bindWifiThen { startServer() }
@@ -218,6 +301,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             }
             val remote = socket.inetAddress?.hostAddress ?: "?"
             Log.i(TAG, "sender connected from $remote")
+            connected = true
             runOnUiThread {
                 // Hide the cover AND the status text so nothing overlays the mirrored screen.
                 cover.visibility = View.GONE
@@ -249,6 +333,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             } catch (e: Exception) {
                 Log.w(TAG, "stream error: ${e.message}")
             } finally {
+                connected = false
                 stopControlWriter()
                 senderRealW = 0; senderRealH = 0
                 runCatching { socket.close() }
@@ -286,17 +371,23 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
 
     /** Map a touch on the mirror to the sender's real screen pixels and stream it live.
      *  Moves are lightly throttled; each event carries dt (ms since last) so the sender can
-     *  pace the injected stroke to match the real finger. Single finger. */
-    private fun handleTouch(v: View, e: android.view.MotionEvent) {
+     *  pace the injected stroke to match the real finger. Single finger. The listener is on
+     *  `root`, so translate its coordinates into surfaceView-local ones first (it's centered
+     *  within root — letterbox bars, if any, fall outside its bounds and just clamp to the
+     *  nearest edge below). */
+    private fun handleTouch(e: android.view.MotionEvent) {
         if (!controlConnected || senderRealW == 0 || senderRealH == 0) return
-        val vw = v.width.coerceAtLeast(1)
-        val vh = v.height.coerceAtLeast(1)
-        val sx = (e.x / vw * senderRealW).toInt().coerceIn(0, senderRealW - 1)
-        val sy = (e.y / vh * senderRealH).toInt().coerceIn(0, senderRealH - 1)
+        val vw = surfaceView.width.coerceAtLeast(1)
+        val vh = surfaceView.height.coerceAtLeast(1)
+        val localX = e.x - (root.width - vw) / 2f
+        val localY = e.y - (root.height - vh) / 2f
+        val sx = (localX / vw * senderRealW).toInt().coerceIn(0, senderRealW - 1)
+        val sy = (localY / vh * senderRealH).toInt().coerceIn(0, senderRealH - 1)
         val now = e.eventTime
         when (e.actionMasked) {
             android.view.MotionEvent.ACTION_DOWN -> {
                 lastTouchMs = now
+                remoteTouchDown = true
                 send(MirrorProtocol.Touch(MirrorProtocol.TOUCH_DOWN, sx, sy, 0))
             }
             android.view.MotionEvent.ACTION_MOVE -> {
@@ -308,11 +399,52 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             android.view.MotionEvent.ACTION_UP -> {
                 val dt = (now - lastTouchMs).toInt().coerceAtLeast(1)
                 lastTouchMs = now
+                remoteTouchDown = false
                 send(MirrorProtocol.Touch(MirrorProtocol.TOUCH_UP, sx, sy, dt))
             }
-            android.view.MotionEvent.ACTION_CANCEL ->
+            android.view.MotionEvent.ACTION_CANCEL -> {
+                remoteTouchDown = false
                 send(MirrorProtocol.Touch(MirrorProtocol.TOUCH_CANCEL, sx, sy, 1))
+            }
         }
+    }
+
+    /** Single-finger drag once zoomed in — local pan only, never forwarded to remote control. */
+    private fun handlePanTouch(e: MotionEvent) {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                panLastX = e.x
+                panLastY = e.y
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = e.x - panLastX
+                val dy = e.y - panLastY
+                panLastX = e.x
+                panLastY = e.y
+                applyPan(panX + dx, panY + dy)
+            }
+        }
+    }
+
+    /** Clamp pan so the zoomed view never shows past the SurfaceView's own bounds — which
+     *  (thanks to applyAspect) exactly match the displayed picture, not the window. */
+    private fun applyPan(x: Float, y: Float) {
+        val maxX = surfaceView.width * (zoomScale - 1f) / 2f
+        val maxY = surfaceView.height * (zoomScale - 1f) / 2f
+        panX = x.coerceIn(-maxX, maxX)
+        panY = y.coerceIn(-maxY, maxY)
+        surfaceView.translationX = panX
+        surfaceView.translationY = panY
+    }
+
+    private fun resetZoom() {
+        zoomScale = 1f
+        panX = 0f
+        panY = 0f
+        surfaceView.scaleX = 1f
+        surfaceView.scaleY = 1f
+        surfaceView.translationX = 0f
+        surfaceView.translationY = 0f
     }
 
     private fun send(t: MirrorProtocol.Touch) {
@@ -348,6 +480,49 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
         if (hasFocus) goImmersive()
     }
 
+    /** Home/recents while a sender is actively mirroring → drop into PiP instead of just
+     *  backgrounding, so the decode thread (which keeps running regardless — it's not tied to
+     *  visibility) keeps rendering into a small floating window rather than an invisible one.
+     *  Not called for rotation/other config changes, only an actual "leaving the app" gesture. */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (connected) enterPip()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        if (isInPictureInPictureMode) {
+            // The floating PiP window is tiny with no touch interaction — our own overlay
+            // (waiting text / aspect label) would just clutter it.
+            ui.removeCallbacks(hideAspect)
+            aspectLabel.visibility = View.GONE
+            status.visibility = View.GONE
+        } else {
+            goImmersive()
+            if (!connected) showWaiting(null)
+        }
+    }
+
+    private fun pipSupported(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    /** The video's own aspect ratio (falling back to 16:9 before the first frame), clamped to
+     *  what Android's PiP window allows (roughly 1:2.39 .. 2.39:1) so setAspectRatio never
+     *  throws on an extreme portrait/landscape source. */
+    private fun pipAspectRatio(): Rational {
+        val w = videoW.takeIf { it > 0 } ?: 16
+        val h = videoH.takeIf { it > 0 } ?: 9
+        val ratio = (w.toFloat() / h.toFloat()).coerceIn(1f / 2.39f, 2.39f)
+        return Rational((ratio * 1000).toInt(), 1000)
+    }
+
+    private fun enterPip() {
+        if (!pipSupported()) return
+        val params = PictureInPictureParams.Builder().setAspectRatio(pipAspectRatio()).build()
+        runCatching { enterPictureInPictureMode(params) }
+    }
+
     // --- helpers -----------------------------------------------------------------------
     private fun matchParent() = FrameLayout.LayoutParams(
         FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
@@ -364,6 +539,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
         }
         status.visibility = View.VISIBLE
         cover.visibility = View.VISIBLE
+        resetZoom() // start the next session unzoomed
     }
 
     private fun bindWifiThen(start: () -> Unit) {
@@ -430,5 +606,8 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
         private const val ASPECT_FIT = 0   // letterbox — respect the source ratio (default)
         private const val ASPECT_FILL = 1  // stretch to fill the screen
         private const val ASPECT_ZOOM = 2  // scale to fill, crop overflow (respect ratio)
+
+        private const val MIN_ZOOM = 1f
+        private const val MAX_ZOOM = 5f
     }
 }
