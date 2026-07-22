@@ -22,6 +22,17 @@ object TvUi {
     }
 }
 
+/** The app's shared palette — the iOS twin's design language (systemCyan accents, dark
+ *  secondary-background cards) so both platforms read as one product. */
+object MirrorPalette {
+    val CYAN = Color.parseColor("#32ADE6")      // iOS systemCyan
+    val CARD_BG = Color.parseColor("#1C1C1E")   // iOS secondarySystemBackground (dark)
+    val SUBTLE = Color.parseColor("#9FB0C0")    // secondary text
+    val FAINT = Color.parseColor("#6C7686")     // tertiary text
+    val CHEVRON = Color.parseColor("#5A6572")
+    val RED = Color.parseColor("#FF453A")       // iOS systemRed (dark)
+}
+
 /**
  * Give [this] view a clear D-pad focus indicator (white ring + small scale-up), keeping [fillColor]
  * as its fill. Pass `Color.TRANSPARENT` for controls that shouldn't gain a solid background (e.g.

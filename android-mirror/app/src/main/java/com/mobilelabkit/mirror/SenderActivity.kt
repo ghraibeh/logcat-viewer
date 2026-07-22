@@ -36,7 +36,7 @@ class SenderActivity : Activity() {
     private var muteWhileCasting = true
 
     private lateinit var listContainer: LinearLayout
-    private lateinit var emptyLabel: TextView
+    private lateinit var emptyGroup: View // spinner + "Looking for receivers…" hint
     private var a11yCheck: CheckBox? = null
     private var suppressA11yListener = false
 
@@ -102,7 +102,7 @@ class SenderActivity : Activity() {
             setTextColor(Color.parseColor("#C7D3DE"))
             textSize = 14f
             isChecked = muteWhileCasting
-            buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E88E5"))
+            buttonTintList = android.content.res.ColorStateList.valueOf(MirrorPalette.CYAN)
             setPadding(dp(12), dp(16), dp(12), dp(12))
             tvFocusable(Color.TRANSPARENT) // focus ring only — no solid fill behind the checkbox
             setOnCheckedChangeListener { _, checked -> muteWhileCasting = checked }
@@ -114,7 +114,7 @@ class SenderActivity : Activity() {
             isAllCaps = false
             setTextColor(Color.parseColor("#C7D3DE"))
             textSize = 14f
-            buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#1E88E5"))
+            buttonTintList = android.content.res.ColorStateList.valueOf(MirrorPalette.CYAN)
             setPadding(dp(12), dp(12), dp(12), dp(12))
             tvFocusable(Color.TRANSPARENT)
             setOnCheckedChangeListener { _, wantOn ->
@@ -131,7 +131,30 @@ class SenderActivity : Activity() {
         root.addView(a11yCheck)
         syncA11yCheck()
 
-        emptyLabel = subtitle("Searching for receivers…").apply { setPadding(0, dp(16), 0, 0) }
+        // iOS-style empty state: spinner + "Looking for receivers…" + a hint line, centered.
+        emptyGroup = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(40), 0, 0)
+            addView(android.widget.ProgressBar(this@SenderActivity).apply {
+                isIndeterminate = true
+                indeterminateTintList = android.content.res.ColorStateList.valueOf(MirrorPalette.CYAN)
+                layoutParams = LinearLayout.LayoutParams(dp(32), dp(32)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(12)
+                }
+            })
+            addView(TextView(this@SenderActivity).apply {
+                text = "Looking for receivers…"
+                setTextColor(MirrorPalette.SUBTLE); textSize = 13f
+                gravity = Gravity.CENTER
+            })
+            addView(TextView(this@SenderActivity).apply {
+                text = "Open “Receive a screen” on the other device."
+                setTextColor(MirrorPalette.FAINT); textSize = 11f
+                gravity = Gravity.CENTER
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
         listContainer = column()
         val scroll = ScrollView(this).apply {
             addView(listContainer)
@@ -139,7 +162,7 @@ class SenderActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
             )
         }
-        root.addView(emptyLabel)
+        root.addView(emptyGroup)
         root.addView(scroll)
         setContentView(root)
         renderReceivers()
@@ -157,22 +180,34 @@ class SenderActivity : Activity() {
     private fun renderReceivers() {
         if (!::listContainer.isInitialized) return
         listContainer.removeAllViews()
-        emptyLabel.visibility = if (receivers.isEmpty()) View.VISIBLE else View.GONE
+        emptyGroup.visibility = if (receivers.isEmpty()) View.VISIBLE else View.GONE
         for (r in receivers) {
-            val b = Button(this).apply {
-                text = r.name
-                isAllCaps = false
-                setTextColor(Color.WHITE)
-                textSize = 17f
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                setPadding(dp(20), dp(18), dp(20), dp(18))
+            // iOS-style receiver card: display glyph · name · chevron.
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(15), dp(16), dp(15))
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { topMargin = dp(10) }
-                tvFocusable(Color.parseColor("#1B2733")) // D-pad focus ring for the remote
+                tvFocusable(MirrorPalette.CARD_BG) // D-pad focus ring for the remote
+                isClickable = true
                 setOnClickListener { pick(r) }
             }
-            listContainer.addView(b)
+            card.addView(DisplayGlyphView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(26), dp(22)).apply { rightMargin = dp(14) }
+            })
+            card.addView(TextView(this).apply {
+                text = r.name
+                setTextColor(Color.WHITE); textSize = 16f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            card.addView(TextView(this).apply {
+                text = "›"
+                setTextColor(MirrorPalette.CHEVRON); textSize = 20f
+            })
+            listContainer.addView(card)
         }
         // Land the remote on the first receiver as soon as one appears, unless the user is already
         // navigating the options above.
@@ -244,18 +279,39 @@ class SenderActivity : Activity() {
             setPadding(dp(24), dp(48), dp(24), dp(24))
             gravity = Gravity.CENTER
         }
-        root.addView(title("Casting…"))
-        root.addView(subtitle("Mirroring your screen to\n$name"))
+        // Pulsing live dot + headline, iOS style.
+        val liveDot = View(this).apply {
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(MirrorPalette.RED)
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(14), dp(14)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(14)
+            }
+            animate().alpha(0.35f).setDuration(900)
+                .setInterpolator(android.view.animation.LinearInterpolator())
+                .withEndAction(object : Runnable {
+                    override fun run() {
+                        animate().alpha(1f).setDuration(900).withEndAction {
+                            animate().alpha(0.35f).setDuration(900).withEndAction(this).start()
+                        }.start()
+                    }
+                }).start()
+        }
+        root.addView(liveDot)
+        root.addView(title("Casting…").apply { gravity = Gravity.CENTER })
+        root.addView(subtitle("Mirroring your screen to\n$name").apply { gravity = Gravity.CENTER })
         val stop = Button(this).apply {
             text = "Stop casting"
             isAllCaps = false
             setTextColor(Color.WHITE)
-            textSize = 18f
-            setPadding(dp(24), dp(18), dp(24), dp(18))
+            textSize = 17f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(dp(24), dp(15), dp(24), dp(15))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(40) }
-            tvFocusable(Color.parseColor("#7A1F1F"))
+            ).apply { topMargin = dp(36) }
+            tvFocusable(MirrorPalette.RED)
             setOnClickListener {
                 ScreenCaptureService.stop(this@SenderActivity)
                 showListUi()
@@ -305,11 +361,12 @@ class SenderActivity : Activity() {
 
     private fun title(t: String) = TextView(this).apply {
         text = t; setTextColor(Color.WHITE); textSize = 26f
-        setPadding(0, 0, 0, dp(12))
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        setPadding(0, 0, 0, dp(10))
     }
 
     private fun subtitle(t: String) = TextView(this).apply {
-        text = t; setTextColor(Color.parseColor("#9FB0C0")); textSize = 15f
+        text = t; setTextColor(MirrorPalette.SUBTLE); textSize = 13f
     }
 
     private fun dp(v: Int) = TypedValue.applyDimension(
@@ -321,5 +378,25 @@ class SenderActivity : Activity() {
     companion object {
         private const val REQ_PROJECTION = 1001
         private const val REQ_PERMS = 1002
+    }
+}
+
+/** Small display/monitor glyph for receiver rows (rounded screen outline + stand). */
+private class DisplayGlyphView(ctx: android.content.Context) : View(ctx) {
+    private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = MirrorPalette.CYAN
+        style = android.graphics.Paint.Style.STROKE
+        strokeCap = android.graphics.Paint.Cap.ROUND
+    }
+
+    override fun onDraw(canvas: android.graphics.Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        paint.strokeWidth = h * 0.10f
+        val inset = paint.strokeWidth / 2
+        val r = w * 0.12f
+        canvas.drawRoundRect(
+            android.graphics.RectF(inset, inset, w - inset, h * 0.74f), r, r, paint)
+        canvas.drawLine(w * 0.35f, h - inset, w * 0.65f, h - inset, paint)
     }
 }

@@ -1,0 +1,75 @@
+name: MLKMirror
+options:
+  bundleIdPrefix: com.penguinin
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: W652YXV7VM
+    SWIFT_VERSION: "5.9"
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  MLKMirror:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Shared
+    # NOTE: no App Group entitlement — the Mac's Xcode account session can't currently
+    # mint capability-bearing profiles ("login details rejected"). The broadcast extension
+    # therefore discovers the receiver itself over Bonjour instead of reading the app's
+    # pick from shared defaults. Re-adding the entitlement (both targets) upgrades the
+    # handoff automatically once Xcode is signed in again — CastConfig already prefers it.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.penguinin.mlkmirror
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: MLK Mirror
+        UILaunchScreen: {}
+        # Keeps the receiver alive (sockets + decode) behind PiP, app switches, and the
+        # lock screen: the audio engine renders continuously (silence when the sender is
+        # quiet), which is the OS contract for background execution here.
+        UIBackgroundModes:
+          - audio
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: >-
+          MLK Mirror discovers and streams to/from mirror receivers on your local network.
+        NSBonjourServices:
+          - _mlkmirror._tcp
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    dependencies:
+      - target: MLKMirrorBroadcast
+        embed: true
+
+  MLKMirrorBroadcast:
+    type: app-extension
+    platform: iOS
+    sources:
+      - BroadcastExt
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.penguinin.mlkmirror.broadcast
+    info:
+      path: BroadcastExt/Info.plist
+      properties:
+        CFBundleDisplayName: MLK Mirror Cast
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+        NSLocalNetworkUsageDescription: >-
+          Casting streams your screen to a mirror receiver on your local network.
+        NSBonjourServices:
+          - _mlkmirror._tcp

@@ -56,6 +56,7 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
     private lateinit var cover: View
     private lateinit var status: TextView
+    private lateinit var waitingGroup: View // glyph + headline + status, toggled as one
     private lateinit var aspectLabel: TextView
     private var decoder: VideoDecoder? = null
     private val audio = AudioPlayer()
@@ -118,19 +119,36 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER))
         cover = View(this).apply { setBackgroundColor(Color.BLACK) }
         root.addView(cover, matchParent())
+        // Waiting card, iOS-receiver style: radio-waves glyph + bold headline + body text.
         status = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 16f
+            setTextColor(MirrorPalette.SUBTLE)
+            textSize = 13f
             gravity = Gravity.CENTER
-            setPadding(48, 48, 48, 48)
+            setPadding(0, dp(8), 0, 0)
+        }
+        waitingGroup = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(WaveGlyphView(this@ReceiverActivity).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(dp(64), dp(44)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL; bottomMargin = dp(12)
+                }
+            })
+            addView(TextView(this@ReceiverActivity).apply {
+                text = "Waiting for a sender…"
+                setTextColor(Color.WHITE); textSize = 20f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                gravity = Gravity.CENTER
+            })
+            addView(status)
         }
         root.addView(
-            status,
+            waitingGroup,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER
-            )
+            ).apply { leftMargin = dp(32); rightMargin = dp(32) }
         )
         aspectLabel = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -319,9 +337,9 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
             Log.i(TAG, "sender connected from $remote")
             connected = true
             runOnUiThread {
-                // Hide the cover AND the status text so nothing overlays the mirrored screen.
+                // Hide the cover AND the waiting card so nothing overlays the mirrored screen.
                 cover.visibility = View.GONE
-                status.visibility = View.GONE
+                waitingGroup.visibility = View.GONE
             }
             try {
                 socket.tcpNoDelay = true
@@ -548,13 +566,12 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
     private fun showWaiting(advertisedName: String?) {
         val ip = localIp()
         status.text = buildString {
-            append("Waiting for a phone to cast…\n\n")
-            append("On the other phone: open MobileLabKit Mirror ▸ Cast this screen,\n")
-            append("then pick “${advertisedName ?: "${Build.MODEL} (Mirror)"}”.")
-            if (ip != null) append("\n\n$ip")
-            append("\n\nPress OK on the remote to change aspect — now: ${aspectName(aspectMode)}")
+            append("Open MLK Mirror on the other device\nand pick “${advertisedName ?: "${Build.MODEL} (Mirror)"}”.")
+            append("\n\n")
+            if (ip != null) append("$ip  ·  ")
+            append("OK on the remote: aspect (${aspectName(aspectMode)})")
         }
-        status.visibility = View.VISIBLE
+        waitingGroup.visibility = View.VISIBLE
         cover.visibility = View.VISIBLE
         resetZoom() // start the next session unzoomed
     }
@@ -626,5 +643,31 @@ class ReceiverActivity : Activity(), SurfaceHolder.Callback {
 
         private const val MIN_ZOOM = 1f
         private const val MAX_ZOOM = 5f
+    }
+}
+
+/** Radio-waves glyph for the waiting card (the iOS receiver's motif) — drawn, no assets:
+ *  a center dot with two arcs radiating on each side. */
+private class WaveGlyphView(ctx: android.content.Context) : View(ctx) {
+    private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = MirrorPalette.CYAN
+    }
+
+    override fun onDraw(canvas: android.graphics.Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val cx = w / 2f
+        val cy = h / 2f
+        paint.style = android.graphics.Paint.Style.FILL
+        canvas.drawCircle(cx, cy, h * 0.09f, paint)
+        paint.style = android.graphics.Paint.Style.STROKE
+        paint.strokeWidth = h * 0.09f
+        paint.strokeCap = android.graphics.Paint.Cap.ROUND
+        for (i in 1..2) {
+            val r = h * (0.22f + 0.20f * i)
+            val oval = android.graphics.RectF(cx - r, cy - r, cx + r, cy + r)
+            canvas.drawArc(oval, -35f, 70f, false, paint)   // right waves
+            canvas.drawArc(oval, 145f, 70f, false, paint)   // left waves
+        }
     }
 }
