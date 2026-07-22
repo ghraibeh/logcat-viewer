@@ -109,6 +109,14 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     @Volatile private var restarting = false
     private var muted = false
 
+    // Live RTSP/HTTP connections from the client (see onClientConnected/onClientDisconnected).
+    // Individual open/close events are meaningless (iOS churns ancillary connections during
+    // normal mirroring), but the count dropping to ZERO is a real signal: every connection
+    // the iPhone had — including the persistent control/event pair — is gone, i.e. the
+    // session is over (graceful stop, network death, or the iPhone giving up on us). That's
+    // when the UI resets to "Waiting for iPhone" instead of freezing on the last frame.
+    private val connCount = java.util.concurrent.atomic.AtomicInteger(0)
+
     private val advertisedName: String = DEFAULT_NAME
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -221,6 +229,10 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
         val (w, h) = parseRes(resKey)
         decoder = VideoDecoder(w, h).also { dec ->
             dec.onVideoSize = { vw, vh -> runOnUiThread { onVideoSize(vw, vh) } }
+            // Keyframe starvation (the IDR a stream needs was lost and iOS won't re-send
+            // one): force a video-stream restart — the client re-establishes the mirror
+            // TCP connection and always leads the new stream with SPS/PPS + an IDR.
+            dec.onStarved = { NativeReceiver.nudgeVideo() }
             dec.start()
         }
         showWaiting()
@@ -525,21 +537,27 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
     // per-TCP-connection accept/close (conn_init/conn_destroy in jni_bridge.c) — NOT from the
     // mirror video socket specifically. The iPhone opens short-lived HTTP connections for
     // ancillary requests (notably a periodic /feedback heartbeat) on the SAME control port
-    // while mirroring continues uninterrupted, so these fire every few seconds even though
-    // nothing about the actual video session changed. Treating either as "connected"/
-    // "disconnected" blanked the screen (and tore down the decoder) constantly during
-    // completely normal use — visible as a black screen every ~4s, recovering with a blocky
-    // picture once a real frame arrived and the decoder had to reconfigure from scratch. So
-    // neither touches UI/decoder state at all; only a genuine first video frame (onVideoFrame)
-    // or an explicit user action (resolution change → restartReceiver) does. This does mean
-    // there's no automatic "waiting for iPhone" fallback if mirroring is ever genuinely stopped
-    // — the last frame just stays on screen — which is the deliberately preferred tradeoff here.
+    // while mirroring continues uninterrupted, so INDIVIDUAL events are meaningless — an
+    // earlier build that blanked the screen per-event flashed black every ~4s in normal use.
+    // What IS meaningful is the live-connection COUNT reaching zero: the persistent
+    // control/event pair is gone too, so the session is truly over (graceful stop, network
+    // death, or the iPhone abandoning us). Only then reset to the waiting screen — otherwise
+    // a dead session leaves the last frame up forever, indistinguishable from a freeze.
     override fun onClientConnected() {
-        Log.i(TAG, "control connection opened (may be an ancillary/feedback connection, not necessarily the mirror socket)")
+        val n = connCount.incrementAndGet()
+        Log.i(TAG, "client connection opened ($n live)")
     }
 
     override fun onClientDisconnected() {
-        Log.i(TAG, "control connection closed (may be an ancillary/feedback connection, not necessarily the mirror socket)")
+        val n = connCount.decrementAndGet().coerceAtLeast(0)
+        if (n <= 0) connCount.set(0)
+        Log.i(TAG, "client connection closed ($n live)")
+        if (n == 0 && streaming && !restarting) {
+            streaming = false
+            decoder?.onDisconnected()
+            Log.i(TAG, "session ended (all client connections closed) — resetting to waiting screen")
+            resetScreen()
+        }
     }
 
     // --- aspect-ratio-preserving layout ------------------------------------------
@@ -739,7 +757,17 @@ class MainActivity : Activity(), NativeReceiver.Listener, SurfaceHolder.Callback
             setReferenceCounted(false)
             runCatching { acquire() }
         }
-        wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "airplay-wifi").apply {
+        // LOW_LATENCY (API 29+) is the mode that actually disables Wi-Fi power save while
+        // we're foreground with the screen on — HIGH_PERF has been a no-op alias for years
+        // (Android 13+ silently coerces it to low-latency; older builds ignore it outright).
+        // Power save matters here: when the mirrored screen goes static, video traffic stops
+        // and only per-second heartbeats remain — exactly the low-traffic lull that lets the
+        // radio start napping and timing/feedback round-trips degrade.
+        val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        else
+            @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        wifiLock = wifi.createWifiLock(lockMode, "airplay-wifi").apply {
             runCatching { acquire() }
         }
     }

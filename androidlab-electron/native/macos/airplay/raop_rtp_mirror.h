@@ -33,4 +33,11 @@ static int raop_rtp_init_mirror_sockets(raop_rtp_mirror_t *raop_rtp_mirror, int 
 
 void raop_rtp_mirror_stop(raop_rtp_mirror_t *raop_rtp_mirror);
 void raop_rtp_mirror_destroy(raop_rtp_mirror_t *raop_rtp_mirror);
+
+/* AndroidLab addition: ask the active mirror thread (process-wide — one receiver per
+ * process) to drop its current video TCP connection and go back to accepting. The client
+ * re-establishes the stream, which always restarts with fresh SPS/PPS + an IDR — the
+ * receiver-side escape hatch when the decoder is starved for a keyframe the sender will
+ * never re-send on its own (the protocol has no keyframe request). Safe from any thread. */
+void raop_rtp_mirror_request_nudge(void);
 #endif //RAOP_RTP_MIRROR_H

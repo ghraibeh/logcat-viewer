@@ -380,6 +380,25 @@ raop_handler_setup(raop_conn_t *conn,
         conn->raop_rtp = raop_rtp_init(conn->raop->logger, &conn->raop->callbacks, conn->raop_ntp, conn->remote, conn->remotelen, aeskey, aesiv, ecdh_secret);
         conn->raop_rtp_mirror = raop_rtp_mirror_init(conn->raop->logger, &conn->raop->callbacks, conn->raop_ntp, conn->remote, conn->remotelen, aeskey, ecdh_secret);
 
+        // AndroidLab addition: single-sender policy — last one wins, like an Apple TV.
+        // Without this, a second sender's streams interleave with the first's into the ONE
+        // decoder downstream (two different SPS/PPS flapping the codec between resolutions,
+        // frozen/garbled picture). Stopping the previous owner's streams here is safe: all
+        // RTSP handling for every connection runs on the single httpd thread, and
+        // conn_destroy/TEARDOWN null-check before destroying. The kicked sender's RTSP
+        // connection stays up until it notices its streams are gone and closes.
+        {
+            raop_conn_t *prev = (raop_conn_t *)conn->raop->active_session_conn;
+            if (prev && prev != conn) {
+                logger_log(conn->raop->logger, LOGGER_INFO,
+                           "new sender taking over — stopping the previous session's streams");
+                if (prev->raop_rtp) { raop_rtp_destroy(prev->raop_rtp); prev->raop_rtp = NULL; }
+                if (prev->raop_rtp_mirror) { raop_rtp_mirror_destroy(prev->raop_rtp_mirror); prev->raop_rtp_mirror = NULL; }
+                if (prev->raop_ntp) { raop_ntp_destroy(prev->raop_ntp); prev->raop_ntp = NULL; }
+            }
+            conn->raop->active_session_conn = conn;
+        }
+
         plist_t res_event_port_node = plist_new_uint(conn->raop->port);
         plist_t res_timing_port_node = plist_new_uint(timing_lport);
         plist_dict_set_item(res_root_node, "timingPort", res_timing_port_node);

@@ -2,6 +2,7 @@ package com.mobilelabkit.airplay
 
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -28,11 +29,20 @@ import java.util.concurrent.TimeUnit
  * full teardown/reconfigure when the Surface instance changes (e.g. entering/leaving
  * picture-in-picture recreates it) — decode state (reference frames) doesn't depend on the
  * output surface, so this avoids a black gap while waiting for a fresh keyframe that a full
- * reset would force. Deliberately NO "no output for N ms" stall watchdog: an earlier version
- * rebuilt the codec on that heuristic, but it fired far too readily under normal conditions
- * and made things worse (repeatedly tearing down a codec that wasn't actually stuck). Idle
- * stretches with no new frames are normal — see the `onClientConnected`/`onClientDisconnected`
- * note in MainActivity.
+ * reset would force.
+ *
+ * A silent stall watchdog rebuilds the codec if input keeps arriving but nothing renders —
+ * this Exynos hardware decoder genuinely wedges from time to time independent of anything
+ * this class does. It only touches the codec, never UI/connection state (that's a separate,
+ * deliberately-absent concern — see the `onClientConnected`/`onClientDisconnected` note in
+ * MainActivity: a real disconnect is a native TCP-close signal, never a timing heuristic).
+ * Its arming is anchored to the OLDEST fed-but-unrendered frame (`pendingSinceMs`), never to
+ * wall-clock-since-last-render: an idle iPhone screen sends no frames at all (perfectly
+ * normal — the stream just goes quiet), so when the first frame after a long static stretch
+ * arrives, "time since last render" is huge but nothing is stuck. Two earlier versions got
+ * this wrong and killed a healthy codec on exactly that first post-idle frame, eating it and
+ * leaving the fresh codec waiting on an IDR that iOS only sends occasionally — i.e. the
+ * watchdog itself CAUSED multi-second frozen/black stretches after every idle pause.
  */
 class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
 
@@ -41,6 +51,14 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
     /** Fired (on the decode thread) whenever the coded stream size changes — initial
      *  configure or a rotation-driven resolution swap. Caller hops to the UI thread. */
     @Volatile var onVideoSize: ((Int, Int) -> kotlin.Unit)? = null
+
+    /** Fired (on the decode thread) when frames keep arriving but have all been held at the
+     *  `awaitingIdr` gate for STARVED_MS: the keyframe this stream needs was lost (dropped
+     *  from a full queue, eaten during rapid stream-config flapping, …) and the sender will
+     *  never re-send one spontaneously — the protocol has no keyframe request. The listener
+     *  should force a stream restart (NativeReceiver.nudgeVideo drops the mirror TCP
+     *  connection; the client re-establishes it, always leading with SPS/PPS + an IDR). */
+    @Volatile var onStarved: (() -> kotlin.Unit)? = null
 
     private val queue = LinkedBlockingQueue<Unit>(120)
     @Volatile private var surface: Surface? = null
@@ -71,6 +89,23 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
     // frame stays on screen) until the next IDR resyncs the stream cleanly.
     @Volatile private var awaitingIdr = false
 
+    // Stall watchdog state: decode-thread only. `pendingSinceMs` is when the OLDEST
+    // still-unrendered frame was queued into the codec (0 = nothing pending). A stall is
+    // "the codec has been sitting on fed input for STALL_MS while input keeps flowing" —
+    // both anchored to actual fed frames, so a source pause of any length (idle iPhone
+    // screen) can never look like a stall, no matter how stale the last render is.
+    private var pendingSinceMs = 0L
+    private var lastInputMs = 0L
+    // Whether the current codec instance has produced at least one output buffer — until
+    // then the watchdog uses the longer STARTUP_STALL_MS (cold-start latency ≠ a wedge).
+    private var firstOutputSeen = false
+
+    // IDR-starvation detector: how long the awaitingIdr gate has been holding a live stream.
+    // heldSinceMs = first frame held since the gate closed (0 = none), lastHeldMs = newest.
+    // Both decode-thread only.
+    private var heldSinceMs = 0L
+    private var lastHeldMs = 0L
+
     fun start() {
         if (running) return
         running = true
@@ -97,6 +132,7 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
             // Backlog means the decode thread can't keep up. Dropping just the oldest unit
             // still corrupts every P-frame downstream of the gap, so clear the whole backlog
             // and resync at the next IDR instead of feeding the codec a broken reference chain.
+            Log.w(TAG, "input queue overflow — clearing backlog, holding for next IDR")
             queue.clear()
             awaitingIdr = true
             queue.offer(Unit(data, isConfig))
@@ -134,10 +170,46 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
                 val u = queue.poll(10, TimeUnit.MILLISECONDS)
                 if (u != null) feed(u)
                 drain(info)
+                // Silent stall watchdog: a fed frame has sat unrendered for STALL_MS while
+                // newer input kept flowing ⇒ the codec has wedged. Anchored to the oldest
+                // PENDING frame, not to the last render — a quiet source (idle iPhone
+                // screen) leaves nothing pending and can never trip this, no matter how
+                // long ago the last render was.
+                val now = SystemClock.elapsedRealtime()
+                // A cold codec's first output can lag well past STALL_MS on slower SoCs —
+                // give it a longer leash until it has produced once, so warmup can't be
+                // mistaken for a wedge (and then killed into an IDR-wait loop).
+                val stallLimit = if (firstOutputSeen) STALL_MS else STARTUP_STALL_MS
+                if (codec != null && pendingSinceMs != 0L &&
+                    now - pendingSinceMs > stallLimit && now - lastInputMs < STALL_MS
+                ) {
+                    Log.w(TAG, "decoder stalled (oldest fed frame ${now - pendingSinceMs}ms undrained, input live) — rebuilding")
+                    resetCodec()
+                }
+                // IDR starvation: the gate has held a still-live stream for STARVED_MS.
+                // The keyframe is not coming (lost; iOS never re-sends spontaneously) —
+                // ask for a stream restart, and re-arm so the nudge gets time to land
+                // before a second one fires.
+                if (awaitingIdr && heldSinceMs != 0L &&
+                    now - heldSinceMs > STARVED_MS && now - lastHeldMs < 1000L
+                ) {
+                    Log.w(TAG, "IDR-starved ${now - heldSinceMs}ms with frames still arriving — requesting stream restart")
+                    heldSinceMs = now
+                    onStarved?.invoke()
+                }
             } catch (ie: InterruptedException) {
                 break
             } catch (e: Exception) {
                 Log.w(TAG, "decode error, resetting codec", e)
+                // Keep the surface reference. If the exception came from a torn-down Surface
+                // (PiP/window transition racing the decode thread), surfaceDestroyed() has
+                // fired/will fire and deliver the change via setSurface — we don't need to
+                // guess. If it was anything else (codec process death, a wedge surfacing as
+                // a CodecException), the surface is still perfectly valid and the rebuild at
+                // the next config/IDR must reuse it: an earlier version nulled it here,
+                // which turned any transient codec error into permanently-black video (all
+                // frames dropped at `surface ?: return` until a window-mode change happened
+                // to generate a fresh setSurface call).
                 resetCodec()
             }
         }
@@ -180,8 +252,16 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
         }
 
         if (awaitingIdr) {
-            if (!containsNalType(u.data, NAL_IDR)) return // hold last good frame until resync
+            if (!containsNalType(u.data, NAL_IDR)) {
+                // Hold last good frame until resync — and time the starvation: if the IDR
+                // this stream needs was lost, these holds continue forever unless we nudge.
+                val now = SystemClock.elapsedRealtime()
+                if (heldSinceMs == 0L) heldSinceMs = now
+                lastHeldMs = now
+                return
+            }
             awaitingIdr = false
+            heldSinceMs = 0L
         }
 
         var mc = codec
@@ -194,8 +274,16 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
             if (!configure(s, cfg, w, h)) return
             mc = codec ?: return
         }
-        val idx = mc.dequeueInputBuffer(8_000)
+        // Be patient here: at ~60 fps the display sink and the stream drift in and out of
+        // phase, so the codec's output (and thus input) side briefly saturates every few
+        // seconds — a slot normally frees within a frame interval. An 8 ms patience turned
+        // each of those blips into a dropped frame, and a drop now costs "hold everything
+        // until the next IDR" (which iOS never re-sends unprompted → starvation nudge →
+        // full stream restart). Only a genuinely wedged codec keeps us waiting the full
+        // 250 ms — and the stall watchdog ladder exists for exactly that.
+        val idx = mc.dequeueInputBuffer(INPUT_WAIT_US)
         if (idx < 0) {
+            Log.w(TAG, "no input buffer in ${INPUT_WAIT_US / 1000}ms — dropping frame, holding for next IDR")
             awaitingIdr = true // dropped: everything after this is now an orphaned reference
             return
         }
@@ -203,6 +291,14 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
         buf.clear()
         buf.put(u.data)
         mc.queueInputBuffer(idx, 0, u.data.size, ptsIndex++ * 16_666L, 0)
+        val now = SystemClock.elapsedRealtime()
+        // Anchor the stall clock at the oldest frame awaiting output — but re-anchor after
+        // any quiet gap: a pipelining decoder may legitimately hold the last pre-gap frame
+        // until more input arrives, and counting that held frame against the fresh
+        // post-gap input would re-create the exact post-idle false-fire this watchdog
+        // design exists to prevent.
+        if (pendingSinceMs == 0L || now - lastInputMs > STALL_MS) pendingSinceMs = now
+        lastInputMs = now
     }
 
     private fun drain(info: MediaCodec.BufferInfo) {
@@ -210,7 +306,11 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
         while (true) {
             val idx = mc.dequeueOutputBuffer(info, 0)
             when {
-                idx >= 0 -> mc.releaseOutputBuffer(idx, true) // render to the Surface
+                idx >= 0 -> {
+                    mc.releaseOutputBuffer(idx, true) // render to the Surface
+                    pendingSinceMs = 0L // codec is producing — nothing considered stuck
+                    firstOutputSeen = true
+                }
                 idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
                     Log.i(TAG, "output format: ${mc.outputFormat}")
                 else -> break // INFO_TRY_AGAIN_LATER / no output ready
@@ -236,6 +336,8 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
             codec = c
             curW = w; curH = h
             ptsIndex = 0
+            pendingSinceMs = 0L; lastInputMs = 0L // fresh codec — nothing fed, nothing pending
+            firstOutputSeen = false
             Log.i(TAG, "MediaCodec configured ${w}x${h} (${c.name})")
             onVideoSize?.invoke(w, h)
             true
@@ -253,7 +355,16 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
         }
         codec = null
         curW = 0; curH = 0
-        awaitingIdr = false // a fresh codec has no stale reference chain to resync from
+        // A fresh codec has no reference frames: mid-GOP P-frames are undecodable to it, so
+        // hold everything until the next IDR (config units bypass the gate and reconfigure).
+        // Feeding it P-frames anyway used to re-trip the watchdog every STALL_MS — input
+        // flowing, nothing ever rendering — tearing codecs down in a loop until an IDR
+        // happened to arrive. Held frames also don't count as input, so the watchdog stays
+        // quiet while we wait.
+        awaitingIdr = true
+        pendingSinceMs = 0L; lastInputMs = 0L // nothing fed to the (gone) codec is pending
+        firstOutputSeen = false
+        heldSinceMs = 0L // starvation clock restarts at the first frame held after this reset
     }
 
     // --- H.264 SPS resolution parsing ------------------------------------------
@@ -416,6 +527,10 @@ class VideoDecoder(private val fallbackW: Int, private val fallbackH: Int) {
     companion object {
         private const val TAG = "airplay-video"
         private const val NAL_IDR = 5
+        private const val STALL_MS = 1500L // a fed frame undrained this long (input live) ⇒ rebuild
+        private const val STARTUP_STALL_MS = 4500L // pre-first-output leash (cold-start latency)
+        private const val STARVED_MS = 3000L // gate holding a live stream this long ⇒ nudge sender
+        private const val INPUT_WAIT_US = 250_000L // input-buffer patience (drops are expensive now)
         private val HIGH_PROFILES =
             intArrayOf(100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135)
     }

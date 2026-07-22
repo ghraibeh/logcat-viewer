@@ -26,6 +26,7 @@
 #include "miniaudio.h"
 
 #include "raop.h"
+#include "raop_rtp_mirror.h"
 #include "dnssd.h"
 #include "stream.h"
 #include "logger.h"
@@ -234,7 +235,16 @@ static void cb_audio_set_volume(void *cls, float v) { (void)cls; (void)v; }
 
 static void log_callback(void *cls, int level, const char *msg) {
     (void)cls;
-    if (level <= RAOP_LOG_WARNING) LOGW("%s", msg);
+    /* Map the RAOP core's levels onto Android's so DEBUG-level protocol tracing (feedback
+     * heartbeats, mirror payload types, NTP round-trips, httpd connection closes) is
+     * available in logcat without drowning the W channel. */
+    if (level <= RAOP_LOG_WARNING) {
+        LOGW("%s", msg);
+    } else if (level <= RAOP_LOG_INFO) {
+        LOGI("%s", msg);
+    } else {
+        __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, "%s", msg);
+    }
 }
 
 /* --- hw address for the mDNS deviceid --------------------------------------- */
@@ -294,7 +304,12 @@ Java_com_mobilelabkit_airplay_NativeReceiver_nativeStart(
     g_raop = raop_init(10, &cbs);
     if (!g_raop) { LOGE("raop_init failed"); goto done; }
     raop_set_log_callback(g_raop, log_callback, NULL);
-    raop_set_log_level(g_raop, RAOP_LOG_WARNING);
+    /* INFO keeps the connection-lifecycle forensics ("Connection closed for socket N",
+     * client connect/disconnect) that W-only hid, without DEBUG's per-packet firehose.
+     * For protocol-level tracing (per-second feedback/heartbeats, payload types, NTP
+     * round-trips) flip this to RAOP_LOG_DEBUG — log_callback maps levels onto Android's
+     * W/I/D channels. */
+    raop_set_log_level(g_raop, RAOP_LOG_INFO);
 
     unsigned short port = 0;
     if (raop_start(g_raop, &port) < 0) { LOGE("raop_start failed"); raop_destroy(g_raop); g_raop = NULL; goto done; }
@@ -323,6 +338,16 @@ JNIEXPORT void JNICALL
 Java_com_mobilelabkit_airplay_NativeReceiver_nativeSetMuted(JNIEnv *env, jobject thiz, jboolean muted) {
     (void)env; (void)thiz;
     s_mute = muted ? 1 : 0;
+}
+
+/* Decoder-requested video stream restart: drop the mirror TCP connection so the client
+ * re-establishes it (a stream (re)start always leads with SPS/PPS + IDR). Used as the
+ * escape hatch when the decoder is starved for a keyframe — the protocol has no way to
+ * ask the sender for one. */
+JNIEXPORT void JNICALL
+Java_com_mobilelabkit_airplay_NativeReceiver_nativeNudgeVideo(JNIEnv *env, jobject thiz) {
+    (void)env; (void)thiz;
+    raop_rtp_mirror_request_nudge();
 }
 
 JNIEXPORT void JNICALL

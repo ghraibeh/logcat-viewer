@@ -149,6 +149,20 @@ raop_rtp_init_mirror_aes(raop_rtp_mirror_t *raop_rtp_mirror, uint64_t streamConn
 // values that reinterpret as multi-gigabyte mallocs — which previously went straight into
 // malloc() with no validation at all.
 #define MIRROR_MAX_PAYLOAD (16 * 1024 * 1024)
+// AndroidLab edit: consecutive undecodable video frames tolerated before assuming the
+// AES-CTR keystream is desynced (unrecoverable without a fresh SETUP) and dropping the
+// connection. Isolated torn frames reset the streak; at mirror rates this trips in ~1-2 s.
+#define MIRROR_MALFORMED_STREAK_MAX 30
+
+// AndroidLab addition: set by raop_rtp_mirror_request_nudge() (any thread), consumed by
+// the mirror thread — drop the current stream connection so the client re-establishes it
+// (a stream (re)start always leads with SPS/PPS + IDR). Process-wide like the receiver
+// itself; a plain volatile int is enough for this one-way flag handshake.
+static volatile int mirror_nudge_requested = 0;
+
+void raop_rtp_mirror_request_nudge(void) {
+    mirror_nudge_requested = 1;
+}
 /**
  * Mirror
  */
@@ -163,6 +177,14 @@ raop_rtp_mirror_thread(void *arg)
     memset(packet, 0 , 128);
     unsigned char* payload = NULL;
     unsigned int readstart = 0;
+    // AndroidLab edit: consecutive frames failing the NAL-length parse. A long run means
+    // the AES-CTR keystream is desynced from the byte stream (mirror_buffer's counter
+    // survives a connection recycle and can't be re-keyed without a fresh SETUP) — that
+    // session would stay TCP-alive but 100%-undecodable forever, so drop the connection
+    // and let the client re-establish cleanly.
+    int malformed_streak = 0;
+
+    mirror_nudge_requested = 0; // a stale nudge must not insta-kill this new session's stream
 
 #ifdef DUMP_H264
     // C decrypted
@@ -183,6 +205,40 @@ raop_rtp_mirror_thread(void *arg)
         }
         MUTEX_UNLOCK(raop_rtp_mirror->run_mutex);
 
+        // AndroidLab edit: cache the shared mirror_data_sock field ONCE per iteration instead
+        // of reading it twice (FD_SET below, then FD_ISSET/accept further down). raop_rtp_
+        // mirror_stop() closes this socket and sets it to -1 WITHOUT holding run_mutex, from a
+        // different thread — a second unsynchronized read here could see it flip from a valid
+        // fd to -1 between the two uses within the same iteration. Android's hardened libc
+        // treats FD_ISSET(-1, ...) as a fatal FORTIFY abort (SIGABRT), killing the whole
+        // process — confirmed via tombstone as the actual cause of sessions going silently
+        // stuck/frozen during reconnect/restart-heavy testing (PiP transitions, resolution
+        // changes, rapid reconnects), not a decoder issue.
+        int mirror_sock = raop_rtp_mirror->mirror_data_sock;
+        if (stream_fd == -1 && mirror_sock == -1) {
+            // Socket already torn down by a concurrent stop() — nothing left to select on.
+            break;
+        }
+
+        // AndroidLab addition: decoder-requested stream restart (IDR starvation escape
+        // hatch). Drop the video connection and go back to accepting — the client
+        // re-establishes and always leads the new stream with SPS/PPS + an IDR.
+        if (mirror_nudge_requested) {
+            mirror_nudge_requested = 0;
+            if (stream_fd != -1) {
+                logger_log(raop_rtp_mirror->logger, LOGGER_INFO,
+                           "raop_rtp_mirror dropping stream on nudge (decoder starved for a keyframe)");
+                closesocket(stream_fd);
+                stream_fd = -1;
+                free(payload);
+                payload = NULL;
+                readstart = 0;
+                memset(packet, 0, 128);
+                malformed_streak = 0;
+                continue;
+            }
+        }
+
         /* Set timeout value to 5ms */
         tv.tv_sec = 0;
         tv.tv_usec = 5000;
@@ -190,8 +246,8 @@ raop_rtp_mirror_thread(void *arg)
         /* Get the correct nfds value and set rfds */
         FD_ZERO(&rfds);
         if (stream_fd == -1) {
-            FD_SET(raop_rtp_mirror->mirror_data_sock, &rfds);
-            nfds = raop_rtp_mirror->mirror_data_sock+1;
+            FD_SET(mirror_sock, &rfds);
+            nfds = mirror_sock+1;
         } else {
             FD_SET(stream_fd, &rfds);
             nfds = stream_fd+1;
@@ -205,16 +261,20 @@ raop_rtp_mirror_thread(void *arg)
             break;
         }
 
-        if (stream_fd == -1 && FD_ISSET(raop_rtp_mirror->mirror_data_sock, &rfds)) {
+        if (stream_fd == -1 && FD_ISSET(mirror_sock, &rfds)) {
             struct sockaddr_storage saddr;
             socklen_t saddrlen;
 
             logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG, "raop_rtp_mirror accepting client");
             saddrlen = sizeof(saddr);
-            stream_fd = accept(raop_rtp_mirror->mirror_data_sock, (struct sockaddr *)&saddr, &saddrlen);
+            stream_fd = accept(mirror_sock, (struct sockaddr *)&saddr, &saddrlen);
             if (stream_fd == -1) {
                 logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "raop_rtp_mirror error in accept %d %s", errno, strerror(errno));
-                break;
+                // AndroidLab edit: keep listening instead of exiting the thread — a client
+                // that RSTs between select() and accept() (ECONNABORTED/EINTR) is exactly
+                // the reconnect-churn environment where the acceptor must stay alive. A
+                // concurrent stop() still terminates via the running/mirror_sock checks.
+                continue;
             }
 
             // We're calling recv for a certain amount of data, so we need a timeout
@@ -243,6 +303,7 @@ raop_rtp_mirror_thread(void *arg)
                 logger_log(raop_rtp_mirror->logger, LOGGER_WARNING, "raop_rtp_mirror could not set stream socket keepalive probes %d %s", errno, strerror(errno));
             }
             readstart = 0;
+            malformed_streak = 0;
         }
 
         if (stream_fd != -1 && FD_ISSET(stream_fd, &rfds)) {
@@ -256,26 +317,54 @@ raop_rtp_mirror_thread(void *arg)
 
             if (payload == NULL && ret == 0) {
                 logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "raop_rtp_mirror tcp socket closed");
-                FD_CLR(stream_fd, &rfds);
+                closesocket(stream_fd); // AndroidLab edit: was leaked (only forgotten via = -1)
                 stream_fd = -1;
+                readstart = 0;
+                memset(packet, 0, 128);
                 continue;
             } else if (payload == NULL && ret == -1) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // Timeouts can happen even if the connection is fine
-                logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "raop_rtp_mirror error in header recv: %d", errno);
-                break;
+                logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "raop_rtp_mirror error in header recv: %d — dropping connection", errno);
+                // AndroidLab edit: drop THIS connection and keep accepting instead of
+                // exiting the thread. iOS reconnects/re-SETUPs after a hiccup; a dead
+                // thread means no video ever again while audio keeps playing.
+                closesocket(stream_fd);
+                stream_fd = -1;
+                readstart = 0;
+                memset(packet, 0, 128);
+                continue;
             }
 
             int payload_size = byteutils_get_int(packet, 0);
             unsigned short payload_type = byteutils_get_short(packet, 4) & 0xff;
             unsigned short payload_option = byteutils_get_short(packet, 6);
+            int drop_stream = 0; // set by handlers below; connection dropped after cleanup
 
             // AndroidLab edit: the framing gives no way to relocate the next real header
             // once a length prefix is bogus, so the only safe move is to drop this
-            // connection and let the client reconnect cleanly.
-            if (payload_size <= 0 || payload_size > MIRROR_MAX_PAYLOAD) {
+            // connection and let the client reconnect cleanly (keep accepting — don't kill
+            // the thread). NOTE payload_size == 0 is NOT bogus: zero-length messages
+            // (keepalives while the mirrored screen is static) are protocol-legal — an
+            // earlier version of this check treated 0 as bogus and permanently killed the
+            // video path the moment an idle iPhone sent one, with audio playing on.
+            if (payload_size < 0 || payload_size > MIRROR_MAX_PAYLOAD) {
                 logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
-                           "raop_rtp_mirror bogus payload_size %d — resetting stream", payload_size);
-                break;
+                           "raop_rtp_mirror bogus payload_size %d — dropping connection", payload_size);
+                free(payload);
+                payload = NULL;
+                closesocket(stream_fd);
+                stream_fd = -1;
+                readstart = 0;
+                memset(packet, 0, 128);
+                continue;
+            }
+
+            if (payload_size == 0) {
+                // Nothing to read for this message (keepalive/no-payload) — it exists to
+                // keep the TCP stream alive, not to carry data. Rearm for the next header.
+                readstart = 0;
+                memset(packet, 0, 128);
+                continue;
             }
 
             if (payload == NULL) {
@@ -291,12 +380,24 @@ raop_rtp_mirror_thread(void *arg)
             }
 
             if (ret == 0) {
-                logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "raop_rtp_mirror tcp socket closed");
-                break;
+                logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "raop_rtp_mirror tcp socket closed mid-payload — dropping connection");
+                free(payload);
+                payload = NULL;
+                closesocket(stream_fd);
+                stream_fd = -1;
+                readstart = 0;
+                memset(packet, 0, 128);
+                continue;
             } else if (ret == -1) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // Timeouts can happen even if the connection is fine
-                logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "raop_rtp_mirror error in recv: %d", errno);
-                break;
+                logger_log(raop_rtp_mirror->logger, LOGGER_ERR, "raop_rtp_mirror error in recv: %d — dropping connection", errno);
+                free(payload);
+                payload = NULL;
+                closesocket(stream_fd);
+                stream_fd = -1;
+                readstart = 0;
+                memset(packet, 0, 128);
+                continue;
             }
 
             if (payload_type == 0) {
@@ -367,6 +468,7 @@ raop_rtp_mirror_thread(void *arg)
 #endif
 
                 if (!nalu_malformed) {
+                    malformed_streak = 0;
                     h264_decode_struct h264_data;
                     h264_data.data_len = payload_size;
                     h264_data.data = payload_decrypted;
@@ -374,6 +476,11 @@ raop_rtp_mirror_thread(void *arg)
                     h264_data.pts = ntp_timestamp;
 
                     raop_rtp_mirror->callbacks.video_process(raop_rtp_mirror->callbacks.cls, raop_rtp_mirror->ntp, &h264_data);
+                } else if (++malformed_streak >= MIRROR_MALFORMED_STREAK_MAX) {
+                    logger_log(raop_rtp_mirror->logger, LOGGER_ERR,
+                               "raop_rtp_mirror %d consecutive undecodable frames (cipher desync?) — dropping connection",
+                               malformed_streak);
+                    drop_stream = 1;
                 }
                 free(payload_decrypted);
 
@@ -452,12 +559,24 @@ raop_rtp_mirror_thread(void *arg)
                 }
                 free(h264.picture_parameter_set);
                 free(h264.sequence_parameter_set);
+            } else {
+                // AndroidLab edit: types beyond 0/1 are read + discarded (as upstream does),
+                // but log them — type 2 is the spec'd once-per-second zero-payload heartbeat,
+                // type 5 a once-per-second "streaming report" plist; their cadence (or its
+                // absence) is the liveness forensic trail for idle-session deaths.
+                logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG,
+                           "raop_rtp_mirror payload type %u option 0x%x size %d (ignored)",
+                           payload_type, payload_option, payload_size);
             }
 
             free(payload);
             payload = NULL;
             memset(packet, 0, 128);
             readstart = 0;
+            if (drop_stream) {
+                closesocket(stream_fd);
+                stream_fd = -1;
+            }
         }
     }
 

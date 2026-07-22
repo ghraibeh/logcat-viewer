@@ -45,6 +45,14 @@ struct raop_s {
     dnssd_t *dnssd;
 
     unsigned short port;
+
+    /* AndroidLab addition: the connection that owns the CURRENT streaming session (set at
+     * its key/timing SETUP, cleared in conn_destroy). Single-sender policy: a new sender's
+     * SETUP stops the previous owner's streams — without this, two senders (e.g. an iPhone
+     * and a Mac) interleave two mirror streams into the one decoder, which shows up as
+     * constant resolution flapping and a frozen/garbled picture. Only ever touched from the
+     * single httpd request thread, so no locking needed. */
+    void *active_session_conn;
 };
 
 struct raop_conn_s {
@@ -223,6 +231,11 @@ conn_destroy(void *ptr) {
     raop_conn_t *conn = ptr;
 
     logger_log(conn->raop->logger, LOGGER_INFO, "Destroying connection");
+
+    /* AndroidLab addition: release single-sender ownership (see raop_handler_setup). */
+    if (conn->raop->active_session_conn == conn) {
+        conn->raop->active_session_conn = NULL;
+    }
 
     if (conn->raop->callbacks.conn_destroy) {
         conn->raop->callbacks.conn_destroy(conn->raop->callbacks.cls);

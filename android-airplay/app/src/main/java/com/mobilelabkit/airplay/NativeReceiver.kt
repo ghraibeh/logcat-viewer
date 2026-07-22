@@ -20,6 +20,7 @@ object NativeReceiver {
         name: String, width: Int, height: Int, hwHex: String, listener: Listener
     ): Int
     private external fun nativeSetMuted(muted: Boolean)
+    private external fun nativeNudgeVideo()
     private external fun nativeStop()
 
     @Volatile private var running = false
@@ -43,5 +44,11 @@ object NativeReceiver {
 
     fun setMuted(muted: Boolean) {
         if (running) nativeSetMuted(muted)
+    }
+
+    /** Drop + let the client re-establish the mirror video connection (fresh SPS/PPS+IDR).
+     *  The decoder's keyframe-starvation escape hatch — safe to call from any thread. */
+    fun nudgeVideo() {
+        if (running) nativeNudgeVideo()
     }
 }
